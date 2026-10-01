@@ -49,3 +49,28 @@ Both scratch apps were stopped through the CLI; their locks were absent and list
 One independent whole-branch review reproduced three interleavings, all corrected with failing-then-passing regressions: file refresh losing an unsent passage selection, read-through cache refresh suppressing updates to other viewers, and a delayed title save overwriting newer typing. Final gates passed after the fixes; no review finding remains deferred. Reviewer scratch apps and browsers were cleaned up.
 
 Chrome automation initially reported `ERR_BLOCKED_BY_CLIENT`; manually navigating to the same local address succeeded, and subsequent interactions worked. The product's macOS opener also succeeded. No browser security settings changed. Redline was inspected only as an untrusted reference; no source was copied or runtime dependency added.
+
+
+## Streaming follow-up — 2026-10-01
+
+The streaming implementation was exercised in the same original Codex and Claude conversations, using the versions above. Both apps automatically saved exactly one answer after native message completion; no finalization tool call or replacement model session was needed.
+
+| Native agent | Distinct visible partial lengths | First visible draft before completion | Saved reply |
+| --- | --- | --- | --- |
+| Codex | 12 | 4.436 seconds | 667 characters, one answer |
+| Claude | 16 | 3.884 seconds | 3,865 characters, one answer |
+
+A headless browser sampled both the live app snapshot and rendered thread text. Codex observed native app-server message deltas. Claude received its question through the existing Monitor and forwarded native MessageDisplay batches through the shared skill hook, loaded using a local symlink. No settings hook or synthetic responder participated in the successful Claude run. Short Claude replies also completed successfully but produced no observable partial text, so they were not counted as streaming acceptance.
+
+Native checks exposed two details covered by regressions: Codex appends a trailing newline after the closing marker, and Claude hook batches can arrive out of order. Claude's hook command receives its skill path as `CLAUDE_PLUGIN_ROOT`, not `CLAUDE_SKILL_DIR`. Claude's reply must be its final assistant response; the tested message-before-finalization-tool flow did not deliver that message.
+
+An independent review reproduced a superseded Codex observer startup orphaning the next stream's socket. The fix retains the stop callback locally until stream identity is validated; its regression proves app shutdown closes the remaining socket. After the fix, `pnpm test` passed 31 tests, `pnpm typecheck` exited 0, `pnpm exec playwright test` passed 6 tests, and `git diff --check` was clean. Browser regressions cover draft visibility after reload, literal HTML text, focus preservation, and resolution while streaming.
+
+The native adapters remain tied to the tested client capabilities. Claude sends line batches, not word-sized updates. Missing chunks, a disconnected observer, or an unfinished boundary cannot become a completed reply; complete-message replies remain the recovery path. Global agent settings were unchanged. The two local demo apps and the Claude development skill symlink were left available for manual trial; stopping Sidecar ends its watcher without stopping the conversation.
+
+
+The final CLI workflow combines claiming and stream setup in `request --stream`. Additional tests prove that the full question/context survives stream setup failure, and that already-claimed or completed requests do not start another stream. Final local gates passed 33 tests, 6 browser checks, typecheck, and diff checks.
+
+The Claude hook now invokes Node directly. A five-sample startup-only benchmark after warm-up measured median invocation time of 383 ms through pnpm and 178 ms through direct Node, using an absent app; these are not end-to-end reply latencies. The exact optimized hook command passed isolated partial-delivery and automatic-completion checks through both the native skill symlink and a symlink containing spaces, from another working directory.
+
+During the extended Claude trial, automatic approval rejected one Monitor renewal after its 30-minute lease expired. Explicit user approval allowed the same watcher command to reconnect to the same running app. Unattended renewal therefore remains dependent on Claude's permission decisions, even when the shared skill asks it to re-arm.

@@ -88,6 +88,10 @@ export async function forwardHook(agent: string | undefined, payload: unknown): 
   if (!isObject(payload)) throw new Error('Expected native hook JSON');
   const owner = { agent, sessionId: payload.session_id };
   if (!isOwner(owner)) throw new Error('Expected hook agent and native session UUID');
+  if (agent === 'claude' && payload.hook_event_name === 'MessageDisplay') {
+    await agentCall(ownerKey(owner), '/agent/stream-events', { ownerKey: ownerKey(owner), messageId: payload.message_id, turnId: payload.turn_id, index: payload.index, delta: payload.delta, final: payload.final }).catch(() => {});
+    return;
+  }
   const event = payload.hook_event_name === 'PreCompact' ? 'compaction-started' : payload.hook_event_name === 'PostCompact' ? 'compaction-completed' : agent === 'codex' && payload.hook_event_name === 'Interrupt' ? 'interrupted' : undefined;
   if (!event) return;
   const key = ownerKey(owner);
@@ -98,7 +102,7 @@ export async function forwardHook(agent: string | undefined, payload: unknown): 
   });
 }
 async function main() {
-  const { values, positionals } = parseArgs({ allowPositionals: true, options: { agent: { type: 'string' }, session: { type: 'string' }, owner: { type: 'string' }, file: { type: 'string' }, title: { type: 'string' }, document: { type: 'string' }, thread: { type: 'string' }, stdin: { type: 'boolean' }, resume: { type: 'boolean' }, error: { type: 'boolean' }, 'no-browser': { type: 'boolean' } } });
+  const { values, positionals } = parseArgs({ allowPositionals: true, options: { agent: { type: 'string' }, session: { type: 'string' }, owner: { type: 'string' }, file: { type: 'string' }, title: { type: 'string' }, document: { type: 'string' }, thread: { type: 'string' }, stdin: { type: 'boolean' }, resume: { type: 'boolean' }, error: { type: 'boolean' }, 'no-browser': { type: 'boolean' }, stream: { type: 'boolean' } } });
   const [command, requestId] = positionals;
   const output = (value: unknown) => process.stdout.write(JSON.stringify(value) + '\n');
   if (command === 'hook') { await forwardHook(values.agent, JSON.parse(await stdin())); return; }
@@ -134,11 +138,21 @@ async function main() {
     process.once('SIGINT', () => abort.abort()); process.once('SIGTERM', () => abort.abort());
     await watchClaude(key, abort.signal); return;
   }
-  if (command === 'request' && requestId) { output(await agentCall(key, `/agent/requests/${encodeURIComponent(requestId)}/claim`, { resume: Boolean(values.resume) })); return; }
-  if (command === 'reply' && requestId) {
-    output(await agentCall(key, '/agent/replies', { requestId, documentId: values.document, threadId: values.thread, text: await stdin(), isError: Boolean(values.error) })); return;
+  if (command === 'request' && requestId) {
+    const result = await agentCall(key, `/agent/requests/${encodeURIComponent(requestId)}/claim`, { resume: Boolean(values.resume) });
+    if (values.stream && result.claimStatus === 'claimed') {
+      const { documentId, threadId } = result.request;
+      try { result.stream = await agentCall(key, '/agent/streams', { requestId, documentId, threadId }); }
+      // The claim succeeded; retain its context so the agent can send a complete reply.
+      catch (error) { result.stream = { error: error instanceof Error ? error.message : 'Streaming unavailable' }; }
+    }
+    output(result); return;
   }
-  throw new Error('Commands: open, status, request, reply, watch, stop, hook');
+  if (command === 'stream' && requestId) { output(await agentCall(key, '/agent/streams', { requestId, documentId: values.document, threadId: values.thread })); return; }
+  if (command === 'reply' && requestId) {
+    output(await agentCall(key, '/agent/replies', { requestId, documentId: values.document, threadId: values.thread, ...(values.stream ? { stream: true } : { text: await stdin() }), isError: Boolean(values.error) })); return;
+  }
+  throw new Error('Commands: open, status, request, stream, reply, watch, stop, hook');
 }
 if (process.argv[1] && resolve(process.argv[1]) === cliPath) {
   main().catch(error => { process.stderr.write((error instanceof Error ? error.message : String(error)) + '\n'); process.exitCode = 1; });

@@ -85,13 +85,14 @@ function initialize() {
   function createThread(thread) {
     const fieldset = element('fieldset'), legend = element('legend', thread.scope === 'passage' ? 'Passage thread' : 'Document thread');
     const quote = element('blockquote'), anchorStatus = element('p'), messages = element('div'), pending = element('p');
+    const draft = element('p'), draftText = element('span'); draft.append(element('strong', 'Agent (streaming): '), draftText); draft.hidden = true;
     const resolve = element('button'); resolve.type = 'button';
     resolve.onclick = () => run(async () => { await api(`/api/threads/${thread.id}/resolution`, { isResolved: resolve.textContent === 'Resolve' }); await refresh(); });
     const form = element('form'), label = element('label', 'Follow-up'), input = element('textarea'), button = element('button', 'Send follow-up');
     input.id = `follow-up-${thread.id}`; input.required = true; label.htmlFor = input.id;
     form.append(label, element('br'), input, element('br'), button); bindQuestion(form, input, button, thread.id);
-    fieldset.append(legend, quote, anchorStatus, messages, pending, resolve, form); threads.append(fieldset);
-    return { fieldset, quote, anchorStatus, messages, pending, resolve, messageIds: '' };
+    fieldset.append(legend, quote, anchorStatus, messages, draft, pending, resolve, form); threads.append(fieldset);
+    return { fieldset, quote, anchorStatus, messages, draft, draftText, pending, resolve, messageIds: '' };
   }
   async function refresh() {
     if (refreshing) { refreshAgain = true; return; }
@@ -134,8 +135,11 @@ function initialize() {
             }
             view.messageIds = ids;
           }
+          const stream = state.stream?.threadId === thread.id ? state.stream : null;
+          view.draft.hidden = !stream?.text;
+          view.draftText.textContent = stream?.text ?? '';
           const pending = /** @type {RequestRecord[]} */ (Object.values(state.requests)).filter(request => request.threadId === thread.id && request.status !== 'completed');
-          view.pending.textContent = pending.map(request => ({ queued: 'Queued; waiting for agent.', claimed: 'Agent is responding.', uncertain: 'Interrupted request; agent must check before retrying.', failed: 'Request failed.', completed: '' })[request.status]).join(' ');
+          view.pending.textContent = pending.map(request => ({ queued: 'Queued; waiting for agent.', claimed: 'Agent is responding.', uncertain: 'Interrupted request; agent must check before retrying.', failed: 'Request failed.', completed: '' })[request.status]).join(' ') + (stream?.error ? ` ${stream.error}` : '');
         }
       } while (refreshAgain);
     } finally { refreshing = false; }
