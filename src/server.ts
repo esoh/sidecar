@@ -1,3 +1,5 @@
+import { build } from 'esbuild';
+import { fileURLToPath } from 'node:url';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile, writeFile, realpath } from 'node:fs/promises';
@@ -160,7 +162,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   async function handle(request: IncomingMessage, response: ServerResponse) {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
-    response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
+    response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
     try {
       if (request.headers.host !== new URL(url).host) throw new DomainError('Invalid host', 403);
       if (request.headers.origin !== undefined && request.headers.origin !== url) throw new DomainError('Foreign origin', 403);
@@ -188,7 +190,14 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       }
       if (method === 'GET' && path === '/app.js') {
         response.setHeader('Content-Type', 'text/javascript; charset=utf-8');
-        response.end(await readFile(new URL('../web/app.js', import.meta.url), 'utf8'));
+        // Bundle on load so the CLI remains the only process needed for the viewer.
+        const bundle = await build({ entryPoints: [fileURLToPath(new URL('../web/app.tsx', import.meta.url))], bundle: true, write: false, minify: true, format: 'esm', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' } });
+        response.end(bundle.outputFiles[0].contents);
+        return;
+      }
+      if (method === 'GET' && path === '/app.css') {
+        response.setHeader('Content-Type', 'text/css; charset=utf-8');
+        response.end(await readFile(new URL('../web/app.css', import.meta.url), 'utf8'));
         return;
       }
       if (method === 'GET' && path === '/api/state') { json(response, snapshot()); return; }

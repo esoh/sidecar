@@ -15,7 +15,6 @@
   },
   "include": [
     "src/**/*.ts",
-    "web/**/*.js",
     "test/**/*.ts",
     "playwright.config.ts"
   ]
