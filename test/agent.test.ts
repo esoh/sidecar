@@ -135,3 +135,49 @@ test('unavailable native queue reports a connection error while preserving the r
   assert.match(state.connectionError, /Codex notification failed/);
   assert.equal(Object.values<any>(state.requests)[0].status, 'queued');
 });
+
+
+for (const agent of ['claude', 'codex'] as const) test(`request --stream returns ${agent} context and preserves claim safety`, async t => {
+  const root = await mkdtemp(join(tmpdir(), 's'));
+  const owner = { agent, sessionId: randomUUID() }, key = ownerKey(owner);
+  const { startServer } = await import('../src/server.ts');
+  const previousHome = process.env.CODEX_HOME, previousPath = process.env.PATH;
+  await writeFile(join(root, 'codex'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+  process.env.PATH = `${root}:${previousPath}`;
+  process.env.CODEX_HOME = root; // No native daemon: exercise Codex stream setup failure.
+  const directory = join(root, key);
+  const server = await startServer({ owner, directory });
+  t.after(async () => {
+    if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+    process.env.PATH = previousPath;
+    await server.close(); await rm(root, { recursive: true, force: true });
+  });
+  await writeFile(join(directory, 'runtime.json'), JSON.stringify({ url: server.url, instanceId: server.instanceId, ownerKey: key }));
+  const token = await readFile(join(directory, 'agent-token'), 'utf8');
+  const file = join(root, 'a.md'); await writeFile(file, '# Context\nBody to preserve.');
+  const post = (path: string, body: unknown) => fetch(server.url + path, { method: 'POST', headers: { 'X-Sidecar-Token': token, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const doc = await (await post('/agent/documents', { path: file })).json();
+  const cookie = (await fetch(server.url)).headers.get('set-cookie')!.split(';')[0]!;
+  const request = await (await fetch(server.url + '/api/questions', { method: 'POST', headers: { Cookie: cookie, Origin: server.url, 'Content-Type': 'application/json' }, body: JSON.stringify({ documentId: doc.id, text: 'Explain the context', clientMessageId: 'combined' }) })).json();
+  const run = async () => JSON.parse((await exec(process.execPath, ['--import', tsx, cliPath, 'request', request.id, '--owner', key, '--stream'], { env: { ...process.env, SIDECAR_STATE_DIR: root } })).stdout);
+  const claimed = await run();
+  assert.equal(claimed.claimStatus, 'claimed');
+  assert.equal(claimed.request.text, 'Explain the context');
+  assert.equal(claimed.document.markdown, '# Context\nBody to preserve.');
+  assert.equal(claimed.thread.id, request.threadId);
+  assert.ok(claimed.stream, 'one command must include the streaming result');
+  if (agent === 'claude') {
+    assert.equal(typeof claimed.stream.prefix, 'string');
+    assert.equal(typeof claimed.stream.suffix, 'string');
+  } else assert.equal(typeof claimed.stream.error, 'string');
+  const duplicate = await run();
+  assert.equal(duplicate.claimStatus, 'already-claimed');
+  assert.equal(duplicate.stream, undefined);
+  const route = { requestId: request.id, documentId: doc.id, threadId: request.threadId };
+  if (agent === 'claude') await post('/agent/stream-events', { ownerKey: key, messageId: 'answer', turnId: 'turn', index: 0, delta: claimed.stream.prefix + 'Answer' + claimed.stream.suffix, final: true });
+  else await post('/agent/replies', { ...route, text: 'Answer' });
+  const completed = await run();
+  assert.equal(completed.claimStatus, 'completed');
+  assert.equal(completed.stream, undefined);
+  assert.equal(completed.thread.messages.length, 2);
+});

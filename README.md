@@ -33,6 +33,14 @@ Only one process writes an owner's state. Dead owner locks are recovered without
 
 Styling, standalone HTML input, independent model sessions, and compaction cancellation are outside this first version. The dated [acceptance record](docs/acceptance.md) covers both native agents and the remaining limits.
 
+## Streaming replies
+
+Both original agents can stream reply text while keeping their terminal session. Codex receives native text chunks from the existing app-server Unix socket (verified with CLI 0.159.3). Claude uses the skill's `MessageDisplay` hook (verified with 2.1.286), which supplies completed lines in batches; short replies can arrive all at once. Invoke the Claude skill through its native Skill tool; merely reading the Markdown does not register hooks. The hook does nothing when Sidecar is stopped and does not modify terminal text or global settings.
+
+The agent runs `request ID --owner KEY --stream` once to claim the question, fetch its context, and prepare its reply stream. It then emits an assistant message between the returned `stream.prefix` and `stream.suffix` as its final response (after any document edits). If stream setup fails, the command still returns the claimed question and a `stream.error` for the complete-reply fallback; duplicate or completed claims do not start another stream. The separate `stream` command remains available for a request claimed without `--stream`. Native message completion with the closing marker automatically saves the reply. Only that marked message becomes a draft in that document thread. The markers are visible in the terminal but stripped from the viewer. Unmarked commentary, reasoning, and tool output are excluded.
+
+The completed message saves the reply exactly once; `reply ... --stream` is an optional idempotent completion check. Missing chunks, incomplete markers, or a disconnected observer prevent streaming finalization; the existing plain-text stdin reply is the recovery path. A browser reload recovers the current draft. App restart discards transient drafts and leaves claimed requests uncertain for reconciliation. No new model session is launched. Codex streaming requires the original conversation to be loaded in its local daemon; unsupported configurations retain complete-message replies.
+
 ## Optional lifecycle hooks
 
 The [Codex](hooks/codex.example.json) and [Claude](hooks/claude.example.json) examples forward native PreCompact/PostCompact events to an already-running app. Replace `/absolute/sidecar`; preserve `SIDECAR_STATE_DIR` if you use a custom directory. Merge the examples into the project's `.codex/hooks.json` or Claude's `.claude/settings.local.json` yourself; Sidecar does not change settings. Native hook trust and permissions still apply.

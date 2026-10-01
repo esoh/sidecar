@@ -157,3 +157,35 @@ test('a delayed title save preserves newer unsaved typing', async ({ page }) => 
     await expect(page).toHaveTitle('Second unsaved title');
   } finally { release(); }
 });
+
+
+test('partial replies update live without losing a follow-up draft or rendering HTML', async ({ page }) => {
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByLabel('Question', { exact: true }).fill('Stream the answer');
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  await expect(page.getByLabel('Follow-up')).toBeVisible();
+  const request = await lastRequest();
+  await f.agent(`/agent/requests/${request.id}/claim`, {});
+  const route = { requestId: request.id, documentId: doc.id, threadId: request.threadId };
+  const markers = await (await f.agent('/agent/streams', route)).json();
+  const emit = (index: number, delta: string, final = false) => f.agent('/agent/stream-events', { ownerKey: `claude-${f.owner.sessionId}`, messageId: 'message', turnId: 'turn', index, delta, final });
+  await page.getByLabel('Follow-up').fill('Keep this draft');
+  await emit(0, markers.prefix + 'First <img src=x onerror=alert(1)>');
+  await expect(page.getByText('First <img src=x onerror=alert(1)>', { exact: true })).toBeVisible();
+  await expect(page.locator('#threads img')).toHaveCount(0);
+  expect((await state()).requests[request.id].status).toBe('claimed');
+  await page.getByRole('button', { name: 'Resolve', exact: true }).click();
+  await page.reload();
+  await expect(page.getByText('First <img src=x onerror=alert(1)>', { exact: true })).toBeVisible();
+  await page.getByLabel('Follow-up').fill('Keep this draft');
+  await page.getByLabel('Follow-up').focus();
+  await emit(1, ' second.' + markers.suffix, true);
+  await expect(page.getByText('First <img src=x onerror=alert(1)> second.', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Follow-up')).toBeFocused();
+  await expect(page.getByLabel('Follow-up')).toHaveValue('Keep this draft');
+  await f.agent('/agent/replies', { ...route, stream: true });
+  await expect(page.getByText('First <img src=x onerror=alert(1)> second.', { exact: true })).toHaveCount(1);
+  await expect(page.getByText('Agent is responding.')).toHaveCount(0);
+  expect((await state()).threads[request.threadId].isResolved).toBe(true);
+});

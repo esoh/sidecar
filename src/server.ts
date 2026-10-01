@@ -3,6 +3,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFile, writeFile, realpath } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { notifyCodex } from './agent.ts';
+import { observeCodex } from './codex-stream.ts';
+import { ReplyStream, isStreamEvent } from './stream.ts';
 import { readDocument } from './documents.ts';
 import { claim, DomainError, get, isObject, isQuote, openStore, ownerKey, registerDocument, reply, resolveThread, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput } from './store.ts';
 
@@ -72,6 +74,27 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   let dispatchWork: Promise<void> | undefined;
   let connectionError: string | null = null;
   let compacting = false;
+  let stream: ReplyStream | undefined;
+  let stopObserver: (() => void) | undefined;
+  let streamTimer: NodeJS.Timeout | undefined;
+  let finalizing: Promise<void> | undefined;
+  function streamChanged() { if (!closed && !streamTimer) streamTimer = setTimeout(() => { streamTimer = undefined; changed(); }, 50); }
+  async function acceptStream(event: import('./stream.ts').StreamEvent) {
+    const active = stream;
+    if (!active || closed) return;
+    active.accept(event);
+    streamChanged();
+    if (active.done && !finalizing) {
+      finalizing = (async () => {
+        await store.update(state => reply(state, { ...active.route, text: active.text }));
+        if (stream === active) { stream = undefined; stopObserver?.(); stopObserver = undefined; }
+        changed();
+      })();
+      try { await finalizing; }
+      catch { active.error = 'Could not save the streamed reply. Send a complete reply to recover.'; changed(); }
+      finally { finalizing = undefined; }
+    }
+  }
   let lastLifecycle: { event: string; turnId?: string } | null = null;
   let finish!: () => void;
   const done = new Promise<void>(resolveDone => { finish = resolveDone; });
@@ -122,7 +145,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   }
   function snapshot() {
     const state = store.read();
-    return { ...state, lastLifecycle, activity: compacting ? 'compacting' : Object.values(state.requests).some(r => r.status === 'claimed') ? 'responding' : 'unknown', connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError, documents: Object.fromEntries(Object.values(state.documents).map(document => {
+    return { ...state, stream: stream?.snapshot() ?? null, lastLifecycle, activity: compacting ? 'compacting' : Object.values(state.requests).some(r => r.status === 'claimed') ? 'responding' : 'unknown', connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError, documents: Object.fromEntries(Object.values(state.documents).map(document => {
       const cached = cache.get(document.id);
       return [document.id, { ...document, title: title(document), version: cached && 'data' in cached ? cached.data.version : null, error: cached && 'error' in cached ? cached.error : null }];
     })) };
@@ -226,9 +249,37 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         const document = await documentContext(get(state.documents, result.request.documentId));
         changed(); json(response, { ...result, document, thread: get(state.threads, result.request.threadId) }); return;
       }
+      if (method === 'POST' && path === '/agent/streams') {
+        const route = { requestId: text(body, 'requestId'), documentId: text(body, 'documentId'), threadId: text(body, 'threadId') };
+        const current = get(store.read().requests, route.requestId);
+        if (current.status !== 'claimed' || current.documentId !== route.documentId || current.threadId !== route.threadId) throw new DomainError('Claim the matching request before streaming', 409);
+        if (!stream || stream.route.requestId !== current.id) {
+          stopObserver?.(); stopObserver = undefined;
+          const created = new ReplyStream(route); stream = created;
+          if (owner.agent === 'codex') {
+            try {
+              const stop = await observeCodex(owner.sessionId, event => { if (stream === created) void acceptStream(event); }, message => { if (stream === created) { created.fail(message); changed(); } });
+              if (closed || stream !== created) { stop(); throw new Error('Sidecar stopped'); }
+              stopObserver = stop;
+            } catch (error) { created.fail('Streaming unavailable. Use a complete reply.'); changed(); throw error; }
+          }
+        }
+        changed(); json(response, { prefix: stream.prefix, suffix: stream.suffix }); return;
+      }
+      if (method === 'POST' && path === '/agent/stream-events') {
+        if (text(body, 'ownerKey') !== ownerKey(owner) || owner.agent !== 'claude') throw new DomainError('Stream belongs to another owner', 409);
+        if (!isStreamEvent(body)) throw new DomainError('Invalid stream event');
+        await acceptStream(body); json(response, { ok: true }); return;
+      }
       if (method === 'POST' && path === '/agent/replies') {
-        const input = { requestId: text(body, 'requestId'), documentId: text(body, 'documentId'), threadId: text(body, 'threadId'), text: text(body, 'text'), isError: body.isError === undefined ? false : boolean(body, 'isError') };
-        await store.update(state => reply(state, input)); changed(); json(response, { ok: true }); return;
+        const input = { requestId: text(body, 'requestId'), documentId: text(body, 'documentId'), threadId: text(body, 'threadId'), text: '', isError: body.isError === undefined ? false : boolean(body, 'isError') };
+        if (body.stream === true) {
+          const previous = get(store.read().requests, input.requestId).answer;
+          input.text = previous?.text ?? (stream ? stream.finish(input) : (() => { throw new DomainError('No completed stream; send a complete reply', 409); })());
+        } else input.text = text(body, 'text');
+        await store.update(state => reply(state, input));
+        if (stream?.route.requestId === input.requestId) { stream = undefined; stopObserver?.(); stopObserver = undefined; }
+        changed(); json(response, { ok: true }); return;
       }
       throw new DomainError('Not found', 404);
     } catch (error) {
@@ -255,13 +306,13 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   }, 5000);
   async function close(): Promise<void> {
     if (closePromise) return closePromise;
-    closed = true; transportAbort.abort(); clearInterval(polling); clearInterval(heartbeat);
+    closed = true; stopObserver?.(); clearTimeout(streamTimer); transportAbort.abort(); clearInterval(polling); clearInterval(heartbeat);
     for (const response of [...viewers, ...agents.keys()]) response.end();
     closePromise = new Promise<void>((resolveClose, reject) => {
       const timer = setTimeout(() => server.closeAllConnections(), 100); timer.unref();
       server.close(error => { clearTimeout(timer); if (error) reject(error); else resolveClose(); });
     });
-    await closePromise; await dispatchWork; finish();
+    await closePromise; await dispatchWork; await finalizing; finish();
   }
   changed();
   return { url, close, instanceId, done };
