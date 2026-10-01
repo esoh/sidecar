@@ -17,7 +17,7 @@ const paths = {
 };
 export function Icon({ name }: { name: keyof typeof paths }) {
   return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
+    <svg className="sidecar-icon" viewBox="0 0 24 24" aria-hidden="true">
       <path d={paths[name]} />
     </svg>
   );
@@ -27,6 +27,7 @@ export function QuestionForm({
   documentId,
   threadId,
   quote,
+  quoteChanged = false,
   onSent,
   floating = false,
   onCancel,
@@ -38,6 +39,7 @@ export function QuestionForm({
   documentId: string;
   threadId?: string;
   quote?: Quote;
+  quoteChanged?: boolean;
   onSent: (request: RequestRecord) => void;
   floating?: boolean;
   onCancel?: () => void;
@@ -113,6 +115,24 @@ export function QuestionForm({
         }
       }}
     >
+      {floating && (
+        <div className="comment-header">
+          <span className="quote-preview" data-testid="selection-preview" title={quote?.exact}>
+            {quote?.exact}
+            {quoteChanged ? ' (Passage changed.)' : ''}
+          </span>
+          <button
+            className="cancel-button"
+            type="button"
+            aria-label="Cancel"
+            title="Close comment"
+            onClick={cancel}
+            disabled={busy}
+          >
+            <Icon name="close" />
+          </button>
+        </div>
+      )}
       <div className="composer-box">
         <textarea
           ref={input}
@@ -127,17 +147,12 @@ export function QuestionForm({
           }}
         />
         <div className="composer-actions">
-          {floating && (
-            <button className="cancel-button" type="button" onClick={cancel} disabled={busy}>
-              Cancel
-            </button>
-          )}
           <button
             className="send-button"
             aria-label={floating ? 'Send comment' : 'Send message'}
             disabled={disabled || busy || !text.trim()}
           >
-            <Icon name="send" />
+            {floating ? 'Send' : <Icon name="send" />}
           </button>
         </div>
       </div>

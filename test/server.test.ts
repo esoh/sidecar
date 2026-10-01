@@ -157,3 +157,42 @@ test('agent thread naming stays unset until supplied, persists, and cannot overw
   assert.equal(thread.title, 'Preserving drafts');
   assert.equal(thread.messages.length, 3);
 });
+
+test('renderer fonts and images require viewer access and stay within the document directory', async t => {
+  const f = await fixture(t), outside = await fixture(t);
+  const doc = await f.register();
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20"/></svg>';
+  await writeFile(join(f.directory, 'local.svg'), svg);
+  await writeFile(join(f.directory, 'with space.svg'), svg);
+  await writeFile(join(outside.directory, 'outside.svg'), svg);
+  await symlink(join(outside.directory, 'outside.svg'), join(f.directory, 'escape.svg'));
+  const image = (path: string) => `/api/image?document=${doc.id}&path=${encodeURIComponent(path)}`;
+  assert.equal((await fetch(f.url + image('local.svg'))).status, 403);
+  const local = await f.view(image('local.svg'));
+  assert.equal(local.status, 200);
+  assert.equal((await f.view(image('with%20space.svg'))).status, 200);
+  assert.equal((await f.view(image('local.svg?revision=2#view'))).status, 200);
+  assert.equal((await f.view(image('https://example.com/image.png'))).status, 400);
+  assert.equal((await f.view(image('../' + outside.directory.split('/').at(-1) + '/outside.svg'))).status, 403);
+  assert.equal(await local.text(), svg);
+  assert.equal(local.headers.get('content-type'), 'image/svg+xml');
+  assert.match(local.headers.get('content-security-policy') ?? '', /sandbox; default-src 'none'/);
+  assert.equal((await f.view(image('escape.svg'))).status, 403);
+  assert.equal((await f.view(image(join(outside.directory, 'outside.svg')))).status, 403);
+  assert.equal((await f.view(image('agent-token'))).status, 415);
+  assert.equal((await f.view('/api/image?document=missing&path=local.svg')).status, 404);
+  assert.equal((await fetch(f.url + '/renderer.css')).status, 403);
+  const css = await (await f.view('/renderer.css')).text();
+  assert.match(css, /Inter Variable/); assert.match(css, /Geist Mono Variable/);
+  for (const path of ['/renderer-fonts/inter/inter-latin-wght-normal.woff2', '/renderer-fonts/geist/geist-mono-latin-wght-normal.woff2', '/renderer-fonts/katex/KaTeX_Main-Regular.woff2']) {
+    assert.ok(css.includes(path));
+    assert.equal((await fetch(f.url + path)).status, 403);
+    const font = await f.view(path);
+    assert.equal(font.status, 200); assert.equal(font.headers.get('content-type'), 'font/woff2');
+    assert.ok((await font.arrayBuffer()).byteLength > 100);
+  }
+  assert.equal((await f.view('/renderer-fonts/inter/%2e%2e%2fagent-token')).status, 404);
+  const csp = (await f.view('/api/state')).headers.get('content-security-policy') ?? '';
+  assert.match(csp, /script-src 'self' 'wasm-unsafe-eval';/);
+  assert.doesNotMatch(csp, /script-src[^;]*'unsafe-inline'/);
+});

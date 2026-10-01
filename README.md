@@ -49,7 +49,15 @@ Drafts and conversation scroll positions survive switching threads while the pag
 
 Click the pencil beside the document name to edit it inline. Enter or clicking away saves, Escape cancels. Failed saves preserve the draft. The browser title follows the saved name. Browser drafts are not persisted across a page reload.
 
-The browser UI uses React and `@plannotator/web-highlighter`. Its composer borrows Plannotator’s positioning approach, and its palette/grid are adapted from Plannotator; attribution is in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The local server bundles the UI on page load with esbuild, so no separate frontend server or build command is required.
+The browser UI uses React, `@plannotator/ui` (pinned to 0.47.0), and `@plannotator/web-highlighter`. Document components, typography, colors, and spacing come from Plannotator; its Inter, Geist Mono, and KaTeX fonts are served locally. The compact comment popover follows Plannotator’s styling. Attribution is in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The local server bundles the UI on page load with esbuild, so no separate frontend server or build command is required.
+
+## Rich Markdown
+
+Documents render syntax-highlighted code with copy buttons, Mermaid and Graphviz diagrams with source/zoom/expand controls, inline and display math, tables, task lists, callouts, images, and sanitized HTML within Markdown. Heading links navigate within the document. Click a Markdown image to enlarge it; Escape closes the image. Local images must be within the registered document’s directory (including subdirectories); symlinks escaping that directory are rejected. HTTPS and data images are also supported. Responsive HTML images use their fallback `img` source.
+
+Passage comments work on rendered text, including code and tables. Diagram controls, SVGs, and math are excluded from text anchors; image-region and diagram-node annotations are outside this version. A renderer change can make an old passage’s text context differ; the existing thread and original quote remain available as “Passage changed.” This does not add standalone HTML-document mode.
+
+The renderer allows inline styles for syntax highlighting, math, and diagrams, plus WebAssembly for Graphviz and HTTPS/data images. Inline document scripts remain blocked; raw HTML is sanitized. Local image responses have a sandbox policy, and fonts/images require the viewer cookie. Both agents retain their existing request, revision, and reply flow.
 
 ## Streaming replies
 

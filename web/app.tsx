@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import Highlighter from '@plannotator/web-highlighter';
@@ -12,9 +12,11 @@ import {
   TitleForm,
   type QuestionDraft,
 } from './conversations.tsx';
-import { locateQuote, quoteRange } from './selection.ts';
+import { locateQuote, quoteRange, selectionText, excludedSelection } from './selection.ts';
+import { MarkdownDocument } from './MarkdownDocument.tsx';
+import { onCodeHighlightSwap } from '@plannotator/ui/utils/codeHighlight';
 
-type Content = { html: string; version: string };
+type Content = { html: string; markdown: string; version: string };
 
 // Placement adapted from Plannotator's CommentPopover (MIT); see THIRD_PARTY_NOTICES.md.
 function usePosition(
@@ -44,6 +46,7 @@ function usePosition(
       const placeAbove = preferAbove ? above >= height || above > below : below < height && above > below;
       const top = placeAbove ? rect.top - height - gap : rect.bottom + gap;
       node.style.left = `${Math.max(leftEdge, Math.min(rect.left + rect.width / 2 - size / 2, rightEdge - size))}px`;
+      node.dataset.placement = placeAbove ? 'above' : 'below';
       node.style.top = `${Math.max(topEdge, Math.min(top, bottomEdge - height))}px`;
     };
     update();
@@ -65,7 +68,7 @@ function usePosition(
 
 function App() {
   const [state, setState] = useState<ViewerState | null>(null),
-    [content, setContent] = useState<Content>({ html: '', version: '' });
+    [content, setContent] = useState<Content>({ html: '', markdown: '', version: '' });
   const [connected, setConnected] = useState(false),
     [error, setError] = useState(''),
     [documentError, setDocumentError] = useState('');
@@ -196,27 +199,46 @@ function App() {
     };
   }, [requestedDocument]);
 
-  // React owns the article; only the highlighter touches its server-rendered contents.
-  const markup = useMemo(() => ({ __html: content.html }), [content.html]);
-  const documentText = useMemo(() => {
-    const node = document.createElement('div');
-    node.innerHTML = content.html;
-    return node.textContent ?? '';
-  }, [content.html]);
+  const [documentText, setDocumentText] = useState('');
+  const [highlightRevision, setHighlightRevision] = useState(0);
+  useLayoutEffect(() => {
+    const root = article.current;
+    if (!root) return;
+    const refresh = () => setDocumentText(selectionText(root));
+    refresh();
+    const observer = new MutationObserver(refresh);
+    observer.observe(root, { subtree: true, childList: true, characterData: true });
+    return () => observer.disconnect();
+  }, [content.version]);
+  useLayoutEffect(
+    () =>
+      onCodeHighlightSwap((element) => {
+        if (!article.current?.contains(element)) return;
+        highlighter.current?.removeAll();
+        painted.current.clear();
+        setHighlightRevision((version) => version + 1);
+      }),
+    [],
+  );
   const anchors = JSON.stringify(
     threads.filter((thread) => thread.quote).map(({ id, quote, isResolved }) => ({ id, quote, isResolved })),
   );
   useLayoutEffect(() => {
     const root = article.current;
     if (!root) return;
-    const painter = new Highlighter({ $root: root, wrapTag: 'mark', style: { className: 'annotation-highlight' } });
+    const painter = new Highlighter({
+      $root: root,
+      wrapTag: 'mark',
+      exceptSelectors: [excludedSelection],
+      style: { className: 'annotation-highlight' },
+    });
     highlighter.current = painter;
     painted.current.clear();
     return () => {
       painter.dispose();
       highlighter.current = null;
     };
-  }, [content.html]);
+  }, [content.version]);
   useLayoutEffect(() => {
     const root = article.current,
       painter = highlighter.current;
@@ -256,7 +278,7 @@ function App() {
         if (saved.every((target) => target.isResolved)) mark.dataset.resolved = '';
       }
     }
-  }, [content.html, anchors, selection, documentError]);
+  }, [content.version, anchors, selection, documentError, highlightRevision, documentText]);
 
   useEffect(() => {
     const outside = (event: MouseEvent) => {
@@ -371,13 +393,15 @@ function App() {
     if (!root || !selected || selected.isCollapsed || !selected.rangeCount) return;
     const range = selected.getRangeAt(0);
     if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return;
+    if ([range.startContainer, range.endContainer].some((node) => node.parentElement?.closest(excludedSelection)))
+      return;
     const before = document.createRange();
     before.selectNodeContents(root);
     before.setEnd(range.startContainer, range.startOffset);
-    const start = before.toString().length;
+    const start = selectionText(before.cloneContents()).length;
     before.setEnd(range.endContainer, range.endOffset);
-    const end = before.toString().length,
-      text = root.textContent ?? '',
+    const end = selectionText(before.cloneContents()).length;
+    const text = selectionText(root),
       exact = text.slice(start, end);
     if (!exact.trim()) {
       clearSelection();
@@ -476,12 +500,12 @@ function App() {
               </p>
             )}
             <article
-              className="document-card"
+              className="document-card w-full bg-card rounded-xl p-5 md:p-8 lg:p-10 xl:p-12 shadow-xl border border-border/50"
               id="document"
               ref={article}
               tabIndex={-1}
               aria-label="Document"
-              dangerouslySetInnerHTML={markup}
+              key={content.version}
               onMouseUp={captureSelection}
               onTouchEnd={captureSelection}
               onClick={(event) => {
@@ -501,7 +525,9 @@ function App() {
                   visitHighlight(event.target);
                 }
               }}
-            />
+            >
+              <MarkdownDocument markdown={content.markdown} documentId={documentId} />
+            </article>
           </div>
         </main>
         <ConversationSidebar
@@ -577,17 +603,12 @@ function App() {
       {composing &&
         selection &&
         createPortal(
-          <section ref={composer} className="floating" role="dialog" aria-label="Comment on selection">
-            <p>
-              Selection:{' '}
-              <span className="quote-preview" data-testid="selection-preview">
-                {selection.exact + (passageChanged(selection) ? ' (Passage changed.)' : '')}
-              </span>
-            </p>
+          <section ref={composer} className="floating comment-popover" role="dialog" aria-label="Comment on selection">
             <QuestionForm
               key={draftKey}
               documentId={documentId}
               quote={selection}
+              quoteChanged={passageChanged(selection)}
               disabled={!current}
               floating
               onCancel={cancel}
