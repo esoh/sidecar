@@ -1,0 +1,34 @@
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pnpm --silent --dir /absolute/sidecar sidecar hook --agent codex"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pnpm --silent --dir /absolute/sidecar sidecar hook --agent codex"
+          }
+        ]
+      }
+    ],
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pnpm --silent --dir /absolute/sidecar sidecar hook --agent codex"
+          }
+        ]
+      }
+    ]
+  }
+}

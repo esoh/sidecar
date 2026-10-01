@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sidecar</title><script type="module" src="/app.js"></script></head>
+<body>
+<h1>Sidecar</h1>
+<nav id="documents" aria-label="Documents"></nav>
+<p id="status" role="status">Connecting…</p>
+<p id="error" role="alert"></p>
+<main>
+<form id="title-form"><label for="title">Document title</label> <input id="title" type="text"> <button>Save title</button></form>
+<p id="document-error" data-testid="document-error" role="alert"></p>
+<article id="document" aria-label="Document"></article>
+<section aria-label="New question">
+<p>Selection: <span id="selection-preview" data-testid="selection-preview">Whole document</span> <button id="clear-selection" type="button">Clear selection</button></p>
+<form id="question-form"><label for="question">Question</label><br><textarea id="question" required></textarea><br><button id="send">Send</button></form>
+</section>
+<h2>Threads</h2>
+<section id="threads" aria-label="Threads"></section>
+</main>
+</body>
+</html>
