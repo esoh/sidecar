@@ -123,3 +123,20 @@ test('malformed persisted data is reported without being overwritten', async t =
   await assert.rejects(openStore(directory, owner));
   assert.equal(await readFile(join(directory, 'state.json'), 'utf8'), bad);
 });
+
+
+test('legacy thread metadata is upgraded without losing history or resolution', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'sidecar-legacy-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { state, input } = setup();
+  const request = submit(state, input);
+  resolveThread(state, request.threadId, true);
+  const legacy = JSON.parse(JSON.stringify(state));
+  for (const thread of Object.values<any>(legacy.threads)) { delete thread.createdAt; delete thread.title; }
+  await writeFile(join(directory, 'state.json'), JSON.stringify(legacy));
+  const restored = (await openStore(directory, owner)).read();
+  assert.deepEqual(restored.threads[request.threadId]?.messages, state.threads[request.threadId]?.messages);
+  assert.equal(restored.threads[request.threadId]?.isResolved, true);
+  const persisted = JSON.parse(await readFile(join(directory, 'state.json'), 'utf8'));
+  assert.equal(persisted.threads[request.threadId].createdAt, request.createdAt);
+});

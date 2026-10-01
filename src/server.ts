@@ -5,10 +5,10 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFile, writeFile, realpath } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { notifyCodex } from './agent.ts';
-import { observeCodex } from './codex-stream.ts';
+import { observeCodex, readCodexActivity } from './codex-stream.ts';
 import { ReplyStream, isStreamEvent } from './stream.ts';
 import { readDocument } from './documents.ts';
-import { claim, DomainError, get, isObject, isQuote, openStore, ownerKey, registerDocument, reply, resolveThread, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput } from './store.ts';
+import { claim, createThread, nameThread, DomainError, get, isObject, isQuote, openStore, ownerKey, registerDocument, reply, resolveThread, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput } from './store.ts';
 
 type DocumentData = Awaited<ReturnType<typeof readDocument>>;
 type Cached = { data: DocumentData } | { error: string; status: number };
@@ -76,6 +76,8 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   let dispatchWork: Promise<void> | undefined;
   let connectionError: string | null = null;
   let compacting = false;
+  let agentActivity = 'unknown';
+  let activityTurnId: string | undefined;
   let stream: ReplyStream | undefined;
   let stopObserver: (() => void) | undefined;
   let streamTimer: NodeJS.Timeout | undefined;
@@ -147,7 +149,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   }
   function snapshot() {
     const state = store.read();
-    return { ...state, stream: stream?.snapshot() ?? null, lastLifecycle, activity: compacting ? 'compacting' : Object.values(state.requests).some(r => r.status === 'claimed') ? 'responding' : 'unknown', connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError, documents: Object.fromEntries(Object.values(state.documents).map(document => {
+    return { ...state, stream: stream?.snapshot() ?? null, lastLifecycle, activity: compacting ? 'compacting' : agentActivity, connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError, documents: Object.fromEntries(Object.values(state.documents).map(document => {
       const cached = cache.get(document.id);
       return [document.id, { ...document, title: title(document), version: cached && 'data' in cached ? cached.data.version : null, error: cached && 'error' in cached ? cached.error : null }];
     })) };
@@ -222,9 +224,20 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       if (method === 'POST' && path === '/agent/lifecycle') {
         if (text(body, 'ownerKey') !== ownerKey(owner)) throw new DomainError('Lifecycle belongs to another owner', 409);
         const event = text(body, 'event');
-        if (!['compaction-started', 'compaction-completed', 'interrupted'].includes(event) || (event === 'interrupted' && owner.agent !== 'codex')) throw new DomainError('Unsupported lifecycle event');
-        compacting = event === 'compaction-started';
-        lastLifecycle = { event, turnId: optionalText(body, 'turnId') };
+        if (!['compaction-started', 'compaction-completed', 'interrupted', 'agent-busy', 'agent-idle', 'agent-waiting', 'agent-disconnected', 'agent-unknown'].includes(event) || (event === 'interrupted' && owner.agent !== 'codex')) throw new DomainError('Unsupported lifecycle event');
+        const turnId = optionalText(body, 'turnId');
+        if (turnId && activityTurnId && turnId !== activityTurnId && ['agent-idle', 'interrupted', 'compaction-completed'].includes(event)) {
+          json(response, { ok: true }); return;
+        }
+        if (event === 'compaction-started') compacting = true;
+        else if (event === 'compaction-completed') compacting = false;
+        else {
+          compacting = false;
+          agentActivity = event === 'interrupted' ? 'idle' : event.slice('agent-'.length);
+          if (turnId) activityTurnId = turnId;
+          else if (event === 'agent-unknown' || event === 'agent-disconnected') activityTurnId = undefined;
+        }
+        lastLifecycle = { event, turnId };
         changed(); json(response, { ok: true }); return;
       }
       if (method === 'POST' && path === '/agent/documents') {
@@ -232,6 +245,16 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         await readDocument(canonical);
         const document = await store.update(state => registerDocument(state, { path: canonical, title: optionalText(body, 'title'), generated: body.generated === undefined ? false : boolean(body, 'generated') }));
         await refresh(document); changed(); json(response, { ...document, title: title(document) }); return;
+      }
+      if (method === 'POST' && path === '/api/threads') {
+        const input = { id: text(body, 'id'), documentId: text(body, 'documentId') };
+        const thread = await store.update(state => createThread(state, input));
+        changed(); json(response, thread); return;
+      }
+      const threadTitle = path.match(/^\/agent\/threads\/([^/]+)\/title$/);
+      if (method === 'POST' && threadTitle?.[1]) {
+        const id = threadTitle[1], value = text(body, 'title');
+        await store.update(state => nameThread(state, id, value)); changed(); json(response, { ok: true }); return;
       }
       if (method === 'POST' && path === '/api/questions') {
         const input: SubmitInput = { documentId: text(body, 'documentId'), text: text(body, 'text'), clientMessageId: text(body, 'clientMessageId') };
@@ -309,13 +332,21 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       for (const document of Object.values(store.read().documents)) await refresh(document);
     })().finally(() => { refreshing = false; });
   }, pollMs);
+  let readingActivity = false;
+  const activityPolling = owner.agent === 'codex' ? setInterval(() => {
+    if (closed || readingActivity || !viewers.size) return;
+    readingActivity = true;
+    void readCodexActivity(owner.sessionId, transportAbort.signal).then(activity => {
+      if (!closed && activity !== agentActivity) { agentActivity = activity; changed(); }
+    }).finally(() => { readingActivity = false; });
+  }, 1000) : undefined;
   const heartbeat = setInterval(() => {
     for (const response of viewers) if (!response.destroyed) response.write(': keepalive\n\n');
     for (const response of agents.keys()) if (!response.destroyed) response.write('\n');
   }, 5000);
   async function close(): Promise<void> {
     if (closePromise) return closePromise;
-    closed = true; stopObserver?.(); clearTimeout(streamTimer); transportAbort.abort(); clearInterval(polling); clearInterval(heartbeat);
+    closed = true; stopObserver?.(); clearTimeout(streamTimer); transportAbort.abort(); clearInterval(polling); clearInterval(heartbeat); clearInterval(activityPolling);
     for (const response of [...viewers, ...agents.keys()]) response.end();
     closePromise = new Promise<void>((resolveClose, reject) => {
       const timer = setTimeout(() => server.closeAllConnections(), 100); timer.unref();

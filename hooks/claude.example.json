@@ -19,6 +19,107 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pnpm --silent --dir /absolute/sidecar sidecar hook --agent claude"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pnpm --silent --dir /absolute/sidecar sidecar hook --agent claude"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pnpm --silent --dir /absolute/sidecar sidecar hook --agent claude"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pnpm --silent --dir /absolute/sidecar sidecar hook --agent claude"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pnpm --silent --dir /absolute/sidecar sidecar hook --agent claude"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pnpm --silent --dir /absolute/sidecar sidecar hook --agent claude"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pnpm --silent --dir /absolute/sidecar sidecar hook --agent claude"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pnpm --silent --dir /absolute/sidecar sidecar hook --agent claude"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pnpm --silent --dir /absolute/sidecar sidecar hook --agent claude"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pnpm --silent --dir /absolute/sidecar sidecar hook --agent claude"
+          }
+        ],
+        "matcher": "idle_prompt|agent_completed|permission_prompt|agent_needs_input"
+      }
     ]
   }
 }

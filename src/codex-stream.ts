@@ -4,7 +4,9 @@ import WebSocket from 'ws';
 import { isObject } from './store.ts';
 import type { StreamEvent } from './stream.ts';
 
-export async function observeCodex(threadId: string, onEvent: (event: StreamEvent) => void, onFailure: (message: string) => void, socketPath = join(process.env.CODEX_HOME ?? homedir() + '/.codex', 'app-server-control/app-server-control.sock')): Promise<() => void> {
+const defaultSocketPath = () => join(process.env.CODEX_HOME ?? homedir() + '/.codex', 'app-server-control/app-server-control.sock');
+
+export async function observeCodex(threadId: string, onEvent: (event: StreamEvent) => void, onFailure: (message: string) => void, socketPath = defaultSocketPath()): Promise<() => void> {
   const socket = new WebSocket(`ws+unix://${socketPath}:/`, { maxPayload: 2 * 1024 * 1024, handshakeTimeout: 5000 });
   let stopped = false, ready = false, nextId = 0;
   const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
@@ -56,4 +58,41 @@ export async function observeCodex(threadId: string, onEvent: (event: StreamEven
     ready = true;
     return stop;
   } catch (error) { stop(); throw error; }
+}
+
+// Read-only sampling: never subscribes, resumes, or creates an agent conversation.
+export async function readCodexActivity(threadId: string, signal: AbortSignal, socketPath = defaultSocketPath()): Promise<string> {
+  if (signal.aborted) return 'unknown';
+  return new Promise(resolve => {
+    const socket = new WebSocket(`ws+unix://${socketPath}:/`, { maxPayload: 2 * 1024 * 1024, handshakeTimeout: 2000 });
+    let finished = false;
+    const finish = (activity: string) => {
+      if (finished) return;
+      finished = true; clearTimeout(timer); signal.removeEventListener('abort', abort); socket.terminate(); resolve(activity);
+    };
+    const abort = () => finish('unknown');
+    const timer = setTimeout(abort, 2000);
+    signal.addEventListener('abort', abort, { once: true });
+    socket.on('error', abort); socket.on('close', abort);
+    socket.on('open', () => socket.send(JSON.stringify({ id: 1, method: 'initialize', params: { clientInfo: { name: 'sidecar-status', version: '0.0.0' } } })));
+    socket.on('message', bytes => {
+      try {
+        const message: unknown = JSON.parse(bytes.toString());
+        if (!isObject(message) || ![1, 2].includes(Number(message.id))) return;
+        if (message.error) { finish('unknown'); return; }
+        if (message.id === 1) {
+          socket.send(JSON.stringify({ method: 'initialized', params: {} }));
+          socket.send(JSON.stringify({ id: 2, method: 'thread/read', params: { threadId, includeTurns: false } }));
+          return;
+        }
+        const result = message.result;
+        if (!isObject(result) || !isObject(result.thread) || result.thread.id !== threadId || !isObject(result.thread.status)) { finish('unknown'); return; }
+        const status = result.thread.status;
+        if (status.type === 'active') {
+          const waiting = Array.isArray(status.activeFlags) && status.activeFlags.some(flag => flag === 'waitingOnApproval' || flag === 'waitingOnUserInput');
+          finish(waiting ? 'waiting' : 'busy');
+        } else finish(status.type === 'idle' ? 'idle' : status.type === 'notLoaded' ? 'disconnected' : 'unknown');
+      } catch { finish('unknown'); }
+    });
+  });
 }

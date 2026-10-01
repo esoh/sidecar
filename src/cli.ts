@@ -88,11 +88,22 @@ export async function forwardHook(agent: string | undefined, payload: unknown): 
   if (!isObject(payload)) throw new Error('Expected native hook JSON');
   const owner = { agent, sessionId: payload.session_id };
   if (!isOwner(owner)) throw new Error('Expected hook agent and native session UUID');
+  if (payload.agent_id) return; // Subagent hooks must not overwrite the original agent's activity.
   if (agent === 'claude' && payload.hook_event_name === 'MessageDisplay') {
     await agentCall(ownerKey(owner), '/agent/stream-events', { ownerKey: ownerKey(owner), messageId: payload.message_id, turnId: payload.turn_id, index: payload.index, delta: payload.delta, final: payload.final }).catch(() => {});
     return;
   }
-  const event = payload.hook_event_name === 'PreCompact' ? 'compaction-started' : payload.hook_event_name === 'PostCompact' ? 'compaction-completed' : agent === 'codex' && payload.hook_event_name === 'Interrupt' ? 'interrupted' : undefined;
+  const events = new Map([
+    ['UserPromptSubmit', 'agent-busy'], ['PreToolUse', 'agent-busy'], ['PostToolUse', 'agent-busy'], ['PostToolUseFailure', 'agent-busy'],
+    ['Stop', 'agent-idle'], ['PermissionRequest', 'agent-waiting'], ['SessionEnd', 'agent-disconnected'], ['SessionStart', 'agent-unknown'],
+    ['PreCompact', 'compaction-started'], ['PostCompact', 'compaction-completed'],
+  ]);
+  if (agent === 'codex') events.set('Interrupt', 'interrupted');
+  else events.set('StopFailure', 'agent-idle');
+  const notification = agent === 'claude' && payload.hook_event_name === 'Notification' ? payload.notification_type : undefined;
+  const event = ['idle_prompt', 'agent_completed'].includes(String(notification)) ? 'agent-idle'
+    : ['permission_prompt', 'agent_needs_input'].includes(String(notification)) ? 'agent-waiting'
+    : typeof payload.hook_event_name === 'string' ? events.get(payload.hook_event_name) : undefined;
   if (!event) return;
   const key = ownerKey(owner);
   if ((await appStatus(key)).state !== 'running') return;
@@ -105,7 +116,12 @@ async function main() {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: { agent: { type: 'string' }, session: { type: 'string' }, owner: { type: 'string' }, file: { type: 'string' }, title: { type: 'string' }, document: { type: 'string' }, thread: { type: 'string' }, stdin: { type: 'boolean' }, resume: { type: 'boolean' }, error: { type: 'boolean' }, 'no-browser': { type: 'boolean' }, stream: { type: 'boolean' } } });
   const [command, requestId] = positionals;
   const output = (value: unknown) => process.stdout.write(JSON.stringify(value) + '\n');
-  if (command === 'hook') { await forwardHook(values.agent, JSON.parse(await stdin())); return; }
+  if (command === 'hook') {
+    const payload = JSON.parse(await stdin());
+    await forwardHook(values.agent, payload);
+    if (values.agent === 'codex' && payload.hook_event_name === 'Stop') output({});
+    return;
+  }
   if (command === 'open') {
     if (Boolean(values.file) === Boolean(values.stdin)) throw new Error('Choose exactly one of --file or --stdin');
     const owner = selectOwner(values.agent, values.session), key = ownerKey(owner);
@@ -148,11 +164,12 @@ async function main() {
     }
     output(result); return;
   }
+  if (command === 'name-thread' && requestId) { output(await agentCall(key, `/agent/threads/${encodeURIComponent(requestId)}/title`, { title: values.title })); return; }
   if (command === 'stream' && requestId) { output(await agentCall(key, '/agent/streams', { requestId, documentId: values.document, threadId: values.thread })); return; }
   if (command === 'reply' && requestId) {
     output(await agentCall(key, '/agent/replies', { requestId, documentId: values.document, threadId: values.thread, ...(values.stream ? { stream: true } : { text: await stdin() }), isError: Boolean(values.error) })); return;
   }
-  throw new Error('Commands: open, status, request, stream, reply, watch, stop, hook');
+  throw new Error('Commands: open, status, request, name-thread, stream, reply, watch, stop, hook');
 }
 if (process.argv[1] && resolve(process.argv[1]) === cliPath) {
   main().catch(error => { process.stderr.write((error instanceof Error ? error.message : String(error)) + '\n'); process.exitCode = 1; });

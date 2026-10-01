@@ -9,7 +9,7 @@ import { forwardHook } from '../src/cli.ts';
 import { ownerKey } from '../src/store.ts';
 
 for (const agent of ['codex', 'claude'] as const) {
-  test(`${agent} compaction hooks are owner-scoped, transient, and never invent cancellation`, async t => {
+  test(`${agent} activity hooks are owner-scoped, transient, and never invent cancellation`, async t => {
     const root = await mkdtemp(join(tmpdir(), 'sidecar-hooks-'));
     const owner = { agent, sessionId: randomUUID() }, key = ownerKey(owner), directory = join(root, key);
     const previous = process.env.SIDECAR_STATE_DIR;
@@ -22,6 +22,23 @@ for (const agent of ['codex', 'claude'] as const) {
       const cookie = (await fetch(server.url)).headers.get('set-cookie')!.split(';')[0]!;
       return (await fetch(server.url + '/api/state', { headers: { Cookie: cookie } })).json();
     };
+    assert.equal((await snapshot()).activity, 'unknown');
+    await forwardHook(agent, { session_id: owner.sessionId, hook_event_name: 'UserPromptSubmit', turn_id: 'current-turn' });
+    assert.equal((await snapshot()).activity, 'busy', 'terminal work is busy without a Sidecar request');
+    await forwardHook(agent, { session_id: owner.sessionId, hook_event_name: 'Stop', turn_id: 'old-turn' });
+    assert.equal((await snapshot()).activity, 'busy', 'stale turn completion cannot mark a newer turn idle');
+    await forwardHook(agent, { session_id: owner.sessionId, hook_event_name: 'Stop', agent_id: 'child', turn_id: 'current-turn' });
+    assert.equal((await snapshot()).activity, 'busy', 'subagent activity cannot overwrite its owner');
+    await forwardHook(agent, { session_id: owner.sessionId, hook_event_name: 'PermissionRequest', turn_id: 'current-turn' });
+    assert.equal((await snapshot()).activity, 'waiting');
+    await forwardHook(agent, { session_id: owner.sessionId, hook_event_name: 'PostToolUse', turn_id: 'current-turn' });
+    assert.equal((await snapshot()).activity, 'busy');
+    await forwardHook(agent, { session_id: owner.sessionId, hook_event_name: 'Stop', turn_id: 'current-turn' });
+    assert.equal((await snapshot()).activity, 'idle');
+    await forwardHook(agent, { session_id: owner.sessionId, hook_event_name: 'SessionEnd' });
+    assert.equal((await snapshot()).activity, 'disconnected');
+    await forwardHook(agent, { session_id: owner.sessionId, hook_event_name: 'SessionStart' });
+    assert.equal((await snapshot()).activity, 'unknown');
     await forwardHook(agent, { session_id: owner.sessionId, hook_event_name: 'PreCompact' });
     assert.equal((await snapshot()).activity, 'compacting');
     await forwardHook(agent, { session_id: randomUUID(), hook_event_name: 'PostCompact' });
@@ -36,7 +53,7 @@ for (const agent of ['codex', 'claude'] as const) {
     await forwardHook(agent, { session_id: owner.sessionId, hook_event_name: 'PreCompact' });
     if (agent === 'codex') {
       await forwardHook(agent, { session_id: owner.sessionId, hook_event_name: 'Interrupt', turn_id: 'turn-test' });
-      assert.equal((await snapshot()).activity, 'unknown');
+      assert.equal((await snapshot()).activity, 'idle');
       assert.equal((await snapshot()).lastLifecycle.event, 'interrupted');
       await forwardHook(agent, { session_id: owner.sessionId, hook_event_name: 'PreCompact' });
     }

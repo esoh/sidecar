@@ -31,15 +31,25 @@ State defaults to `~/.local/state/sidecar/AGENT-UUID`; tests use `SIDECAR_STATE_
 
 Only one process writes an owner's state. Dead owner locks are recovered without killing any PID. If a crash happens while creating or reclaiming a lock, startup fails closed; inspect `server.log` and verify no owner process is alive before removing an incomplete `owner.lock` or `reclaim.lock`. A reused live PID is never killed.
 
-Broader styling, standalone HTML input, independent model sessions, and compaction cancellation are outside this version. The dated [acceptance record](docs/acceptance.md) covers both native agents and the remaining limits.
+Standalone HTML input, independent model sessions, and compaction cancellation are outside this version. The dated [acceptance record](docs/acceptance.md) covers both native agents and the remaining limits.
 
 ## Passage comments
 
-Select text and click **Comment** or press **C** to open a floating composer beside the passage. The shortcut leaves typing and Ctrl/Cmd+C untouched. The highlight remains visible while you type. Clicking outside dismisses an empty composer; a composer with a draft stays open. **Send** (or Cmd/Ctrl+Enter) starts a thread with the original agent; **Cancel** or Escape discards the unsent comment. Select another passage at any time to start a separate comment; reselecting a passage restores its draft while this page stays open. Failed sends preserve the draft for retry. The question form below the document still supports general questions.
+Select text and click **Comment** or press **C** to open a floating composer beside the passage. The shortcut leaves typing and Ctrl/Cmd+C untouched. The highlight remains visible while you type. Clicking outside dismisses an empty composer; a composer with a draft stays open. **Send** (or Enter) starts a thread with the original agent; **Cancel** or Escape discards the unsent comment. Select another passage at any time to start a separate comment; reselecting a passage restores its draft while this page stays open. Failed sends preserve the draft for retry. Shift+Enter adds a new line. Textboxes grow with their contents and then scroll.
 
 Saved passages remain highlighted after reload. Click a highlight, or focus it with Tab and press Enter, to reach its thread. When threads overlap, choose the question you want. Resolved threads retain a muted highlight and can be reopened. If a file edit makes a passage missing or ambiguous, its thread and quote remain, marked “Passage changed.”
 
-The browser UI uses React and `@plannotator/web-highlighter`. Its small composer borrows Plannotator’s positioning approach; attribution is in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The local server bundles the UI on page load with esbuild, so no separate frontend server or build command is required.
+## Document conversations
+
+The document sits beside a conversation sidebar. Use the back arrow for the thread list, **+** for another general conversation, and the status dropdown to switch between unresolved (default) and resolved threads. The checkmark resolves or reopens a thread. Threads sort by latest message activity and have separate general/annotation icons. Beside the message preview, a dot marks an unread agent reply, a clock marks queued work, and a spinner marks a claimed request. The spinner replaces the clock while work is in progress. Opening a visible conversation marks its replies read; read state is kept in this browser across reloads. Clicking a saved highlight opens its conversation; submitting an annotation selects the new conversation automatically.
+
+Each document starts with an **Unnamed** general conversation. The original agent names a thread once its question/history has enough context, using `name-thread THREAD_ID --owner KEY --title "Short name"`. Vague openings stay unnamed until a later message. Names are stable once assigned. This instruction is shared by Codex and Claude; it does not create another model session.
+
+Drafts and conversation scroll positions survive switching threads while the page stays open. Background replies do not change the selected conversation. The quote above an annotated conversation shows at most two lines; hover for the full quote or click to find its passage. Removed or ambiguous passages keep the quote and history, labeled **Passage changed**.
+
+Click the pencil beside the document name to edit it inline. Enter or clicking away saves, Escape cancels. Failed saves preserve the draft. The browser title follows the saved name. Browser drafts are not persisted across a page reload.
+
+The browser UI uses React and `@plannotator/web-highlighter`. Its composer borrows Plannotator’s positioning approach, and its palette/grid are adapted from Plannotator; attribution is in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The local server bundles the UI on page load with esbuild, so no separate frontend server or build command is required.
 
 ## Streaming replies
 
@@ -49,11 +59,17 @@ The agent runs `request ID --owner KEY --stream` once to claim the question, fet
 
 The completed message saves the reply exactly once; `reply ... --stream` is an optional idempotent completion check. Missing chunks, incomplete markers, or a disconnected observer prevent streaming finalization; the existing plain-text stdin reply is the recovery path. A browser reload recovers the current draft. App restart discards transient drafts and leaves claimed requests uncertain for reconciliation. No new model session is launched. Codex streaming requires the original conversation to be loaded in its local daemon; unsupported configurations retain complete-message replies.
 
+## Agent activity
+
+The top-right header shows the original agent's last reported activity across all documents: Busy, Idle, Waiting for input, Compacting, Disconnected, or Unknown. The queue count is separate; queued questions and completed Sidecar replies never imply that the terminal agent is busy or idle.
+
+Codex status is sampled once a second from its existing local daemon while a viewer is connected, using read-only `thread/read` without resuming the conversation. Claude registers activity hooks alongside streaming when the updated Sidecar skill is invoked through its native Skill tool. Existing Claude sessions must invoke the updated skill to register these hooks. Missing/unsupported signals show Unknown. Claude user interrupts do not fire Stop; its last reported status may remain until the next activity or idle notification. Subagent hooks never overwrite the original owner's status.
+
 ## Optional lifecycle hooks
 
-The [Codex](hooks/codex.example.json) and [Claude](hooks/claude.example.json) examples forward native PreCompact/PostCompact events to an already-running app. Replace `/absolute/sidecar`; preserve `SIDECAR_STATE_DIR` if you use a custom directory. Merge the examples into the project's `.codex/hooks.json` or Claude's `.claude/settings.local.json` yourself; Sidecar does not change settings. Native hook trust and permissions still apply.
+The [Codex](hooks/codex.example.json) and [Claude](hooks/claude.example.json) examples forward native activity and PreCompact/PostCompact events to an already-running app. Replace `/absolute/sidecar`; preserve `SIDECAR_STATE_DIR` if you use a custom directory. Merge the examples into the project's `.codex/hooks.json` or Claude's `.claude/settings.local.json` yourself; Sidecar does not change settings. Native hook trust and permissions still apply.
 
-The page shows “Compacting context” between matching start/completion signals. A restart clears this transient status. Codex Interrupt records an interrupted turn; it is not evidence of compaction-specific cancellation. An unavailable app is a no-op. Hook support is distinct from live event delivery verification: see the acceptance record.
+The header shows “Compacting” between matching start/completion signals. A restart clears this transient status. Codex Interrupt records an interrupted turn; it is not evidence of compaction-specific cancellation. An unavailable app is a no-op. Hook support is distinct from live event delivery verification: see the acceptance record.
 
 Schemas checked against the official [Codex hooks reference](https://learn.chatgpt.com/docs/hooks) and [Claude hooks reference](https://code.claude.com/docs/en/hooks).
 

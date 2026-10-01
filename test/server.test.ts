@@ -111,3 +111,49 @@ test('a document read announces changed source to existing viewers before the ne
     assert.equal(await Promise.race([notification, delay(500, false)]), true, 'Existing viewers must be notified when another reader refreshes the cache');
   } finally { controller.abort(); }
 });
+
+
+test('documents start with an empty general thread and thread creation retries do not duplicate or cross documents', async t => {
+  const f = await fixture(t);
+  const doc = await f.register(), other = await f.register('other.md');
+  const snapshot = await (await f.view('/api/state')).json();
+  const initial = Object.values<any>(snapshot.threads).filter(thread => thread.documentId === doc.id);
+  assert.equal(initial.length, 1);
+  assert.equal(initial[0].scope, 'document');
+  assert.equal(initial[0].title, undefined);
+  assert.deepEqual(initial[0].messages, []);
+  assert.equal(Object.keys(snapshot.requests).length, 0);
+  const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const create = () => f.view('/api/threads', { id, documentId: doc.id });
+  assert.equal((await create()).status, 200);
+  assert.equal((await create()).status, 200);
+  assert.equal((await f.view('/api/threads', { id, documentId: other.id })).status, 409);
+  assert.equal((await f.view('/api/threads', { id: '__proto__', documentId: doc.id })).status, 400);
+  const request = await (await f.view('/api/questions', { documentId: doc.id, threadId: id, text: 'Explain', clientMessageId: 'empty-thread' })).json();
+  assert.equal(request.threadId, id);
+  await f.reopen();
+  const restored = await (await f.view('/api/state')).json();
+  assert.equal(Object.values<any>(restored.threads).filter(thread => thread.documentId === doc.id).length, 2);
+  assert.equal(restored.threads[id].messages[0].text, 'Explain');
+});
+
+test('agent thread naming stays unset until supplied, persists, and cannot overwrite an assigned name', async t => {
+  const f = await fixture(t), doc = await f.register();
+  const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'Quick question', clientMessageId: 'name' })).json();
+  const path = `/agent/threads/${request.threadId}/title`;
+  assert.equal((await f.view(path, { title: 'Unauthorized' })).status, 403);
+  for (const title of ['', '  ', 'x'.repeat(81), 'Line one\nLine two', 42]) {
+    assert.equal((await f.agent(path, { title })).status, 400);
+  }
+  await f.agent(`/agent/requests/${request.id}/claim`, {});
+  await f.agent('/agent/replies', { requestId: request.id, documentId: doc.id, threadId: request.threadId, text: 'What is your question?' });
+  assert.equal((await (await f.view('/api/state')).json()).threads[request.threadId].title, undefined);
+  await f.view('/api/questions', { documentId: doc.id, threadId: request.threadId, text: 'Explain how drafts survive switching', clientMessageId: 'context' });
+  assert.equal((await f.agent(path, { title: '  Preserving drafts  ' })).status, 200);
+  assert.equal((await f.agent(path, { title: 'Preserving drafts' })).status, 200);
+  assert.equal((await f.agent(path, { title: 'A different name' })).status, 409);
+  await f.reopen();
+  const thread = (await (await f.view('/api/state')).json()).threads[request.threadId];
+  assert.equal(thread.title, 'Preserving drafts');
+  assert.equal(thread.messages.length, 3);
+});
