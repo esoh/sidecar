@@ -17,7 +17,7 @@
     system-ui,
     -apple-system,
     sans-serif;
-  font-size: 14px;
+  font-size: 16px;
   color: var(--foreground);
   background: var(--background);
 }
@@ -25,52 +25,56 @@
   box-sizing: border-box;
 }
 body {
+  font-size: 14px;
   margin: 0;
 }
-button,
-input,
-textarea {
-  font: inherit;
-}
-button {
-  color: inherit;
-  cursor: pointer;
-}
-button:disabled {
-  cursor: default;
-  opacity: 0.45;
-}
-button,
-input,
-textarea {
-  border: 1px solid transparent;
-  border-radius: 7px;
-}
-button {
-  background: transparent;
-  padding: 7px 9px;
-}
-button:hover {
-  background: var(--muted);
-}
-button:focus-visible,
-a:focus-visible,
-textarea:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: 3px;
-}
-button svg {
-  flex-shrink: 0;
-}
-svg {
-  width: 17px;
-  height: 17px;
-  vertical-align: middle;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.65;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+@layer base {
+  :where(.topbar, .sidebar, .floating, .image-lightbox) button,
+  :where(.topbar, .sidebar, .floating, .image-lightbox) input,
+  :where(.topbar, .sidebar, .floating, .image-lightbox) textarea {
+    font: inherit;
+  }
+  :where(.topbar, .sidebar, .floating, .image-lightbox) button {
+    color: inherit;
+    cursor: pointer;
+  }
+  :where(.topbar, .sidebar, .floating, .image-lightbox) button:disabled {
+    cursor: default;
+    opacity: 0.45;
+  }
+  :where(.topbar, .sidebar, .floating, .image-lightbox) button,
+  :where(.topbar, .sidebar, .floating, .image-lightbox) input,
+  :where(.topbar, .sidebar, .floating, .image-lightbox) textarea {
+    border: 1px solid transparent;
+    border-radius: 7px;
+  }
+  :where(.topbar, .sidebar, .floating, .image-lightbox) button {
+    background: transparent;
+    padding: 7px 9px;
+  }
+  :where(.topbar, .sidebar, .floating, .image-lightbox) button:hover {
+    background: var(--muted);
+  }
+  :where(.topbar, .sidebar, .floating, .image-lightbox) button:focus-visible,
+  :where(.topbar, .sidebar, .floating, .image-lightbox) a:focus-visible,
+  :where(.topbar, .sidebar, .floating, .image-lightbox) textarea:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 3px;
+  }
+  :where(.topbar, .sidebar, .floating, .image-lightbox) button svg {
+    flex-shrink: 0;
+  }
+  .sidecar-icon {
+    display: inline-block;
+    width: 17px;
+    height: 17px;
+    vertical-align: middle;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.65;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
 }
 [hidden] {
   display: none !important;
@@ -134,8 +138,6 @@ svg {
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: 12px;
-  padding: 26px 38px 45px;
-  box-shadow: 0 12px 35px #0002;
 }
 .file-label {
   font:
@@ -143,47 +145,6 @@ svg {
     monospace;
   color: var(--subtle);
   margin-bottom: 25px;
-}
-.document-card h1 {
-  font-size: 26px;
-  letter-spacing: -0.65px;
-  line-height: 1.3;
-  margin: 0 0 15px;
-  font-weight: 650;
-}
-.lede {
-  color: var(--subtle);
-  font-size: 15px;
-  margin-bottom: 30px !important;
-}
-.document-card h2 {
-  font-size: 18px;
-  font-weight: 600;
-  margin: 32px 0 13px;
-  letter-spacing: -0.2px;
-}
-.document-card p,
-.document-card li {
-  line-height: 1.8;
-  font-size: 14px;
-}
-.document-card p {
-  margin: 0 0 15px;
-}
-.document-card ul {
-  padding-left: 22px;
-}
-.document-card li {
-  padding-left: 3px;
-  margin: 8px 0;
-}
-.document-card code {
-  background: var(--muted);
-  font:
-    12px ui-monospace,
-    monospace;
-  padding: 2px 5px;
-  border-radius: 4px;
 }
 .annotation-highlight {
   background: oklch(0.7 0.18 60 / 0.3);
@@ -575,9 +536,6 @@ svg {
   .canvas {
     padding-top: 36px;
   }
-  .document-card {
-    padding: 34px 48px 50px;
-  }
 }
 @media (max-width: 850px) {
   .layout {
@@ -601,9 +559,6 @@ svg {
   }
   .canvas {
     padding: 20px 15px 40px;
-  }
-  .document-card {
-    padding: 24px;
   }
   .preview-label {
     display: none;
@@ -692,35 +647,6 @@ select {
 .document-card {
   overflow-wrap: anywhere;
 }
-.document-card h1 {
-  margin-bottom: 24px;
-}
-.document-card pre {
-  overflow: auto;
-  padding: 14px;
-  background: var(--background);
-  border-radius: 7px;
-}
-.document-card pre code {
-  padding: 0;
-  background: transparent;
-}
-.document-card table {
-  border-collapse: collapse;
-  display: block;
-  overflow: auto;
-}
-.document-card th,
-.document-card td {
-  border: 1px solid var(--border);
-  padding: 7px 10px;
-}
-.document-card img {
-  max-width: 100%;
-}
-.document-card a {
-  color: var(--primary);
-}
 .annotation-highlight[data-pending] {
   background: #ffff00;
   color: #000;
@@ -743,25 +669,104 @@ select {
   overflow: auto;
   max-height: calc(100dvh - 16px);
 }
-.floating > p {
-  margin: 12px 12px 0;
-  font-size: 11px;
-  color: var(--subtle);
+/* Plannotator CommentPopover's compact header, textarea, footer and entrance. */
+.comment-popover {
+  background: var(--popover);
+  border-radius: 12px;
+  box-shadow: 0 25px 50px -12px #0004;
+  animation: comment-popover-in 0.15s ease-out;
 }
-.floating .quote-preview {
-  display: block;
-  max-height: 64px;
-  overflow: auto;
-  white-space: pre-wrap;
+.comment-popover[data-placement='above'] {
+  animation-name: comment-popover-in-above;
 }
-.floating .composer {
-  padding: 12px;
+.comment-popover .composer {
+  padding: 0;
   border: 0;
 }
-.floating .cancel-button {
-  font-size: 11px;
+.comment-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  gap: 8px;
+}
+.comment-header .quote-preview {
   color: var(--subtle);
-  margin-right: auto;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+.comment-header .cancel-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  color: var(--subtle);
+}
+.comment-header .cancel-button svg {
+  width: 14px;
+  height: 14px;
+}
+.comment-popover .composer-box {
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+.comment-popover textarea {
+  min-height: 72px;
+  max-height: 256px;
+  padding: 8px 12px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.comment-popover .composer-actions {
+  margin: 0;
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+}
+.comment-popover .send-button {
+  width: auto;
+  height: auto;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 6px;
+}
+.comment-popover [role='alert'] {
+  margin: 0;
+  padding: 8px 12px;
+}
+.plannotator-content {
+  font-family: var(--font-sans);
+  font-size: 16px;
+}
+@keyframes comment-popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes comment-popover-in-above {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .comment-popover {
+    animation: none;
+  }
 }
 .selection-actions {
   padding: 4px;
@@ -928,4 +933,79 @@ select {
 .queued-indicator svg {
   width: 10px;
   height: 10px;
+}
+
+.image-lightbox {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100dvh;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  border: 0;
+  padding: 0;
+  background: rgb(0 0 0 / 0.8);
+  backdrop-filter: blur(4px);
+  color: white;
+  cursor: zoom-out;
+}
+.image-lightbox[open] {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+.image-lightbox img {
+  max-width: 90vw;
+  max-height: 85vh;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 25px 50px -12px #0004;
+  cursor: default;
+}
+.image-lightbox p {
+  margin-top: 12px;
+  font-size: 14px;
+  color: rgb(255 255 255 / 0.7);
+  max-width: 90vw;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.image-lightbox button {
+  position: absolute;
+  right: 16px;
+  top: 12px;
+  font-size: 24px;
+}
+
+/* Code layout copied from Plannotator packages/editor/index.css. */
+pre code.pn-code {
+  display: block;
+  padding: 1rem;
+  border-radius: var(--radius);
+  background: var(--code-bg) !important;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  /* Soft-wrap long lines instead of scrolling; break unbroken tokens (URLs,
+     hashes) that are wider than the block on their own. Wrapping is visual
+     only: the text node, copy button and annotation offsets are unchanged. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Grid-shaped fences (ASCII diagrams, aligned columns) keep their layout and
+   scroll horizontally instead; see `codeBlockKeepsLayout`. */
+pre code.pn-code[data-keep-layout] {
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+/* Upstream PopoutDialog offsets its close button for a taller generic header.
+   DiagramPopout has a 36px header; center the 28px control within that header. */
+[data-diagram-popout] > button[aria-label='Close'] {
+  top: 4px;
+  right: 4px;
 }

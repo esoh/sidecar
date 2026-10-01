@@ -792,3 +792,112 @@ test('real drags can partially overlap the previous pending selection', async ({
   await page.getByRole('button', { name: 'Comment', exact: true }).click();
   await expect(page.getByLabel('Comment', { exact: true })).toHaveValue('Keep this overlapping draft');
 });
+
+test('rich Markdown renders Plannotator code, callouts, tables, math and diagrams safely', async ({ page }) => {
+  test.setTimeout(60000);
+  const doc = await f.register('rich.md', `# Rich document
+
+> [!NOTE]
+> Keep this **important** detail.
+
+:::warning
+Check the result.
+:::
+
+| Name | Result |
+| --- | --- |
+| Parser | Ready |
+
+- [x] Checked task
+- [ ] Pending task
+
+Inline math $x^2$ and a display formula:
+
+$$
+\\frac{a}{b}
+$$
+
+\`\`\`typescript
+const answer = 42;
+\`\`\`
+
+\`\`\`mermaid
+flowchart LR
+  A[Read] --> B[Ask]
+\`\`\`
+
+\`\`\`dot
+digraph G { Read -> Ask }
+\`\`\`
+
+<details><summary>More detail</summary><p>Safe HTML text.</p><img src="x" onerror="window.__sidecarDocumentScriptRan=true"></details>
+
+<script>window.__sidecarDocumentScriptRan=true</script>
+`);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const article = page.locator('#document');
+  await expect(article.locator('[data-alert-kind="note"]')).toContainText('Keep this important detail.');
+  await expect(article.locator('[data-directive-kind="warning"]')).toContainText('Check the result.');
+  await expect(article.locator('table')).toContainText('Parser');
+  await expect(article.locator('.katex')).toHaveCount(2);
+  await expect(article.locator('code.language-typescript span').first()).toBeVisible();
+  await expect(article.locator('[data-diagram-block="mermaid"] [data-diagram-svg] svg').first()).toBeVisible({ timeout: 30000 });
+  await expect(article.locator('[data-diagram-block="graphviz"] [data-diagram-svg] svg').first()).toBeVisible({ timeout: 30000 });
+  await article.locator('[data-diagram-block="mermaid"]').getByRole('button', { name: 'Expand diagram' }).click();
+  const diagram = page.getByRole('dialog', { name: 'Mermaid diagram', exact: true });
+  await expect(diagram).toBeVisible();
+  const closeBounds = await diagram.getByRole('button', { name: 'Close', exact: true }).boundingBox();
+  const headerBounds = await diagram.locator('[data-diagram-popout-chrome]').boundingBox();
+  expect(Math.abs(closeBounds!.y + closeBounds!.height / 2 - headerBounds!.y - headerBounds!.height / 2)).toBeLessThan(1);
+  await diagram.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(diagram).toHaveCount(0);
+  await expect(article.locator('script, [onerror]')).toHaveCount(0);
+  expect(await page.evaluate(() => '__sidecarDocumentScriptRan' in window)).toBe(false);
+  await select(page, 'important');
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await expect(page.getByTestId('selection-preview')).toHaveText('important');
+});
+
+test('renderer fonts, spacing, images and highlighted code survive reload and file edits', async ({ page }) => {
+  const markdown = '# Renderer checks\n\nParagraph with **formatting**.\n\n[Go to code](#code)\n\n## Code\n\n```typescript\nconst selectedValue = 42;\n```\n\n| Key | Value |\n| --- | --- |\n| Cell | Ready |\n\n![Local sample](sample.svg?revision=2#view)\n\n<picture><source srcset="missing.svg" type="image/svg+xml"><img src="sample.svg" alt="Responsive fallback"></picture>\n';
+  await writeFile(join(f.directory, 'sample.svg'), '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect width="100" height="50" fill="purple"/></svg>');
+  const doc = await f.register('styles.md', markdown);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.evaluate(() => document.fonts.ready);
+  const heading = page.locator('#document h1');
+  await expect(heading).toHaveCSS('font-size', '22px');
+  await expect(heading).toHaveCSS('margin-bottom', '16px');
+  await expect(heading).toHaveCSS('font-family', /Inter Variable/);
+  await expect(page.locator('#document > .plannotator-content > p').first()).toHaveCSS('line-height', '24.375px');
+  await expect(page.locator('#document code')).toHaveCSS('font-family', /Geist Mono Variable/);
+  await expect(page.locator('#document code')).toHaveCSS('padding', '16px');
+  const emptyIcon = page.locator('.empty-conversation svg');
+  await expect(emptyIcon).toHaveCSS('display', 'inline-block');
+  const iconBounds = await emptyIcon.boundingBox(), emptyBounds = await page.locator('.empty-conversation').boundingBox();
+  expect(Math.abs(iconBounds!.x + iconBounds!.width / 2 - emptyBounds!.x - emptyBounds!.width / 2)).toBeLessThan(1);
+  expect(await page.evaluate(() => document.fonts.check('15px "Inter Variable"') && document.fonts.check('13px "Geist Mono Variable"'))).toBe(true);
+  const img = page.getByRole('img', { name: 'Local sample', exact: true });
+  await img.scrollIntoViewIfNeeded();
+  await expect.poll(() => img.evaluate(image => image instanceof HTMLImageElement && image.naturalWidth)).toBe(100);
+  const responsive = page.getByRole('img', { name: 'Responsive fallback', exact: true });
+  await responsive.scrollIntoViewIfNeeded();
+  await expect.poll(() => responsive.evaluate(image => image instanceof HTMLImageElement && image.naturalWidth)).toBe(100);
+  await img.click(); await expect(page.getByRole('dialog', { name: 'Local sample' })).toBeVisible();
+  await page.keyboard.press('Escape'); await expect(page.getByRole('dialog', { name: 'Local sample' })).toHaveCount(0);
+  await page.getByRole('link', { name: 'Go to code' }).click();
+  await expect(page.locator('#code')).toBeInViewport();
+  await select(page, 'selectedValue');
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('Explain this value');
+  await page.getByLabel('Comment', { exact: true }).press('Enter');
+  await expect(page.locator('code .annotation-highlight')).toHaveText('selectedValue');
+  await page.reload();
+  await expect(page.locator('code.language-typescript span').first()).toBeVisible();
+  await expect(page.locator('code .annotation-highlight')).toHaveText('selectedValue');
+  await writeFile(join(f.directory, 'styles.md'), markdown.replace('Renderer checks', 'Updated renderer checks'));
+  await expect(heading).toHaveText('Updated renderer checks');
+  await expect(page.locator('code .annotation-highlight')).toHaveText('selectedValue');
+  await select(page, 'Ready');
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await expect(page.getByTestId('selection-preview')).toHaveText('Ready');
+});

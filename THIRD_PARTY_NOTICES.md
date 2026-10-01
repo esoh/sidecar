@@ -1,6 +1,7 @@
 # Third-party notices
 
-The floating-composer placement and outside-click dismissal in `web/app.tsx`
+The floating-composer placement, outside-click dismissal, compact layout, and
+entrance animation in `web/app.tsx`, `web/conversations.tsx`, and `web/app.css`
 are adapted from Plannotator’s
 `packages/ui/components/CommentPopover.tsx`.
 Source: https://github.com/backnotprop/plannotator/blob/435dac656cbdb9af07bab9ffbb20d791b520d172/packages/ui/components/CommentPopover.tsx
@@ -26,6 +27,17 @@ The palette, grid background and document/sidebar styling in `web/app.css`
 are adapted from `packages/ui/themes/plannotator.css`, `packages/ui/theme.css`,
 `Viewer.tsx` and `AnnotationPanel.tsx` at the same revision.
 Source: https://github.com/backnotprop/plannotator/tree/435dac656cbdb9af07bab9ffbb20d791b520d172/packages/ui
+
+The document renderer imports the published MIT-licensed `@plannotator/ui`
+0.47.0 components, parser, syntax highlighter, theme stylesheet, and heading
+slugs. `web/MarkdownDocument.tsx` follows its `RenderedMarkdown` composition
+and `Viewer` diagram/image rendering. Code-block layout in `web/app.css` is
+copied from `packages/editor/index.css` at the source revision above.
+Source: https://github.com/backnotprop/plannotator/blob/435dac656cbdb9af07bab9ffbb20d791b520d172/packages/editor/index.css
+
+Inter and Geist Mono are served from Plannotator's Fontsource dependencies;
+the fonts use the SIL Open Font License 1.1 distributed with those packages.
+KaTeX and its fonts retain the licenses included in the KaTeX dependency.
 
 MIT License
 

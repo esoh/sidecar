@@ -1,14 +1,22 @@
 import { build } from 'esbuild';
-import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile, writeFile, realpath } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { basename, join, dirname, relative, isAbsolute, extname } from 'node:path';
 import { notifyCodex } from './agent.ts';
 import { observeCodex, readCodexActivity } from './codex-stream.ts';
 import { ReplyStream, isStreamEvent } from './stream.ts';
 import { readDocument } from './documents.ts';
 import { claim, createThread, nameThread, DomainError, get, isObject, isQuote, openStore, ownerKey, registerDocument, reply, resolveThread, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput } from './store.ts';
+
+const rendererRequire = createRequire(import.meta.resolve('@plannotator/ui/components/BlockRenderer'));
+const rendererFonts = {
+  katex: rendererRequire.resolve('katex/dist/katex.min.css'),
+  inter: rendererRequire.resolve('@fontsource-variable/inter/index.css'),
+  geist: rendererRequire.resolve('@fontsource-variable/geist-mono/index.css'),
+};
 
 type DocumentData = Awaited<ReturnType<typeof readDocument>>;
 type Cached = { data: DocumentData } | { error: string; status: number };
@@ -164,7 +172,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   async function handle(request: IncomingMessage, response: ServerResponse) {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
-    response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
+    response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
     try {
       if (request.headers.host !== new URL(url).host) throw new DomainError('Invalid host', 403);
       if (request.headers.origin !== undefined && request.headers.origin !== url) throw new DomainError('Foreign origin', 403);
@@ -192,9 +200,43 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       }
       if (method === 'GET' && path === '/app.js') {
         response.setHeader('Content-Type', 'text/javascript; charset=utf-8');
+        // ponytail: one ~18 MiB local bundle; split renderer chunks if page startup becomes a problem.
         // Bundle on load so the CLI remains the only process needed for the viewer.
         const bundle = await build({ entryPoints: [fileURLToPath(new URL('../web/app.tsx', import.meta.url))], bundle: true, write: false, minify: true, format: 'esm', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' } });
         response.end(bundle.outputFiles[0].contents);
+        return;
+      }
+      if (method === 'GET' && path === '/renderer.css') {
+        response.setHeader('Content-Type', 'text/css; charset=utf-8');
+        const styles = await readFile(new URL(import.meta.resolve('@plannotator/ui/styles.css')), 'utf8');
+        const fonts = await Promise.all(Object.entries(rendererFonts).map(async ([family, cssPath]) =>
+          (await readFile(cssPath, 'utf8')).replaceAll(/url\((?:\.\/files|fonts)\//g, `url(/renderer-fonts/${family}/`)));
+        response.end([styles, ...fonts].join('\n'));
+        return;
+      }
+      const font = path.match(/^\/renderer-fonts\/(katex|inter|geist)\/([A-Za-z0-9_-]+\.(?:woff2?|ttf))$/);
+      if (method === 'GET' && font) {
+        const family = font[1], name = font[2];
+        if (family !== 'katex' && family !== 'inter' && family !== 'geist') throw new DomainError('Unknown font', 404);
+        response.setHeader('Content-Type', name.endsWith('.woff2') ? 'font/woff2' : name.endsWith('.woff') ? 'font/woff' : 'font/ttf');
+        response.end(await readFile(join(dirname(rendererFonts[family]), family === 'katex' ? 'fonts' : 'files', name)));
+        return;
+      }
+      if (method === 'GET' && path === '/api/image') {
+        const document = get(store.read().documents, target.searchParams.get('document') ?? '');
+        const base = dirname(document.path);
+        const imageUrl = new URL(target.searchParams.get('path') ?? '', pathToFileURL(document.path));
+        if (imageUrl.protocol !== 'file:') throw new DomainError('Expected a local image', 400);
+        const imagePath = await realpath(fileURLToPath(imageUrl));
+        const fromBase = relative(base, imagePath);
+        if (fromBase.startsWith('..') || isAbsolute(fromBase)) throw new DomainError('Image must be inside the document directory', 403);
+        const types: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.avif': 'image/avif', '.svg': 'image/svg+xml' };
+        const mime = types[extname(imagePath).toLowerCase()];
+        if (!mime) throw new DomainError('Unsupported image type', 415);
+        // SVG remains an image even if opened directly; it cannot execute or fetch resources.
+        response.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; style-src 'unsafe-inline'");
+        response.setHeader('Content-Type', mime);
+        response.end(await readFile(imagePath));
         return;
       }
       if (method === 'GET' && path === '/app.css') {
