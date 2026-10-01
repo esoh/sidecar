@@ -41,32 +41,34 @@ async function select(page: Page, exact: string) {
 test('general questions, follow-ups, late replies and independent document titles', async ({ page }) => {
   const a = await f.register(), b = await f.register('b.md', '# Other\n\nSecond document.');
   await page.goto(`${f.url}/?document=${a.id}`);
-  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled();
-  await page.getByLabel('Question', { exact: true }).fill('Explain this document');
-  await page.getByLabel('Question', { exact: true }).press('Tab'); await page.keyboard.press('Enter');
-  await expect(page.locator('#threads').getByText('Explain this document', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
+  await page.getByLabel('Message', { exact: true }).fill('Explain this document');
+  await page.getByLabel('Message', { exact: true }).press('Tab'); await page.keyboard.press('Enter');
+  await expect(page.getByRole('log').getByText('Explain this document', { exact: true })).toBeVisible();
   expect((await lastRequest()).quote).toBeUndefined();
   await answer('Here is the answer');
   await expect(page.locator('#threads').getByText('Here is the answer', { exact: true })).toBeVisible();
-  await page.getByLabel('Follow-up').fill('Clarify further');
-  await page.getByRole('button', { name: 'Send follow-up' }).click();
+  await page.getByLabel('Message', { exact: true }).fill('Clarify further');
+  await page.getByRole('button', { name: 'Send message' }).click();
   await expect(page.locator('#threads').getByText('Clarify further', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Resolve', exact: true }).click();
+  await page.getByRole('button', { name: 'Resolve thread', exact: true }).click();
   await answer('A late clarification');
   await expect(page.locator('#threads').getByText('A late clarification', { exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Reopen', exact: true })).toBeVisible();
-  await page.getByLabel('Document title').fill('My review title');
-  await page.getByRole('button', { name: 'Save title' }).click();
+  await expect(page.getByRole('button', { name: 'Reopen thread', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Edit document name' }).click();
+  await page.getByLabel('Document name', { exact: true }).fill('My review title');
+  await page.getByLabel('Document name', { exact: true }).press('Enter');
   await expect(page).toHaveTitle('My review title');
-  await page.getByRole('link', { name: 'Other', exact: true }).click();
+  await page.getByLabel('Documents', { exact: true }).selectOption(b.id);
   await expect(page).toHaveTitle('Other');
-  await page.getByLabel('Document title').fill('Second title');
-  await page.getByRole('button', { name: 'Save title' }).click();
+  await page.getByRole('button', { name: 'Edit document name' }).click();
+  await page.getByLabel('Document name', { exact: true }).fill('Second title');
+  await page.getByLabel('Document name', { exact: true }).press('Enter');
   await expect(page).toHaveTitle('Second title');
-  await page.getByRole('link', { name: 'My review title', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Reopen', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Reopen', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Resolve', exact: true })).toBeVisible();
+  await page.getByLabel('Documents', { exact: true }).selectOption(a.id);
+  await expect(page.getByRole('button', { name: 'Reopen thread', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Reopen thread', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Resolve thread', exact: true })).toBeVisible();
   await page.reload(); await expect(page).toHaveTitle('My review title');
   await f.reopen(); await page.goto(`${f.url}/?document=${a.id}`);
   await expect(page).toHaveTitle('My review title');
@@ -82,20 +84,22 @@ test('selection spans inline formatting, code and emoji; outside and empty selec
   await page.getByRole('button', { name: 'Comment', exact: true }).click();
   await expect(page.getByTestId('selection-preview')).toHaveText('bold 😀 and code');
   await page.getByLabel('Comment', { exact: true }).fill('Explain the selection');
-  await page.getByRole('dialog').getByRole('button', { name: 'Send', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Send comment', exact: true }).click();
   await expect(page.locator('#threads').getByText('Explain the selection', { exact: true })).toBeVisible();
   const quote = (await lastRequest()).quote;
   expect(quote.exact).toBe('bold 😀 and code'); expect(quote.end - quote.start).toBe(quote.exact.length);
   expect(await page.locator('#document script').count()).toBe(0);
   await page.evaluate(() => {
-    const range = document.createRange(); range.selectNodeContents(document.querySelector('h1')!);
+    const range = document.createRange(); range.selectNodeContents(document.querySelector('.brand')!);
     const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
   });
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Comment', exact: true })).toHaveCount(0);
-  await page.getByLabel('Question', { exact: true }).fill('General after outside selection');
-  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+  await page.getByLabel('Message', { exact: true }).fill('General after outside selection');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect(page.locator('#threads').getByText('General after outside selection', { exact: true })).toBeVisible();
   expect((await lastRequest()).quote).toBeUndefined();
 });
@@ -108,17 +112,17 @@ test('file replacement preserves draft and focus; ambiguous or missing passages 
   await select(page, 'repeat');
   await page.getByRole('button', { name: 'Comment', exact: true }).click();
   await page.getByLabel('Comment', { exact: true }).fill('What does this mean?');
-  await page.getByRole('dialog').getByRole('button', { name: 'Send', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Send comment', exact: true }).click();
   await expect(page.locator('#threads').getByText('What does this mean?', { exact: true })).toBeVisible();
-  await page.getByLabel('Follow-up').fill('Unfinished draft');
+  await page.getByLabel('Message', { exact: true }).fill('Unfinished draft');
   const replacement = join(f.directory, 'replace.md');
   await writeFile(replacement, '# After\n\n' + repeated + '\n\n' + repeated);
   await rename(replacement, join(f.directory, 'a.md'));
   await expect(page.locator('#document h1')).toHaveText('After');
-  await expect(page.locator('#threads').getByText('Passage changed.', { exact: true })).toBeVisible();
+  await expect(page.locator('#threads').getByText('Passage changed', { exact: true })).toBeVisible();
   await expect(page.locator('#document mark')).toHaveCount(0);
-  await expect(page.getByLabel('Follow-up')).toHaveValue('Unfinished draft');
-  await expect(page.getByLabel('Follow-up')).toBeFocused();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Unfinished draft');
+  await expect(page.getByLabel('Message', { exact: true })).toBeFocused();
   await unlink(join(f.directory, 'a.md'));
   await expect(page.getByTestId('document-error')).toContainText('unavailable');
   await expect(page.locator('#threads').getByText('What does this mean?', { exact: true })).toBeVisible();
@@ -137,7 +141,7 @@ test('file refresh preserves the captured passage in an unsent question', async 
   await expect(page.getByTestId('selection-preview')).toContainText('Target passage.');
   await expect(page.getByTestId('selection-preview')).toContainText('Passage changed');
   await expect(page.getByLabel('Comment', { exact: true })).toBeFocused();
-  await page.getByRole('dialog').getByRole('button', { name: 'Send', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Send comment', exact: true }).click();
   await expect(page.locator('#threads').getByText('Please rewrite this selected passage', { exact: true })).toBeVisible();
   const request = await lastRequest();
   expect(request.quote.exact).toBe('Target passage.');
@@ -157,14 +161,15 @@ test('a delayed title save preserves newer unsaved typing', async ({ page }) => 
     saved(); await holdResponse; await route.fulfill({ response });
   }, { times: 1 });
   try {
-    await page.getByLabel('Document title').fill('First saved title');
-    await page.getByRole('button', { name: 'Save title' }).click();
+    await page.getByRole('button', { name: 'Edit document name' }).click();
+    await page.getByLabel('Document name', { exact: true }).fill('First saved title');
+    await page.getByLabel('Document name', { exact: true }).press('Enter');
     await serverSaved;
-    await page.getByLabel('Document title').fill('Second unsaved title');
-    const refreshed = page.waitForResponse(`**/api/state`);
-    release(); await refreshed;
-    await expect(page.getByLabel('Document title')).toHaveValue('Second unsaved title');
-    await page.getByRole('button', { name: 'Save title' }).click();
+    await page.getByLabel('Document name', { exact: true }).fill('Second unsaved title');
+    const response = page.waitForResponse(`**/api/documents/${a.id}/title`);
+    release(); await (await response).finished();
+    await expect(page.getByLabel('Document name', { exact: true })).toHaveValue('Second unsaved title');
+    await page.getByLabel('Document name', { exact: true }).press('Enter');
     await expect(page).toHaveTitle('Second unsaved title');
   } finally { release(); }
 });
@@ -173,28 +178,28 @@ test('a delayed title save preserves newer unsaved typing', async ({ page }) => 
 test('partial replies update live without losing a follow-up draft or rendering HTML', async ({ page }) => {
   const doc = await f.register();
   await page.goto(`${f.url}/?document=${doc.id}`);
-  await page.getByLabel('Question', { exact: true }).fill('Stream the answer');
-  await page.getByRole('button', { name: 'Send', exact: true }).click();
-  await expect(page.getByLabel('Follow-up')).toBeVisible();
+  await page.getByLabel('Message', { exact: true }).fill('Stream the answer');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
   const request = await lastRequest();
   await f.agent(`/agent/requests/${request.id}/claim`, {});
   const route = { requestId: request.id, documentId: doc.id, threadId: request.threadId };
   const markers = await (await f.agent('/agent/streams', route)).json();
   const emit = (index: number, delta: string, final = false) => f.agent('/agent/stream-events', { ownerKey: `claude-${f.owner.sessionId}`, messageId: 'message', turnId: 'turn', index, delta, final });
-  await page.getByLabel('Follow-up').fill('Keep this draft');
+  await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
   await emit(0, markers.prefix + 'First <img src=x onerror=alert(1)>');
   await expect(page.locator('#threads').getByText('First <img src=x onerror=alert(1)>', { exact: true })).toBeVisible();
   await expect(page.locator('#threads img')).toHaveCount(0);
   expect((await state()).requests[request.id].status).toBe('claimed');
-  await page.getByRole('button', { name: 'Resolve', exact: true }).click();
+  await page.getByRole('button', { name: 'Resolve thread', exact: true }).click();
   await page.reload();
   await expect(page.locator('#threads').getByText('First <img src=x onerror=alert(1)>', { exact: true })).toBeVisible();
-  await page.getByLabel('Follow-up').fill('Keep this draft');
-  await page.getByLabel('Follow-up').focus();
+  await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
+  await page.getByLabel('Message', { exact: true }).focus();
   await emit(1, ' second.' + markers.suffix, true);
   await expect(page.locator('#threads').getByText('First <img src=x onerror=alert(1)> second.', { exact: true })).toBeVisible();
-  await expect(page.getByLabel('Follow-up')).toBeFocused();
-  await expect(page.getByLabel('Follow-up')).toHaveValue('Keep this draft');
+  await expect(page.getByLabel('Message', { exact: true })).toBeFocused();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
   await f.agent('/agent/replies', { ...route, stream: true });
   await expect(page.locator('#threads').getByText('First <img src=x onerror=alert(1)> second.', { exact: true })).toHaveCount(1);
   await expect(page.locator('#threads').getByText('Agent is responding.')).toHaveCount(0);
@@ -216,10 +221,10 @@ test('floating comments retain their highlight, retry safely, and reopen the sav
   await composer.getByLabel('Comment', { exact: true }).fill('Explain this passage');
   expect((await page.locator('#document mark').allTextContents()).join('')).toBe('bold 😀 and code');
   await page.route('**/api/questions', route => route.fulfill({ status: 503, json: { error: 'Try again' } }), { times: 1 });
-  await composer.getByRole('button', { name: 'Send', exact: true }).click();
+  await composer.getByRole('button', { name: 'Send comment', exact: true }).click();
   await expect(composer.getByRole('alert')).toHaveText('Try again');
   await expect(composer.getByLabel('Comment', { exact: true })).toHaveValue('Explain this passage');
-  await composer.getByRole('button', { name: 'Send', exact: true }).click();
+  await composer.getByRole('button', { name: 'Send comment', exact: true }).click();
   await expect(composer).toHaveCount(0);
   await expect(page.locator('#threads').getByText('Explain this passage', { exact: true })).toBeVisible();
   const request = await lastRequest();
@@ -231,12 +236,14 @@ test('floating comments retain their highlight, retry safely, and reopen the sav
   await expect(highlight).toHaveAttribute('role', 'button');
   await expect(page.locator('#document').getByRole('button', { name: 'bold 😀', exact: true })).toBeVisible();
   await highlight.click();
-  await expect(page.locator(`#thread-${request.threadId}`)).toBeFocused();
+  await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', request.threadId);
+  await expect(page.getByRole('button', { name: 'Threads', exact: true })).toBeFocused();
   await expect(page.locator('#threads').getByText('This stays in the original conversation.', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Resolve', exact: true }).click();
+  await page.getByRole('button', { name: 'Resolve thread', exact: true }).click();
   await highlight.focus(); await page.keyboard.press('Enter');
-  await expect(page.locator(`#thread-${request.threadId}`)).toBeFocused();
-  await expect(page.getByRole('button', { name: 'Reopen', exact: true })).toBeVisible();
+  await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', request.threadId);
+  await expect(page.getByRole('button', { name: 'Threads', exact: true })).toBeFocused();
+  await expect(page.getByRole('button', { name: 'Reopen thread', exact: true })).toBeVisible();
 });
 
 test('composer stays in a narrow viewport and cancels without submitting', async ({ page }) => {
@@ -260,8 +267,9 @@ test('composer stays in a narrow viewport and cancels without submitting', async
   await expect(composer).toHaveCount(0);
   expect(Object.keys((await state()).requests)).toHaveLength(0);
   await expect(page.locator('#document mark')).toHaveCount(0);
-  await page.getByLabel('Question', { exact: true }).fill('A general question');
-  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  await page.getByRole('button', { name: 'Show conversations' }).click();
+  await page.getByLabel('Message', { exact: true }).fill('A general question');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect(page.locator('#threads').getByText('A general question', { exact: true })).toBeVisible();
   expect((await lastRequest()).quote).toBeUndefined();
 });
@@ -274,18 +282,18 @@ test('link highlights stay in the viewer and overlapping threads can each be ope
   await select(page, 'the docs');
   await page.getByRole('button', { name: 'Comment', exact: true }).click();
   await page.getByLabel('Comment', { exact: true }).fill('First question');
-  await page.getByRole('dialog').getByRole('button', { name: 'Send', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Send comment', exact: true }).click();
   await expect(page.locator('#threads').getByText('First question', { exact: true })).toBeVisible();
   const first = await lastRequest();
   await page.locator('#document mark').click();
-  await expect(page.locator(`#thread-${first.threadId}`)).toBeFocused();
+  await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', first.threadId);
   expect(page.url()).toContain(f.url);
   const second = await (await f.view('/api/questions', { documentId: a.id, text: 'Second question', clientMessageId: 'second', quote: { ...first.quote, exact: 'docs', prefix: first.quote.prefix + 'the ', start: first.quote.start + 4 } })).json();
-  await expect(page.locator('#threads').getByText('Second question', { exact: true })).toBeVisible();
+  await expect(page.locator('#document mark').filter({ hasText: /^docs$/ })).toBeVisible();
   for (const [text, id] of [['First question', first.threadId], ['Second question', second.threadId]]) {
     await page.locator('#document mark').filter({ hasText: /^docs$/ }).click();
     await page.getByRole('button', { name: text, exact: true }).click();
-    await expect(page.locator(`#thread-${id}`)).toBeFocused();
+    await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', id);
   }
   await page.reload();
   await page.locator('#document mark').filter({ hasText: /^docs$/ }).click();
@@ -293,17 +301,19 @@ test('link highlights stay in the viewer and overlapping threads can each be ope
   await expect(page.getByRole('button', { name: 'Second question', exact: true })).toBeVisible();
 });
 
-// The composer must not remove, resize, or replace the in-flow question form.
+// Floating annotation controls must preserve reading position and the current conversation draft.
 test('opening and closing a passage composer preserves page layout and the general draft', async ({ page }) => {
   const a = await f.register('a.md', '# Stable layout\n\n' + 'Surrounding paragraph.\n\n'.repeat(15) + 'Selected passage stays in place.');
   for (const width of [900, 375]) {
     await page.setViewportSize({ width, height: 600 });
     await page.goto(`${f.url}/?document=${a.id}`);
-    const general = page.getByRole('region', { name: 'New question' });
-    await general.getByLabel('Question', { exact: true }).fill('Keep this general draft');
+    if (width < 850) await page.getByRole('button', { name: 'Show conversations' }).click();
+    const general = page.locator('#threads');
+    await general.getByLabel('Message', { exact: true }).fill('Keep this general draft');
+    if (width < 850) await page.getByRole('button', { name: 'Hide conversations' }).click();
     await page.locator('#document p').last().scrollIntoViewIfNeeded();
     const layout = () => page.evaluate(() => ({
-      scrollY,
+      scrollY: document.querySelector('.canvas')!.scrollTop,
       height: document.documentElement.scrollHeight,
       passage: document.querySelector('#document p:last-child')!.getBoundingClientRect().top,
       threads: document.querySelector('#threads')!.getBoundingClientRect().top,
@@ -319,7 +329,7 @@ test('opening and closing a passage composer preserves page layout and the gener
     await popup.getByRole('textbox').press('Escape');
     await expect(popup).toHaveCount(0);
     await expect.poll(layout).toEqual(before);
-    await expect(general.getByLabel('Question', { exact: true })).toHaveValue('Keep this general draft');
+    await expect(general.getByLabel('Message', { exact: true })).toHaveValue('Keep this general draft');
     expect(Object.keys((await state()).requests)).toHaveLength(0);
   }
 });
@@ -347,13 +357,13 @@ test('selecting another passage preserves separate drafts and a failed-send retr
     await route.fetch();
     await route.fulfill({ status: 503, json: { error: 'Response lost; retry' } });
   }, { times: 1 });
-  await popup.getByRole('button', { name: 'Send', exact: true }).click();
+  await popup.getByRole('button', { name: 'Send comment', exact: true }).click();
   await expect(popup.getByRole('alert')).toHaveText('Response lost; retry');
   await compose('Second passage.');
   await expect(popup.getByRole('textbox')).toHaveValue('Second draft');
   await compose('First passage.');
   await expect(popup.getByRole('textbox')).toHaveValue('First draft');
-  await popup.getByRole('button', { name: 'Send', exact: true }).click();
+  await popup.getByRole('button', { name: 'Send comment', exact: true }).click();
   await expect(popup).toHaveCount(0);
   expect(Object.keys((await state()).requests)).toHaveLength(1);
   expect((await lastRequest()).quote.exact).toBe('First passage.');
@@ -365,7 +375,7 @@ test('outside clicks dismiss only empty comments and preserve the clicked focus 
   await page.goto(`${f.url}/?document=${a.id}`);
   await expect(page.locator('#document')).toContainText('Selected passage.');
   const popup = page.getByRole('dialog', { name: 'Comment on selection' });
-  const title = page.getByLabel('Document title');
+  const title = page.getByRole('button', { name: 'Edit document name' });
   const compose = async () => {
     await select(page, 'Selected passage.');
     await page.getByRole('button', { name: 'Comment', exact: true }).click();
@@ -376,18 +386,18 @@ test('outside clicks dismiss only empty comments and preserve the clicked focus 
   await expect(popup).toBeVisible();
   await title.click();
   await expect(popup).toHaveCount(0);
-  await expect(title).toBeFocused();
+  await expect(page.getByLabel('Document name', { exact: true })).toBeFocused();
   await expect(page.locator('#document mark')).toHaveCount(0);
   await compose();
   await popup.getByRole('textbox').fill('Keep my draft');
   await title.click();
   await expect(popup).toBeVisible();
   await expect(popup.getByRole('textbox')).toHaveValue('Keep my draft');
-  await expect(title).toBeFocused();
+  await expect(page.getByLabel('Document name', { exact: true })).toBeFocused();
   await popup.getByRole('textbox').fill(' \n\t ');
   await title.click();
   await expect(popup).toHaveCount(0);
-  await expect(title).toBeFocused();
+  await expect(page.getByLabel('Document name', { exact: true })).toBeFocused();
   await compose();
   await expect(popup.getByRole('textbox')).toHaveValue('');
   expect(Object.keys((await state()).requests)).toHaveLength(0);
@@ -405,17 +415,26 @@ test('C opens the selected comment without intercepting typing, copy shortcuts, 
   await expect(popup).toHaveCount(0);
   await select(page, 'Selected passage.');
   await expect(page.getByRole('button', { name: 'Comment', exact: true })).toBeVisible();
+  const copied = await page.evaluate(() => {
+    const data = new DataTransfer();
+    const event = new ClipboardEvent('copy', { clipboardData: data, bubbles: true, cancelable: true });
+    document.getElementById('document')!.dispatchEvent(event);
+    return { text: data.getData('text/plain'), handled: event.defaultPrevented };
+  });
+  expect(copied).toEqual({ text: 'Selected passage.', handled: true });
   for (const key of ['Control+c', 'Meta+c', 'Alt+c']) await page.keyboard.press(key);
   await article.dispatchEvent('keydown', { key: 'c', isComposing: true });
   await expect(popup).toHaveCount(0);
-  const title = page.getByLabel('Document title');
-  await title.fill(''); await title.press('c');
-  await expect(title).toHaveValue('c');
-  const question = page.getByLabel('Question', { exact: true });
+  const title = page.getByRole('button', { name: 'Edit document name' });
+  await title.click();
+  await page.getByLabel('Document name', { exact: true }).fill(''); await page.getByLabel('Document name', { exact: true }).press('c');
+  await expect(page.getByLabel('Document name', { exact: true })).toHaveValue('c');
+  const question = page.getByLabel('Message', { exact: true });
   await question.fill(''); await question.press('c');
   await expect(question).toHaveValue('c');
   await expect(popup).toHaveCount(0);
   await article.focus();
+  await select(page, 'Selected passage.');
   await page.keyboard.press('c');
   await expect(popup).toBeVisible();
   await expect(popup.getByTestId('selection-preview')).toHaveText('Selected passage.');
@@ -425,4 +444,351 @@ test('C opens the selected comment without intercepting typing, copy shortcuts, 
   await expect(popup.getByRole('textbox')).toHaveValue('c');
   await page.keyboard.press('Escape');
   expect(Object.keys((await state()).requests)).toHaveLength(0);
+});
+
+
+test('sidebar filters, preserves per-thread drafts, and keeps background replies in their own thread', async ({ page }) => {
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const message = page.getByLabel('Message', { exact: true });
+  await expect(page.getByRole('heading', { name: 'Unnamed', exact: true })).toBeVisible();
+  await message.fill('Explain the document'); await message.press('Enter'); await expect(message).toHaveValue('');
+  const first = await lastRequest();
+  await answer('First reply');
+  await f.agent(`/agent/threads/${first.threadId}/title`, { title: 'Document overview' });
+  await expect(page.getByRole('heading', { name: 'Document overview' })).toBeVisible();
+  await message.fill('Draft in the first conversation');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await expect(page.getByLabel('Thread status')).toHaveValue('unresolved');
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+  await message.fill('Question in a different thread'); await message.press('Enter'); await expect(message).toHaveValue('');
+  const second = await lastRequest(); expect(second.threadId).not.toBe(first.threadId);
+  await message.fill('Keep second draft');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await page.locator(`[data-thread-id="${first.threadId}"]`).click();
+  await expect(message).toHaveValue('Draft in the first conversation');
+  await answer('Background reply to the second thread');
+  await expect(page.getByRole('heading', { name: 'Document overview' })).toBeVisible();
+  await expect(message).toHaveValue('Draft in the first conversation');
+  await expect(page.locator('#threads')).not.toContainText('Background reply');
+  await page.getByRole('button', { name: 'Resolve thread' }).click();
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await expect(page.locator(`[data-thread-id="${first.threadId}"]`)).toHaveCount(0);
+  await page.getByLabel('Thread status').selectOption('resolved');
+  await page.locator(`[data-thread-id="${first.threadId}"]`).click();
+  await page.getByRole('button', { name: 'Reopen thread' }).click();
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await expect(page.getByText('No resolved threads.', { exact: true })).toBeVisible();
+  await page.getByLabel('Thread status').selectOption('unresolved');
+  await expect(page.locator('[data-thread-id]').first()).toHaveAttribute('data-thread-id', second.threadId);
+  await page.locator(`[data-thread-id="${second.threadId}"]`).click();
+  await expect(message).toHaveValue('Keep second draft');
+  await expect(page.locator('#threads')).toContainText('Background reply to the second thread');
+});
+
+test('composers grow, preserve Shift+Enter and IME, and submit with Enter', async ({ page }) => {
+  const doc = await f.register(); await page.goto(`${f.url}/?document=${doc.id}`);
+  const message = page.getByLabel('Message', { exact: true });
+  await expect(message).toBeVisible();
+  const height = (await message.boundingBox())!.height;
+  await message.fill('One'); await message.press('Shift+Enter'); await message.pressSequentially('Two');
+  await expect(message).toHaveValue('One\nTwo');
+  await message.dispatchEvent('keydown', { key: 'Enter', isComposing: true });
+  expect(Object.keys((await state()).requests)).toHaveLength(0);
+  await message.fill(Array.from({length: 16}, (_, i) => `Line ${i}`).join('\n'));
+  const grown = (await message.boundingBox())!.height;
+  expect(grown).toBeGreaterThan(height); expect(grown).toBeLessThanOrEqual(240);
+  await message.press('Enter'); await expect(message).toHaveValue('');
+  expect(Object.keys((await state()).requests)).toHaveLength(1);
+  expect((await message.boundingBox())!.height).toBe(height);
+  await select(page, 'Hello world.'); await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  const comment = page.getByRole('dialog').getByLabel('Comment', { exact: true });
+  await comment.fill('Explain'); await comment.press('Shift+Enter'); await comment.pressSequentially('this');
+  await expect(comment).toHaveValue('Explain\nthis'); await comment.press('Enter');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect((await lastRequest()).quote.exact).toBe('Hello world.');
+});
+
+
+test('inline title cancellation, blur saving and failed-save recovery preserve user input', async ({ page }) => {
+  const doc = await f.register(); await page.goto(`${f.url}/?document=${doc.id}`);
+  const pencil = page.getByRole('button', { name: 'Edit document name', exact: true });
+  const title = page.getByLabel('Document name', { exact: true });
+  await pencil.click(); await title.fill('Cancel this'); await title.press('Escape');
+  await expect(page).toHaveTitle('First heading'); await expect(pencil).toBeFocused();
+  await pencil.click(); await title.fill('Saved on blur');
+  await page.getByLabel('Message', { exact: true }).click();
+  await expect(page).toHaveTitle('Saved on blur');
+  await expect(page.getByLabel('Message', { exact: true })).toBeFocused();
+  await page.route('**/api/documents/*/title', route => route.fulfill({ status: 503, json: { error: 'Save failed' } }), { times: 1 });
+  await pencil.click(); await title.fill('Retry this name'); await title.press('Enter');
+  await expect(title).toHaveValue('Retry this name'); await expect(page.getByRole('alert')).toHaveText('Save failed');
+  await title.press('Enter'); await expect(page).toHaveTitle('Retry this name'); await expect(pencil).toBeFocused();
+});
+
+test('thread creation retry and conversation scroll survive switching', async ({ page }) => {
+  const doc = await f.register(); await page.goto(`${f.url}/?document=${doc.id}`);
+  const message = page.getByLabel('Message', { exact: true });
+  await message.fill('Long answer please'); await message.press('Enter'); await expect(message).toHaveValue('');
+  const first = await lastRequest(); await answer('A detailed explanation.\n'.repeat(100));
+  const log = page.getByRole('log');
+  await expect(log).toContainText('A detailed explanation.');
+  await log.evaluate(el => { el.scrollTop = 230; el.dispatchEvent(new Event('scroll')); });
+  const position = await log.evaluate(el => el.scrollTop);
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  const before = Object.keys((await state()).threads).length;
+  await page.route('**/api/threads', async route => { await route.fetch(); await route.fulfill({ status: 503, json: { error: 'Response lost' } }); }, { times: 1 });
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+  await expect(page.getByRole('alert')).toHaveText('Response lost');
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+  await expect(message).toBeVisible();
+  expect(Object.keys((await state()).threads)).toHaveLength(before + 1);
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await page.locator(`[data-thread-id="${first.threadId}"]`).click();
+  await expect.poll(() => log.evaluate(el => el.scrollTop)).toBe(position);
+});
+
+test('a delayed send preserves a newer draft after leaving and reopening its thread', async ({ page }) => {
+  const doc = await f.register(); await page.goto(`${f.url}/?document=${doc.id}`);
+  const message = page.getByLabel('Message', { exact: true });
+  let release = () => {}, accepted = () => {};
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const saved = new Promise<void>(resolve => { accepted = resolve; });
+  await page.route('**/api/questions', async route => {
+    const response = await route.fetch(); accepted(); await held; await route.fulfill({ response });
+  }, { times: 1 });
+  try {
+    await message.fill('First question'); await message.press('Enter'); await saved;
+    const request = await lastRequest();
+    await page.getByRole('button', { name: 'Threads', exact: true }).click();
+    await page.locator(`[data-thread-id="${request.threadId}"]`).click();
+    await message.fill('Keep this newer draft');
+    const response = page.waitForResponse('**/api/questions'); release(); await (await response).finished();
+    await page.getByRole('button', { name: 'Threads', exact: true }).click();
+    await page.locator(`[data-thread-id="${request.threadId}"]`).click();
+    await expect(message).toHaveValue('Keep this newer draft');
+    expect(Object.keys((await state()).requests)).toHaveLength(1);
+  } finally { release(); }
+});
+
+test('a delayed title save leaves focus in the message composer', async ({ page }) => {
+  const doc = await f.register(); await page.goto(`${f.url}/?document=${doc.id}`);
+  const message = page.getByLabel('Message', { exact: true });
+  const title = page.getByLabel('Document name', { exact: true });
+  let release = () => {}, accepted = () => {};
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const saved = new Promise<void>(resolve => { accepted = resolve; });
+  await page.route('**/api/documents/*/title', async route => {
+    const response = await route.fetch(); accepted(); await held; await route.fulfill({ response });
+  }, { times: 1 });
+  try {
+    await page.getByRole('button', { name: 'Edit document name' }).click();
+    await title.fill('Saved title'); await title.press('Enter'); await saved;
+    await message.fill('Continue this message');
+    const response = page.waitForResponse('**/api/documents/*/title'); release(); await (await response).finished();
+    await expect(title).toHaveCount(0);
+    await expect(message).toBeFocused(); await expect(message).toHaveValue('Continue this message');
+  } finally { release(); }
+});
+
+test('a newer title committed on blur is saved after the pending title request', async ({ page }) => {
+  const doc = await f.register(); await page.goto(`${f.url}/?document=${doc.id}`);
+  const title = page.getByLabel('Document name', { exact: true });
+  let release = () => {}, accepted = () => {};
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const saved = new Promise<void>(resolve => { accepted = resolve; });
+  await page.route('**/api/documents/*/title', async route => {
+    const response = await route.fetch(); accepted(); await held; await route.fulfill({ response });
+  }, { times: 1 });
+  try {
+    await page.getByRole('button', { name: 'Edit document name' }).click();
+    await title.fill('First title'); await title.press('Enter'); await saved;
+    await title.fill('Latest title'); await page.getByLabel('Message', { exact: true }).click();
+    const response = page.waitForResponse('**/api/documents/*/title'); release(); await (await response).finished();
+    await expect(page).toHaveTitle('Latest title');
+    await expect(title).toHaveCount(0); await expect(page.getByLabel('Message', { exact: true })).toBeFocused();
+    expect((await state()).documents[doc.id].title).toBe('Latest title');
+  } finally { release(); }
+});
+
+test('a delayed create response preserves messages already received through live updates', async ({ page }) => {
+  const doc = await f.register(); await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  let release = () => {}, accepted = () => {};
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const saved = new Promise<void>(resolve => { accepted = resolve; });
+  let threadId = '';
+  await page.route('**/api/threads', async route => {
+    const response = await route.fetch(); threadId = (await response.json()).id;
+    accepted(); await held; await route.fulfill({ response });
+  }, { times: 1 });
+  try {
+    await page.getByRole('button', { name: 'New conversation' }).click(); await saved;
+    await page.locator(`[data-thread-id="${threadId}"]`).click();
+    const message = page.getByLabel('Message', { exact: true });
+    await message.fill('Sent before create response'); await message.press('Enter'); await expect(message).toHaveValue('');
+    await expect(page.getByRole('log')).toContainText('Sent before create response');
+    const response = page.waitForResponse('**/api/threads'); release(); await (await response).finished();
+    await expect(page.getByRole('log')).toContainText('Sent before create response');
+  } finally { release(); }
+});
+
+test('one header status follows native activity across documents without repeating queue messages', async ({ page }) => {
+  const doc = await f.register(), other = await f.register('other.md');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const status = page.getByRole('status', { name: 'Agent status', exact: true });
+  const signal = (event: string) => f.agent('/agent/lifecycle', { ownerKey: `claude-${f.owner.sessionId}`, event });
+  await expect(status).toHaveText('Claude · Unknown');
+  await signal('agent-busy'); await expect(status).toHaveText('Claude · Busy');
+  const message = page.getByLabel('Message', { exact: true });
+  await message.fill('First question'); await message.press('Enter'); await expect(message).toHaveValue('');
+  const first = await lastRequest();
+  await message.fill('Second question'); await message.press('Enter'); await expect(message).toHaveValue('');
+  await expect(status).toHaveText('Claude · Busy · 2 queued');
+  await expect(page.locator('#threads')).not.toContainText('Queued; waiting for agent.');
+  await f.agent(`/agent/requests/${first.id}/claim`, {});
+  await expect(status).toHaveText('Claude · Busy · 1 queued');
+  await signal('compaction-started'); await expect(status).toHaveText('Claude · Compacting · 1 queued');
+  await signal('compaction-completed'); await expect(status).toHaveText('Claude · Busy · 1 queued');
+  await page.getByLabel('Documents', { exact: true }).selectOption(other.id);
+  await expect(status).toHaveText('Claude · Busy · 1 queued');
+  await f.agent('/agent/replies', { requestId: first.id, documentId: doc.id, threadId: first.threadId, text: 'First answer' });
+  await answer('Second answer');
+  await expect(status).toHaveText('Claude · Busy');
+  await signal('agent-idle'); await expect(status).toHaveText('Claude · Idle');
+  await signal('agent-waiting'); await expect(status).toHaveText('Claude · Waiting for input');
+  await signal('agent-disconnected'); await expect(status).toHaveText('Claude · Disconnected');
+});
+
+test('thread previews show unread dots and active-request spinners independently', async ({ page }) => {
+  const doc = await f.register(); await page.goto(`${f.url}/?document=${doc.id}`);
+  const message = page.getByLabel('Message', { exact: true });
+  await message.fill('First question'); await message.press('Enter'); await expect(message).toHaveValue('');
+  const first = await lastRequest();
+  await message.fill('Follow-up question'); await message.press('Enter'); await expect(message).toHaveValue('');
+  const second = await lastRequest();
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  const row = page.locator(`[data-thread-id="${first.threadId}"]`);
+  const unread = row.getByLabel('Unread reply', { exact: true });
+  const progress = row.getByLabel('In progress', { exact: true });
+  const queued = row.getByLabel('Queued', { exact: true });
+  await expect(progress).toHaveCount(0); await expect(unread).toHaveCount(0); await expect(queued).toBeVisible();
+  await f.agent(`/agent/requests/${first.id}/claim`, {});
+  await expect(progress).toBeVisible(); await expect(unread).toHaveCount(0); await expect(queued).toHaveCount(0);
+  await f.agent('/agent/replies', { requestId: first.id, documentId: doc.id, threadId: first.threadId, text: 'First answer' });
+  await expect(unread).toBeVisible(); await expect(progress).toHaveCount(0); await expect(queued).toBeVisible();
+  await f.agent(`/agent/requests/${second.id}/claim`, {});
+  await expect(progress).toBeVisible(); await expect(unread).toBeVisible();
+  await expect(row.locator('.preview-line').getByLabel('Unread reply')).toBeVisible();
+  await expect(row.locator('.preview-line').getByLabel('In progress')).toBeVisible();
+  await page.reload(); await expect(unread).toBeVisible(); await expect(progress).toBeVisible();
+  await row.click(); await expect(page.getByRole('log')).toContainText('First answer');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await expect(unread).toHaveCount(0); await expect(progress).toBeVisible();
+  await page.reload(); await expect(unread).toHaveCount(0);
+  await f.agent('/agent/replies', { requestId: second.id, documentId: doc.id, threadId: second.threadId, text: 'Second answer' });
+  await expect(unread).toBeVisible(); await expect(progress).toHaveCount(0);
+  await row.click(); await expect(page.getByRole('log')).toContainText('Second answer');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await expect(unread).toHaveCount(0);
+});
+
+test('read replies persist independently across document tabs', async ({ page, context }) => {
+  const a = await f.register(), b = await f.register('b.md', '# Second document');
+  const other = await context.newPage();
+  await page.goto(`${f.url}/?document=${a.id}`);
+  await other.goto(`${f.url}/?document=${b.id}`);
+  for (const tab of [page, other]) {
+    await tab.bringToFront();
+    const message = tab.getByLabel('Message', { exact: true });
+    await message.fill('Question'); await message.press('Enter'); await expect(message).toHaveValue('');
+    await answer('Read this reply');
+    await expect(tab.getByRole('log')).toContainText('Read this reply');
+    await tab.getByRole('button', { name: 'Threads', exact: true }).click();
+    await expect(tab.getByLabel('Unread reply', { exact: true })).toHaveCount(0);
+  }
+  for (const tab of [page, other]) {
+    await tab.reload();
+    await expect(tab.locator('.thread-row')).toHaveCount(1);
+    await expect(tab.getByLabel('Unread reply', { exact: true })).toHaveCount(0);
+  }
+  await other.close();
+});
+
+test('clicking away from the quick menu clears its temporary selection', async ({ page }) => {
+  const doc = await f.register('a.md', '# Click away\n\nFirst passage.\n\nRoom between passages.\n\nSecond passage.');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document')).toContainText('First passage.');
+  const comment = page.getByRole('button', { name: 'Comment', exact: true });
+  await select(page, 'First passage.');
+  await expect(comment).toBeVisible();
+  await page.locator('#document').dispatchEvent('mousedown', { detail: 2 });
+  await expect(comment).toBeVisible();
+  await page.getByRole('button', { name: 'Edit document name' }).click();
+  await expect(comment).toHaveCount(0);
+  await expect(page.locator('#document mark[data-pending]')).toHaveCount(0);
+  await expect(page.getByLabel('Document name', { exact: true })).toBeFocused();
+  expect(await page.evaluate(() => document.getElementById('document')!.contains(window.getSelection()?.anchorNode ?? null))).toBe(false);
+  await select(page, 'First passage.');
+  await expect(comment).toBeVisible();
+  await page.locator('#document h1').click();
+  await expect(comment).toHaveCount(0);
+  await select(page, 'Second passage.');
+  await comment.click();
+  await expect(page.getByTestId('selection-preview')).toHaveText('Second passage.');
+  await page.getByLabel('Comment', { exact: true }).fill('Saved passage question');
+  await page.getByRole('button', { name: 'Send comment', exact: true }).click();
+  await expect(page.getByRole('log')).toContainText('Saved passage question');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await select(page, 'First passage.');
+  await expect(comment).toBeVisible();
+  await page.locator('#document mark[role=button]').click();
+  await expect(page.getByRole('log')).toContainText('Saved passage question');
+});
+
+test('real drags can partially overlap the previous pending selection', async ({ page }) => {
+  const doc = await f.register('a.md', '# Drag selection\n\nAlpha bravo charlie delta echo foxtrot golf.');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document')).toContainText('Alpha bravo');
+  async function drag(exact: string, reverse = false) {
+    const points = await page.evaluate(exact => {
+      const article = document.getElementById('document')!;
+      const start = article.textContent!.indexOf(exact), end = start + exact.length;
+      function point(offset: number) {
+        const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+        let at = 0, node;
+        while ((node = walker.nextNode())) {
+          const length = node.textContent!.length;
+          if (at + length > offset) {
+            const range = document.createRange();
+            range.setStart(node, offset - at); range.setEnd(node, offset - at + 1);
+            const rect = range.getBoundingClientRect();
+            return { x: rect.left, y: rect.top + rect.height / 2 };
+          }
+          at += length;
+        }
+        throw new Error('Missing offset');
+      }
+      return [point(start), point(end)];
+    }, exact);
+    if (reverse) points.reverse();
+    await page.mouse.move(points[0].x, points[0].y);
+    await page.mouse.down();
+    await page.mouse.move(points[1].x, points[1].y, { steps: 8 });
+    await page.mouse.up();
+    await expect(page.getByRole('button', { name: 'Comment', exact: true })).toBeVisible();
+    await expect(page.locator('#document mark[data-pending]')).toHaveText(exact);
+  }
+  await drag('bravo charlie delta');
+  await drag('charlie delta echo');
+  await drag('bravo charlie', true);
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await expect(page.getByTestId('selection-preview')).toHaveText('bravo charlie');
+  await page.getByLabel('Comment', { exact: true }).fill('Keep this overlapping draft');
+  await drag('charlie delta echo');
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await expect(page.getByLabel('Comment', { exact: true })).toHaveValue('');
+  await drag('bravo charlie', true);
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await expect(page.getByLabel('Comment', { exact: true })).toHaveValue('Keep this overlapping draft');
 });

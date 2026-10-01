@@ -108,3 +108,33 @@ test('a superseded observer startup cannot orphan the next stream socket', { tim
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('Codex activity reads native runtime state without loading, resuming, or sending a turn', async t => {
+  const { readCodexActivity } = await import('../src/codex-stream.ts');
+  const root = await mkdtemp(join(tmpdir(), 'sidecar-status-'));
+  const path = join(root, 'native.sock'), http = createServer(), ws = new WebSocketServer({ server: http });
+  await new Promise<void>(resolve => http.listen(path, resolve));
+  t.after(async () => { for (const client of ws.clients) client.terminate(); ws.close(); await new Promise<void>(resolve => http.close(() => resolve())); await rm(root, { recursive: true, force: true }); });
+  let status: unknown = { type: 'idle' }, id = 'original';
+  const methods: string[] = [];
+  ws.on('connection', socket => socket.on('message', data => {
+    const message = JSON.parse(data.toString()); methods.push(message.method);
+    if (message.method === 'initialize') socket.send(JSON.stringify({ id: message.id, result: {} }));
+    if (message.method === 'thread/read') {
+      assert.deepEqual(message.params, { threadId: 'original', includeTurns: false });
+      socket.send(JSON.stringify({ id: message.id, result: { thread: { id, status } } }));
+    }
+  }));
+  const abort = new AbortController();
+  for (const [native, expected] of [
+    [{ type: 'idle' }, 'idle'], [{ type: 'active', activeFlags: [] }, 'busy'],
+    [{ type: 'active', activeFlags: ['waitingOnApproval'] }, 'waiting'],
+    [{ type: 'notLoaded' }, 'disconnected'], [{ type: 'systemError' }, 'unknown'],
+  ]) {
+    status = native;
+    assert.equal(await readCodexActivity('original', abort.signal, path), expected);
+  }
+  id = 'other'; assert.equal(await readCodexActivity('original', abort.signal, path), 'unknown');
+  abort.abort(); assert.equal(await readCodexActivity('original', abort.signal, path), 'unknown');
+  assert.ok(methods.every(method => ['initialize', 'initialized', 'thread/read'].includes(method)));
+});

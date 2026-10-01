@@ -6,7 +6,7 @@ export type Owner = { agent: 'codex' | 'claude'; sessionId: string };
 export type Quote = { exact: string; prefix: string; suffix: string; start: number; end: number; version: string };
 export type DocumentRecord = { id: string; path: string; generated: boolean; providedTitle?: string; userTitle?: string };
 export type Message = { id: string; role: 'user' | 'agent'; text: string; requestId: string; createdAt: number };
-export type Thread = { id: string; documentId: string; scope: 'passage' | 'document'; quote?: Quote; isResolved: boolean; messages: Message[] };
+export type Thread = { id: string; documentId: string; scope: 'passage' | 'document'; quote?: Quote; title?: string; createdAt?: number; isResolved: boolean; messages: Message[] };
 export type RequestRecord = {
   id: string; documentId: string; threadId: string; text: string; clientMessageId: string;
   quote?: Quote; status: 'queued' | 'claimed' | 'completed' | 'failed' | 'uncertain'; createdAt: number;
@@ -44,7 +44,7 @@ function isMessage(v: unknown): v is Message {
   return isObject(v) && string(v.id) && (v.role === 'user' || v.role === 'agent') && string(v.text) && string(v.requestId) && number(v.createdAt);
 }
 function isThread(v: unknown): v is Thread {
-  return isObject(v) && string(v.id) && string(v.documentId) && (v.scope === 'passage' || v.scope === 'document') && (v.quote === undefined || isQuote(v.quote)) && (v.scope === 'passage') === (v.quote !== undefined) && typeof v.isResolved === 'boolean' && Array.isArray(v.messages) && v.messages.every(isMessage);
+  return isObject(v) && string(v.id) && string(v.documentId) && (v.scope === 'passage' || v.scope === 'document') && (v.quote === undefined || isQuote(v.quote)) && (v.scope === 'passage') === (v.quote !== undefined) && optionalString(v.title) && (v.createdAt === undefined || number(v.createdAt)) && typeof v.isResolved === 'boolean' && Array.isArray(v.messages) && v.messages.every(isMessage);
 }
 function isRequest(v: unknown): v is RequestRecord {
   return isObject(v) && string(v.id) && string(v.documentId) && string(v.threadId) && string(v.text) && string(v.clientMessageId) && string(v.submission) && number(v.createdAt) && string(v.status) && ['queued','claimed','completed','failed','uncertain'].includes(v.status) && (v.quote === undefined || isQuote(v.quote)) && (v.acceptedAt === undefined || number(v.acceptedAt)) && (v.answer === undefined || (isObject(v.answer) && string(v.answer.text) && typeof v.answer.isError === 'boolean'));
@@ -73,8 +73,33 @@ export function registerDocument(state: State, input: {path: string; title?: str
     document = { id: randomUUID(), path, generated: input.generated };
     state.documents[document.id] = document;
   }
+  ensureGeneralThread(state, document.id);
   if (input.title?.trim()) document.providedTitle = input.title.trim();
   return document;
+}
+export function createThread(state: State, input: { id?: string; documentId: string; quote?: Quote }): Thread {
+  get(state.documents, input.documentId);
+  const id = input.id ?? randomUUID();
+  if (!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) throw new DomainError('Expected a thread UUID');
+  if (input.quote !== undefined && !isQuote(input.quote)) throw new DomainError('Invalid selection');
+  if (Object.hasOwn(state.threads, id)) {
+    const existing = get(state.threads, id);
+    if (existing.documentId !== input.documentId || JSON.stringify(existing.quote) !== JSON.stringify(input.quote)) throw new DomainError('Thread ID was already used for another conversation', 409);
+    return existing;
+  }
+  const thread: Thread = { id, documentId: input.documentId, scope: input.quote ? 'passage' : 'document', createdAt: Date.now(), isResolved: false, messages: [] };
+  if (input.quote) thread.quote = structuredClone(input.quote);
+  state.threads[id] = thread;
+  return thread;
+}
+function ensureGeneralThread(state: State, documentId: string) {
+  if (!Object.values(state.threads).some(thread => thread.documentId === documentId && thread.scope === 'document')) createThread(state, { documentId });
+}
+export function nameThread(state: State, threadId: string, title: string): void {
+  const thread = get(state.threads, threadId), value = title.trim();
+  if (!value || value.length > 80 || /[\r\n\x00-\x1f]/.test(value)) throw new DomainError('Thread name must be 1–80 characters on one line');
+  if (thread.title && thread.title !== value) throw new DomainError('Thread already has a name', 409);
+  thread.title = value;
 }
 export function submit(state: State, input: SubmitInput): RequestRecord {
   get(state.documents, input.documentId);
@@ -91,9 +116,7 @@ export function submit(state: State, input: SubmitInput): RequestRecord {
     thread = get(state.threads, input.threadId);
     if (thread.documentId !== input.documentId || input.quote) throw new DomainError('Thread belongs to another document or selection', 409);
   } else {
-    thread = { id: randomUUID(), documentId: input.documentId, scope: input.quote ? 'passage' : 'document', isResolved: false, messages: [] };
-    if (input.quote) thread.quote = structuredClone(input.quote);
-    state.threads[thread.id] = thread;
+    thread = createThread(state, { documentId: input.documentId, quote: input.quote });
   }
   const request: RequestRecord = { id: randomUUID(), documentId: input.documentId, threadId: thread.id, text: input.text, clientMessageId: input.clientMessageId, submission: signature, status: 'queued', createdAt: Date.now() };
   if (thread.quote) request.quote = structuredClone(thread.quote);
@@ -152,6 +175,8 @@ export async function openStore(directory: string, owner: Owner): Promise<Store>
       if (get(parsed.threads, request.threadId).documentId !== request.documentId) throw new Error('Malformed request routing');
       if (request.status === 'claimed') request.status = 'uncertain';
     }
+    for (const thread of Object.values(parsed.threads)) thread.createdAt ??= thread.messages[0]?.createdAt ?? Date.now();
+    for (const document of Object.values(parsed.documents)) ensureGeneralThread(parsed, document.id);
     state = parsed;
   } catch (error) {
     if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;

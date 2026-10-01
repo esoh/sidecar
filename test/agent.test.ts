@@ -170,8 +170,10 @@ for (const agent of ['claude', 'codex'] as const) test(`request --stream returns
     assert.equal(typeof claimed.stream.prefix, 'string');
     assert.equal(typeof claimed.stream.suffix, 'string');
   } else assert.equal(typeof claimed.stream.error, 'string');
+  await exec(process.execPath, ['--import', tsx, cliPath, 'name-thread', request.threadId, '--owner', key, '--title', 'Understanding the context'], { env: { ...process.env, SIDECAR_STATE_DIR: root } });
   const duplicate = await run();
   assert.equal(duplicate.claimStatus, 'already-claimed');
+  assert.equal(duplicate.thread.title, 'Understanding the context');
   assert.equal(duplicate.stream, undefined);
   const route = { requestId: request.id, documentId: doc.id, threadId: request.threadId };
   if (agent === 'claude') await post('/agent/stream-events', { ownerKey: key, messageId: 'answer', turnId: 'turn', index: 0, delta: claimed.stream.prefix + 'Answer' + claimed.stream.suffix, final: true });
