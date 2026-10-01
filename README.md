@@ -1,6 +1,6 @@
 # Sidecar
 
-An unstyled local Markdown viewer for questions and revisions in your existing Codex or Claude Code conversation. Select a passage or ask a general question; replies stay in persistent threads across documents. Only you resolve or reopen threads.
+A local Markdown viewer for questions and revisions in your existing Codex or Claude Code conversation. Select a passage or ask a general question; replies stay in persistent threads across documents. Only you resolve or reopen threads.
 
 ## Development
 
@@ -31,7 +31,15 @@ State defaults to `~/.local/state/sidecar/AGENT-UUID`; tests use `SIDECAR_STATE_
 
 Only one process writes an owner's state. Dead owner locks are recovered without killing any PID. If a crash happens while creating or reclaiming a lock, startup fails closed; inspect `server.log` and verify no owner process is alive before removing an incomplete `owner.lock` or `reclaim.lock`. A reused live PID is never killed.
 
-Styling, standalone HTML input, independent model sessions, and compaction cancellation are outside this first version. The dated [acceptance record](docs/acceptance.md) covers both native agents and the remaining limits.
+Broader styling, standalone HTML input, independent model sessions, and compaction cancellation are outside this version. The dated [acceptance record](docs/acceptance.md) covers both native agents and the remaining limits.
+
+## Passage comments
+
+Select text and click **Comment** or press **C** to open a floating composer beside the passage. The shortcut leaves typing and Ctrl/Cmd+C untouched. The highlight remains visible while you type. Clicking outside dismisses an empty composer; a composer with a draft stays open. **Send** (or Cmd/Ctrl+Enter) starts a thread with the original agent; **Cancel** or Escape discards the unsent comment. Select another passage at any time to start a separate comment; reselecting a passage restores its draft while this page stays open. Failed sends preserve the draft for retry. The question form below the document still supports general questions.
+
+Saved passages remain highlighted after reload. Click a highlight, or focus it with Tab and press Enter, to reach its thread. When threads overlap, choose the question you want. Resolved threads retain a muted highlight and can be reopened. If a file edit makes a passage missing or ambiguous, its thread and quote remain, marked “Passage changed.”
+
+The browser UI uses React and `@plannotator/web-highlighter`. Its small composer borrows Plannotator’s positioning approach; attribution is in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The local server bundles the UI on page load with esbuild, so no separate frontend server or build command is required.
 
 ## Streaming replies
 
