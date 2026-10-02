@@ -78,7 +78,7 @@ test('a superseded observer startup cannot orphan the next stream socket', { tim
   const cookie = (await fetch(sidecar.url)).headers.get('set-cookie')!.split(';')[0];
   const post = async (path: string, body: unknown) => fetch(sidecar.url + path, { method: 'POST', headers: { 'X-Sidecar-Token': token, Cookie: cookie, Origin: sidecar.url, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   try {
-    const file = join(root, 'a.md'); await writeFile(file, '# Test');
+    const file = join(root, 'a.md'); await writeFile(file, '# Test\n' + 'x'.repeat(60000));
     const doc = await (await post('/agent/documents', { path: file })).json();
     const routes: ReplyRoute[] = [];
     for (let i = 0; i < 2; i++) {

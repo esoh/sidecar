@@ -23,6 +23,7 @@ export class ReplyStream {
     this.prefix = `[[sidecar:${nonce}]]\n`;
     this.suffix = `\n[[/sidecar:${nonce}]]`;
   }
+  get hasStarted() { return this.bound !== undefined; }
   fail(message: string) { if (!this.done) this.error = message; }
   accept(event: StreamEvent) {
     if (this.done || this.error) return;
@@ -34,7 +35,8 @@ export class ReplyStream {
       candidate = { next: 0, raw: '', pending: new Map(), ignored: false };
       this.messages.set(key, candidate);
     }
-    if (candidate.ignored || event.index < candidate.next || candidate.pending.has(event.index)) return;
+    if (candidate.ignored) { if (event.final) this.messages.delete(key); return; }
+    if (event.index < candidate.next || candidate.pending.has(event.index)) return;
     this.received += event.delta.length;
     if (this.received > 256 * 1024 || candidate.pending.size >= 4096) { this.fail('Stream exceeds the buffering limit. Send a shorter complete reply.'); return; }
     candidate.pending.set(event.index, event);
@@ -44,7 +46,7 @@ export class ReplyStream {
       candidate.pending.delete(candidate.next++);
       candidate.raw += next.delta;
       if (!candidate.raw.startsWith(this.prefix)) {
-        if (!this.prefix.startsWith(candidate.raw) || next.final) { candidate.ignored = true; candidate.raw = ''; candidate.pending.clear(); return; }
+        if (!this.prefix.startsWith(candidate.raw) || next.final) { candidate.ignored = true; this.received -= candidate.raw.length; candidate.raw = ''; if (next.final || [...candidate.pending.values()].some(event => event.final)) this.messages.delete(key); candidate.pending.clear(); return; }
         continue;
       }
       this.bound = key;

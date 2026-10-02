@@ -27,7 +27,7 @@ test('short Codex notification targets the native UUID and leaves full context i
   process.env.PATH = `${f.directory}:${previous}`;
   t.after(() => { process.env.PATH = previous; });
   const owner = { agent: 'codex' as const, sessionId: randomUUID() };
-  await notifyCodex(owner, request.id);
+  await notifyCodex(owner, { type: 'sidecar.request', ownerKey: ownerKey(owner), requestId: request.id });
   const args = JSON.parse(await readFile(output, 'utf8'));
   const notification = args[4];
   assert.ok(Buffer.byteLength(notification) < 300);
@@ -137,7 +137,7 @@ test('unavailable native queue reports a connection error while preserving the r
 });
 
 
-for (const agent of ['claude', 'codex'] as const) test(`request --stream returns ${agent} context and preserves claim safety`, async t => {
+for (const agent of ['claude', 'codex'] as const) test(`large-context fallback returns ${agent} context and preserves claim safety`, async t => {
   const root = await mkdtemp(join(tmpdir(), 's'));
   const owner = { agent, sessionId: randomUUID() }, key = ownerKey(owner);
   const { startServer } = await import('../src/server.ts');
@@ -154,7 +154,8 @@ for (const agent of ['claude', 'codex'] as const) test(`request --stream returns
   });
   await writeFile(join(directory, 'runtime.json'), JSON.stringify({ url: server.url, instanceId: server.instanceId, ownerKey: key }));
   const token = await readFile(join(directory, 'agent-token'), 'utf8');
-  const file = join(root, 'a.md'); await writeFile(file, '# Context\nBody to preserve.');
+  const markdown = '# Context\nBody to preserve.' + 'x'.repeat(60000);
+  const file = join(root, 'a.md'); await writeFile(file, markdown);
   const post = (path: string, body: unknown) => fetch(server.url + path, { method: 'POST', headers: { 'X-Sidecar-Token': token, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const doc = await (await post('/agent/documents', { path: file })).json();
   const cookie = (await fetch(server.url)).headers.get('set-cookie')!.split(';')[0]!;
@@ -163,7 +164,7 @@ for (const agent of ['claude', 'codex'] as const) test(`request --stream returns
   const claimed = await run();
   assert.equal(claimed.claimStatus, 'claimed');
   assert.equal(claimed.request.text, 'Explain the context');
-  assert.equal(claimed.document.markdown, '# Context\nBody to preserve.');
+  assert.equal(claimed.document.markdown, markdown);
   assert.equal(claimed.thread.id, request.threadId);
   assert.ok(claimed.stream, 'one command must include the streaming result');
   if (agent === 'claude') {
