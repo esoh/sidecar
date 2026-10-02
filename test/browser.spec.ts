@@ -239,10 +239,12 @@ test('floating comments retain their highlight, retry safely, and reopen the sav
   await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', request.threadId);
   await expect(page.getByRole('button', { name: 'Threads', exact: true })).toBeFocused();
   await expect(page.locator('#threads').getByText('This stays in the original conversation.', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Resolve thread', exact: true }).click();
   await highlight.focus(); await page.keyboard.press('Enter');
   await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', request.threadId);
   await expect(page.getByRole('button', { name: 'Threads', exact: true })).toBeFocused();
+  await page.getByRole('button', { name: 'Resolve thread', exact: true }).click();
+  await expect(page.locator('#document mark')).toHaveCount(0);
+  await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', request.threadId);
   await expect(page.getByRole('button', { name: 'Reopen thread', exact: true })).toBeVisible();
 });
 
@@ -1036,4 +1038,42 @@ test('hidden streaming replies preserve a reader’s scroll position', async ({ 
   await emit(1, ' and second chunk');
   await expect(log).toContainText('First chunk and second chunk');
   await expect.poll(() => log.evaluate(el => el.scrollTop)).toBe(position);
+});
+
+test('resolved annotations disappear, preserve overlapping open threads, and return on reopen', async ({ page }) => {
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document')).toContainText('world');
+  const annotate = async (question: string) => {
+    await select(page, 'world');
+    await page.getByRole('button', { name: 'Comment', exact: true }).click();
+    await page.getByLabel('Comment', { exact: true }).fill(question);
+    await page.getByLabel('Comment', { exact: true }).press('Enter');
+    await expect(page.getByRole('log')).toContainText(question);
+    return lastRequest();
+  };
+  const first = await annotate('First passage question');
+  await annotate('Second passage question');
+  await page.getByRole('button', { name: 'Resolve thread', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Reopen thread', exact: true })).toBeVisible();
+  const marks = page.locator('#document mark');
+  await expect(marks).toHaveText('world');
+  await marks.click();
+  await expect(page.getByRole('log')).toContainText('First passage question');
+  await expect(page.getByRole('log')).not.toContainText('Second passage question');
+  await page.getByRole('button', { name: 'Resolve thread', exact: true }).click();
+  await expect(marks).toHaveCount(0);
+  await expect(page.locator('#document')).toContainText('Hello world.');
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Reopen thread', exact: true })).toBeVisible();
+  await expect(marks).toHaveCount(0);
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await page.getByLabel('Thread status').selectOption('resolved');
+  await expect(page.locator('[data-thread-id]')).toHaveCount(2);
+  await page.locator(`[data-thread-id="${first.threadId}"]`).click();
+  await expect(page.getByRole('log')).toContainText('First passage question');
+  await page.getByRole('button', { name: 'Reopen thread', exact: true }).click();
+  await expect(marks).toHaveText('world');
+  await page.reload();
+  await expect(marks).toHaveText('world');
 });

@@ -159,10 +159,6 @@ body {
 .annotation-highlight:hover {
   filter: brightness(1.2);
 }
-.annotation-highlight[data-resolved] {
-  background: oklch(0.72 0.17 150 / 0.1);
-  border-bottom-color: oklch(0.72 0.17 150 / 0.5);
-}
 .note {
   border-left: 2px solid var(--border);
   padding-left: 16px;
