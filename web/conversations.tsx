@@ -324,6 +324,7 @@ export function ConversationSidebar({
   stream,
   passageChanged,
   showPassage,
+  showOriginal,
   isShown,
 }: {
   documentId: string;
@@ -335,6 +336,7 @@ export function ConversationSidebar({
   stream: ViewerState['stream'];
   passageChanged: (quote: Quote) => boolean;
   showPassage: (quote: Quote) => void;
+  showOriginal: (threadId: string) => void;
   isShown: boolean;
 }) {
   const [filter, setFilter] = useState('unresolved'),
@@ -373,6 +375,20 @@ export function ConversationSidebar({
   const previousId = useRef<string | null>(null),
     atBottom = useRef(true);
   const active = threads.find((thread) => thread.id === activeId);
+  const originalPath = active?.quote && passageChanged(active.quote)
+    ? `/api/documents/${documentId}/versions/${encodeURIComponent(active.quote.version)}`
+    : null;
+  const [availableOriginal, setAvailableOriginal] = useState<string | null>(null);
+  useEffect(() => {
+    let stopped = false;
+    setAvailableOriginal(null);
+    if (originalPath) {
+      void fetch(originalPath, { method: 'HEAD' })
+        .then((response) => { if (!stopped && response.ok) setAvailableOriginal(originalPath); })
+        .catch(() => { /* A missing or unreachable snapshot leaves the conversation intact. */ });
+    }
+    return () => { stopped = true; };
+  }, [originalPath]);
   const requestStatuses = new Map(requests.map((request) => [request.id, request.status]));
   const inProgress = new Set(
     requests.filter((request) => request.status === 'claimed').map((request) => request.threadId),
@@ -550,7 +566,14 @@ export function ConversationSidebar({
                     <span className="quote-excerpt" title={active.quote.exact}>
                       {active.quote.exact}
                     </span>
-                    <span className="changed">Passage changed</span>
+                    <div className="passage-context">
+                      <span className="changed">Passage changed</span>
+                      {originalPath && availableOriginal === originalPath && (
+                        <button className="original-link" onClick={() => showOriginal(active.id)}>
+                          View original document <span aria-hidden="true">↗</span>
+                        </button>
+                      )}
+                    </div>
                   </>
                 ) : (
                   <button

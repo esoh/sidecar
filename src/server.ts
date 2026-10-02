@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readFile, writeFile, realpath } from 'node:fs/promises';
+import { readFile, writeFile, realpath, mkdir, rename, unlink } from 'node:fs/promises';
 import { basename, join, dirname, relative, isAbsolute, extname } from 'node:path';
 import { notifyCodex } from './agent.ts';
 import { observeCodex, readCodexActivity } from './codex-stream.ts';
@@ -63,6 +63,7 @@ function json(response: ServerResponse, value: unknown, status = 200): void {
 }
 export async function startServer({ owner, directory, port = 0, pollMs = 1000 }: ServerOptions) {
   const store = await openStore(directory, owner);
+  directory = await realpath(directory);
   const tokenPath = join(directory, 'agent-token');
   try { await writeFile(tokenPath, randomBytes(32).toString('hex'), { mode: 0o600, flag: 'wx' }); }
   catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error; }
@@ -196,7 +197,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       } else {
         const cookie = request.headers.cookie?.split(';').map(part => part.trim()).find(part => part.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1);
         if (!sameSecret(cookie, viewerToken)) throw new DomainError('Open Sidecar from the agent', 403);
-        if (method !== 'GET' && request.headers.origin !== url) throw new DomainError('Origin required', 403);
+        if (method !== 'GET' && method !== 'HEAD' && request.headers.origin !== url) throw new DomainError('Origin required', 403);
       }
       if (method === 'GET' && path === '/app.js') {
         response.setHeader('Content-Type', 'text/javascript; charset=utf-8');
@@ -245,10 +246,33 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         return;
       }
       if (method === 'GET' && path === '/api/state') { json(response, snapshot()); return; }
+      const original = path.match(/^\/api\/documents\/([^/]+)\/versions\/([a-f0-9]{64})$/);
+      if ((method === 'GET' || method === 'HEAD') && original) {
+        const document = get(store.read().documents, original[1]);
+        try {
+          const saved = await readDocument(join(directory, 'versions', document.id, `${original[2]}.md`));
+          if (method === 'HEAD') response.end();
+          else json(response, { ...saved, version: original[2] });
+        } catch (error) {
+          if (error instanceof Error && 'code' in error && error.code === 'ENOENT')
+            throw new DomainError('Original document unavailable. This version was not saved.', 404);
+          throw error;
+        }
+        return;
+      }
       if (method === 'GET' && path.startsWith('/api/documents/')) {
         const document = get(store.read().documents, path.slice('/api/documents/'.length));
         const result = await refresh(document);
         if ('error' in result) { json(response, { error: result.error }, result.status); return; }
+        // Keep each version actually shown to a reader, including unsent passage drafts.
+        // ponytail: retain viewed Markdown versions; add pruning if snapshot storage grows large.
+        const versions = join(directory, 'versions', document.id);
+        await mkdir(versions, { recursive: true, mode: 0o700 });
+        const temporary = join(versions, `${randomUUID()}.tmp`);
+        try {
+          await writeFile(temporary, result.data.markdown, { flag: 'wx', mode: 0o600 });
+          await rename(temporary, join(versions, `${result.data.version}.md`));
+        } finally { await unlink(temporary).catch(() => {}); }
         json(response, { ...document, ...result.data, title: title(document) }); return;
       }
       if (method === 'GET' && (path === '/api/events' || path === '/agent/events')) {

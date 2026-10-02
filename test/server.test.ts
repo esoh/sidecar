@@ -213,3 +213,26 @@ test('discarding an empty thread is idempotent and cannot remove a submitted mes
   assert.equal(saved.threads[request.threadId].messages[0].text, 'Keep this question');
   assert.equal(saved.requests[request.id].status, 'queued');
 });
+
+test('viewed document versions survive replacement and restart without exposing other paths', async t => {
+  const f = await fixture(t);
+  const doc = await f.register('history.md', '# Original\n\nOriginal passage.');
+  const before = await (await f.view(`/api/documents/${doc.id}`)).json();
+  const originalPath = `/api/documents/${doc.id}/versions/${before.version}`;
+  await writeFile(join(f.directory, 'history.md'), '# Revised\n\nReplacement passage.');
+  const current = await (await f.view(`/api/documents/${doc.id}`)).json();
+  assert.notEqual(current.version, before.version);
+  assert.equal((await (await f.view(originalPath)).json()).markdown, before.markdown);
+  assert.equal((await f.view(originalPath, undefined, 'HEAD')).status, 200);
+  assert.equal((await fetch(f.url + originalPath, { method: 'HEAD' })).status, 403);
+  await f.reopen();
+  assert.equal((await (await f.view(originalPath)).json()).markdown, before.markdown);
+  await unlink(join(f.directory, 'history.md'));
+  assert.equal((await (await f.view(originalPath)).json()).markdown, before.markdown);
+  assert.equal((await fetch(f.url + originalPath)).status, 403);
+  assert.equal((await f.view(`/api/documents/${doc.id}/versions/${'0'.repeat(64)}`, undefined, 'HEAD')).status, 404);
+  assert.match((await (await f.view(`/api/documents/${doc.id}/versions/${'0'.repeat(64)}`)).json()).error, /not saved/);
+  assert.equal((await f.view(`/api/documents/${doc.id}/versions/agent-token`)).status, 404);
+  const other = await f.register('other.md', before.markdown);
+  assert.equal((await f.view(`/api/documents/${other.id}/versions/${before.version}`)).status, 404);
+});
