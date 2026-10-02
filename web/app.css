@@ -216,17 +216,30 @@ body {
   flex: 1;
   min-width: 0;
 }
-.list-header select {
-  font: inherit;
+.thread-search {
+  flex: 1;
+  min-width: 0;
+  width: 0;
+  height: 30px;
+  padding: 5px 7px;
   font-size: 12px;
-  color: var(--foreground);
-  background: var(--card);
-  border: 0;
-  border-radius: 5px;
-  padding: 6px 3px;
-  cursor: pointer;
+  background: var(--background);
 }
-.list-header select:focus-visible {
+.thread-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 3px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.thread-filter-menu {
+  min-width: 140px;
+  border-color: var(--border);
+  font-size: 12px;
+}
+.thread-filter-menu [role='menuitemradio'] { font-size: 12px; }
+.thread-filter:focus-visible, .thread-search:focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
 }
@@ -1157,3 +1170,43 @@ pre code.pn-code[data-keep-layout] {
 .agent-session-popover code { font-family: var(--font-mono); overflow-wrap: anywhere; user-select: all; }
 .agent-session-popover button { flex-shrink: 0; }
 @media (max-width: 600px) { .library-document { align-items: start; flex-direction: column; gap: 6px; } .library-document-meta { text-align: left; } }
+
+.thread-name { flex: 1; }
+.thread-name .conversation-title { flex: initial; }
+.thread-name form { flex: 1; }
+.thread-name input { width: 100%; }
+.thread-preview mark { background: color-mix(in oklch, var(--primary) 25%, transparent); color: var(--foreground); border-radius: 2px; }
+
+
+/* Plannotator's badge lane occupies the card padding without changing heading spacing. */
+#document { position: relative; }
+.document-tools {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+}
+.document-tools > div { min-width: 0; }
+.document-tools > div > div { min-width: 0; }
+.document-copy { margin-left: auto; flex-shrink: 0; }
+@media (min-width: 768px) {
+  .document-tools { top: 16px; left: 20px; right: 20px; }
+}
+@media (max-width: 1279px) {
+  /* Keep the controls clear of a first H1/paragraph at smaller card padding. */
+  #document:has(.document-tools) { padding-top: 52px; }
+}
+
+.brightness-heading { margin-top: 16px; }
+/* Fade glyphs only: preserve syntax colors, media, surfaces and control contrast. */
+.plannotator-content,
+.plannotator-content * {
+  -webkit-text-fill-color: color-mix(in srgb, currentColor var(--sidecar-text-brightness, 100%), transparent);
+}
+.plannotator-content :is(button, button *, svg, svg *, input, textarea) {
+  -webkit-text-fill-color: currentColor;
+}

@@ -3,8 +3,9 @@ import { mkdir, readFile, writeFile, rename, unlink } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 
 export type Owner = { agent: 'codex' | 'claude'; sessionId: string };
-export type Quote = { exact: string; prefix: string; suffix: string; start: number; end: number; version: string };
-export type DocumentRecord = { id: string; path: string; generated: boolean; providedTitle?: string; userTitle?: string };
+export type Quote = { exact: string; prefix: string; suffix: string; start: number; end: number; version: string; sentence?: string };
+export type RepoInfo = { display: string; branch?: string };
+export type DocumentRecord = { id: string; path: string; generated: boolean; providedTitle?: string; userTitle?: string; repoInfo?: RepoInfo };
 export type Message = { id: string; role: 'user' | 'agent'; text: string; requestId: string; createdAt: number };
 export type Thread = { id: string; documentId: string; scope: 'passage' | 'document'; quote?: Quote; title?: string; createdAt?: number; isResolved: boolean; messages: Message[] };
 export type RequestRecord = {
@@ -35,10 +36,13 @@ const string = (v: unknown): v is string => typeof v === 'string';
 const optionalString = (v: unknown) => v === undefined || string(v);
 const number = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 export function isQuote(v: unknown): v is Quote {
-  return isObject(v) && string(v.exact) && v.exact.length > 0 && string(v.prefix) && string(v.suffix) && string(v.version) && number(v.start) && number(v.end) && Number.isInteger(v.start) && Number.isInteger(v.end) && v.start >= 0 && v.end >= v.start && v.end - v.start === v.exact.length;
+  return isObject(v) && string(v.exact) && v.exact.length > 0 && string(v.prefix) && string(v.suffix) && string(v.version) && (v.sentence === undefined || (string(v.sentence) && v.sentence.length <= 512 && v.sentence.includes(v.exact.trim()))) && number(v.start) && number(v.end) && Number.isInteger(v.start) && Number.isInteger(v.end) && v.start >= 0 && v.end >= v.start && v.end - v.start === v.exact.length;
+}
+export function isRepoInfo(v: unknown): v is RepoInfo {
+  return isObject(v) && string(v.display) && v.display.trim().length > 0 && v.display.length <= 512 && (v.branch === undefined || (string(v.branch) && v.branch.length > 0 && v.branch.length <= 512));
 }
 function isDocument(v: unknown): v is DocumentRecord {
-  return isObject(v) && string(v.id) && string(v.path) && isAbsolute(v.path) && typeof v.generated === 'boolean' && optionalString(v.providedTitle) && optionalString(v.userTitle);
+  return isObject(v) && string(v.id) && string(v.path) && isAbsolute(v.path) && typeof v.generated === 'boolean' && optionalString(v.providedTitle) && optionalString(v.userTitle) && (v.repoInfo === undefined || isRepoInfo(v.repoInfo));
 }
 function isMessage(v: unknown): v is Message {
   return isObject(v) && string(v.id) && (v.role === 'user' || v.role === 'agent') && string(v.text) && string(v.requestId) && number(v.createdAt);
@@ -65,14 +69,16 @@ export function createState(owner: Owner): State {
   ownerKey(owner);
   return { version: 1, owner: structuredClone(owner), documents: {}, threads: {}, requests: {} };
 }
-export function registerDocument(state: State, input: {path: string; title?: string; generated: boolean}): DocumentRecord {
+export function registerDocument(state: State, input: {path: string; title?: string; generated: boolean; repoInfo?: RepoInfo}): DocumentRecord {
   if (!isAbsolute(input.path)) throw new DomainError('Document path must be absolute');
+  if (input.repoInfo !== undefined && !isRepoInfo(input.repoInfo)) throw new DomainError('Invalid repository metadata');
   const path = resolve(input.path);
   let document = Object.values(state.documents).find(d => d.path === path);
   if (!document) {
     document = { id: randomUUID(), path, generated: input.generated };
     state.documents[document.id] = document;
   }
+  if (input.repoInfo !== undefined) document.repoInfo = structuredClone(input.repoInfo);
   ensureGeneralThread(state, document.id);
   if (input.title?.trim()) document.providedTitle = input.title.trim();
   return document;
@@ -113,10 +119,10 @@ export function discardEmptyThread(state: State, threadId: string): boolean {
 function ensureGeneralThread(state: State, documentId: string) {
   if (!Object.values(state.threads).some(thread => thread.documentId === documentId && thread.scope === 'document')) createThread(state, { documentId });
 }
-export function nameThread(state: State, threadId: string, title: string): void {
+export function nameThread(state: State, threadId: string, title: string, { canRename = false } = {}): void {
   const thread = get(state.threads, threadId), value = title.trim();
   if (!value || value.length > 80 || /[\r\n\x00-\x1f]/.test(value)) throw new DomainError('Thread name must be 1–80 characters on one line');
-  if (thread.title && thread.title !== value) throw new DomainError('Thread already has a name', 409);
+  if (!canRename && thread.title && thread.title !== value) throw new DomainError('Thread already has a name', 409);
   thread.title = value;
 }
 export function submit(state: State, input: SubmitInput): RequestRecord {

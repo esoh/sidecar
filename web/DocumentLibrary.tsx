@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { LibraryState } from '../src/library.ts';
 import { api, errorText } from './api.ts';
-import { Icon } from './conversations.tsx';
+import { Icon, age } from './conversations.tsx';
 import { AgentSession } from './AgentSession.tsx';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
 import { TextSettings } from './TextSettings.tsx';
@@ -10,10 +10,11 @@ type Preview = { markdown: string; title: string };
 export function DocumentLibrary() {
   const [library, setLibrary] = useState<LibraryState | null>(null), [error, setError] = useState('');
   const [preview, setPreview] = useState<Preview | null>(null), [loading, setLoading] = useState(false);
+  const [now, setNow] = useState(Date.now);
   const parameters = new URLSearchParams(location.search), key = parameters.get('owner'), id = parameters.get('document');
   const session = library?.sessions.find(session => session.ownerKey === key);
   async function refresh() {
-    setLoading(true); setError('');
+    setLoading(true); setError(''); setNow(Date.now());
     try {
       setLibrary(await api<LibraryState>('/api/library'));
       if (key && id) {
@@ -26,6 +27,8 @@ export function DocumentLibrary() {
   useEffect(() => {
     void refresh();
     if (key && id) void api(`/api/library/${encodeURIComponent(key)}/documents/${encodeURIComponent(id)}/opened`, {}).catch(reason => setError(errorText(reason)));
+    const timer = setInterval(() => setNow(Date.now()), 60000);
+    return () => clearInterval(timer);
   }, []);
   return (
     <>
@@ -55,7 +58,7 @@ export function DocumentLibrary() {
                       ? `${session.url}/?document=${document.id}`
                       : `/?library=1&owner=${encodeURIComponent(session.ownerKey)}&document=${document.id}`}>
                       <span><strong>{document.title}</strong><small title={document.path}>{document.path}</small></span>
-                      <span className="library-document-meta"><span>{document.threadCount} {document.threadCount === 1 ? 'thread' : 'threads'} · {session.url ? 'Open' : 'Preview'}</span><span>Last opened {document.lastOpenedAt ? <time dateTime={new Date(document.lastOpenedAt).toISOString()} title={new Date(document.lastOpenedAt).toLocaleString()}>{new Date(document.lastOpenedAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</time> : '—'}</span></span>
+                      <span className="library-document-meta"><span>{document.threadCount} {document.threadCount === 1 ? 'thread' : 'threads'} · {session.url ? 'Open' : 'Preview'}</span><span>Last opened {document.lastOpenedAt ? <time dateTime={new Date(document.lastOpenedAt).toISOString()} title={new Date(document.lastOpenedAt).toLocaleString()}>{age(document.lastOpenedAt, now)}{age(document.lastOpenedAt, now) === 'now' ? '' : ' ago'}</time> : '—'}</span></span>
                     </a>
                   ))}
                 </section>
