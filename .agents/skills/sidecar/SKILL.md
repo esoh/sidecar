@@ -5,69 +5,68 @@ hooks:
   MessageDisplay:
     - hooks:
         - type: command
-          # Native skill hooks expose their directory as CLAUDE_PLUGIN_ROOT.
-          command: 'cd "${CLAUDE_PLUGIN_ROOT}" && cd "$(pwd -P)/../../.." && node --import tsx src/cli.ts hook --agent claude'
+          command: 'sidecar hook --agent claude'
           timeout: 2
   UserPromptSubmit:
     - hooks:
         - type: command
-          command: 'cd "${CLAUDE_PLUGIN_ROOT}" && cd "$(pwd -P)/../../.." && node --import tsx src/cli.ts hook --agent claude'
+          command: 'sidecar hook --agent claude'
           timeout: 2
   PreToolUse:
     - hooks:
         - type: command
-          command: 'cd "${CLAUDE_PLUGIN_ROOT}" && cd "$(pwd -P)/../../.." && node --import tsx src/cli.ts hook --agent claude'
+          command: 'sidecar hook --agent claude'
           timeout: 2
   PostToolUse:
     - hooks:
         - type: command
-          command: 'cd "${CLAUDE_PLUGIN_ROOT}" && cd "$(pwd -P)/../../.." && node --import tsx src/cli.ts hook --agent claude'
+          command: 'sidecar hook --agent claude'
           timeout: 2
   PostToolUseFailure:
     - hooks:
         - type: command
-          command: 'cd "${CLAUDE_PLUGIN_ROOT}" && cd "$(pwd -P)/../../.." && node --import tsx src/cli.ts hook --agent claude'
+          command: 'sidecar hook --agent claude'
           timeout: 2
   Stop:
     - hooks:
         - type: command
-          command: 'cd "${CLAUDE_PLUGIN_ROOT}" && cd "$(pwd -P)/../../.." && node --import tsx src/cli.ts hook --agent claude'
+          command: 'sidecar hook --agent claude'
           timeout: 2
   StopFailure:
     - hooks:
         - type: command
-          command: 'cd "${CLAUDE_PLUGIN_ROOT}" && cd "$(pwd -P)/../../.." && node --import tsx src/cli.ts hook --agent claude'
+          command: 'sidecar hook --agent claude'
           timeout: 2
   PermissionRequest:
     - hooks:
         - type: command
-          command: 'cd "${CLAUDE_PLUGIN_ROOT}" && cd "$(pwd -P)/../../.." && node --import tsx src/cli.ts hook --agent claude'
+          command: 'sidecar hook --agent claude'
           timeout: 2
   SessionStart:
     - hooks:
         - type: command
-          command: 'cd "${CLAUDE_PLUGIN_ROOT}" && cd "$(pwd -P)/../../.." && node --import tsx src/cli.ts hook --agent claude'
+          command: 'sidecar hook --agent claude'
           timeout: 2
   SessionEnd:
     - hooks:
         - type: command
-          command: 'cd "${CLAUDE_PLUGIN_ROOT}" && cd "$(pwd -P)/../../.." && node --import tsx src/cli.ts hook --agent claude'
+          command: 'sidecar hook --agent claude'
           timeout: 2
   PreCompact:
     - hooks:
         - type: command
-          command: 'cd "${CLAUDE_PLUGIN_ROOT}" && cd "$(pwd -P)/../../.." && node --import tsx src/cli.ts hook --agent claude'
+          command: 'sidecar hook --agent claude'
           timeout: 2
   PostCompact:
     - hooks:
         - type: command
-          command: 'cd "${CLAUDE_PLUGIN_ROOT}" && cd "$(pwd -P)/../../.." && node --import tsx src/cli.ts hook --agent claude'
+          command: 'sidecar hook --agent claude'
           timeout: 2
   Notification:
     - matcher: "idle_prompt|agent_completed|permission_prompt|agent_needs_input"
       hooks:
         - type: command
-          command: 'cd "${CLAUDE_PLUGIN_ROOT}" && cd "$(pwd -P)/../../.." && node --import tsx src/cli.ts hook --agent claude'
+          command: 'sidecar hook --agent claude'
           timeout: 2
 ---
 
@@ -77,7 +76,9 @@ Keep every document attached to this original conversation. The viewer makes no 
 
 ## Open
 
-Resolve this skill's real path; its repository root is three directories above its directory. Use that absolute root with `pnpm --dir /absolute/sidecar sidecar COMMAND` from any project.
+Run `sidecar --version` to confirm the app is installed, then use `sidecar COMMAND` from any project. The plugin provides the workflow and hooks; the app is installed separately. If the command is missing, explain that the user must run Sidecar's installer (see the repository README); do not silently install software.
+
+For source-checkout development only, resolve this skill's real path; its repository root is three directories above its directory. Use `pnpm --dir /absolute/sidecar sidecar COMMAND` instead. Install the local command before using Claude's streaming hooks.
 
 Identify this conversation's native UUID: Codex uses `CODEX_THREAD_ID`; Claude uses its native session ID (`CLAUDE_CODE_SESSION_ID`, with `CLAUDE_SESSION_ID` accepted as a fallback). If Claude's shell lacks that variable, use the session ID exposed by Claude's session context. Never infer identity from a terminal pane or start/resume another agent to answer.
 
@@ -85,7 +86,7 @@ The user's request to open Sidecar establishes permission to receive their quest
 
 Run `open --agent codex|claude --session UUID --file /absolute/document.md`. For generated Markdown, use `--stdin` and a quoted heredoc. Optional `--title TEXT`; `--no-browser` is for headless checks. Remember the returned ownerKey and Sidecar root. More documents use the same owner.
 
-For Claude, invoke this skill through the native Skill tool so its streaming and activity hooks register; reading this file alone cannot register hooks. Verify the native **Monitor** tool is available before opening. Start Monitor with `pnpm --dir /absolute/sidecar sidecar watch --owner KEY`, timeout 1800 seconds. If Monitor is unavailable or permission-blocked, report that connection is unavailable; do not claim the viewer is connected. No polling shell is a substitute for native wake-up.
+For Claude, invoke this skill through the native Skill tool so its streaming and activity hooks register; reading this file alone cannot register hooks. Verify the native **Monitor** tool is available before opening. Start Monitor with `sidecar watch --owner KEY`, timeout 1800 seconds. If Monitor is unavailable or permission-blocked, report that connection is unavailable; do not claim the viewer is connected. No polling shell is a substitute for native wake-up.
 
 ## Handle a notification
 

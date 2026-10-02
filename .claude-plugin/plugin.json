@@ -1,0 +1,10 @@
+{
+  "name": "sidecar",
+  "version": "0.1.0",
+  "description": "Discuss and revise Markdown documents with your existing coding agent.",
+  "author": {
+    "name": "esoh"
+  },
+  "repository": "https://github.com/esoh/sidecar",
+  "skills": "./.agents/skills/"
+}
