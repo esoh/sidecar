@@ -370,6 +370,7 @@ export function ConversationSidebar({
   const previousId = useRef<string | null>(null),
     atBottom = useRef(true);
   const active = threads.find((thread) => thread.id === activeId);
+  const requestStatuses = new Map(requests.map((request) => [request.id, request.status]));
   const inProgress = new Set(
     requests.filter((request) => request.status === 'claimed').map((request) => request.threadId),
   );
@@ -468,6 +469,10 @@ export function ConversationSidebar({
                 try {
                   await api(`/api/threads/${active.id}/resolution`, { isResolved: !active.isResolved });
                   setError('');
+                  if (!active.isResolved) {
+                    setFilter('unresolved');
+                    onOpen(null);
+                  }
                 } catch (reason) {
                   setError(errorText(reason));
                 }
@@ -553,25 +558,24 @@ export function ConversationSidebar({
                 <p>{active.quote ? 'Ask about the selected passage.' : 'Ask a question about this document.'}</p>
               </div>
             )}
-            {active.messages.map((message) => (
-              <div className={`message ${message.role}`} key={message.id}>
-                <div className="message-byline">
-                  <span className={`avatar ${message.role}`} aria-hidden="true">
-                    {message.role === 'user' ? 'Y' : '✦'}
-                  </span>
-                  {message.role === 'user' ? 'You' : 'Agent'}
+            {active.messages.map((message) => {
+              const status = message.role === 'user' ? requestStatuses.get(message.requestId) : undefined;
+              const hasStreamedReply = stream?.requestId === message.requestId && !!stream.text;
+              return (
+                <div className={`message ${message.role}`} key={message.id}>
+                  <div className="message-bubble">
+                    <p>{message.text}</p>
+                  </div>
+                  {!hasStreamedReply && (status === 'queued' || status === 'claimed') && (
+                    <div className="message-status" role="status">
+                      {status === 'queued' ? 'Queued' : 'Working…'}
+                    </div>
+                  )}
                 </div>
-                <p>{message.text}</p>
-              </div>
-            ))}
+              );
+            })}
             {text && (
               <div className="message agent">
-                <div className="message-byline">
-                  <span className="avatar agent" aria-hidden="true">
-                    ✦
-                  </span>
-                  Agent
-                </div>
                 <p>{text}</p>
               </div>
             )}

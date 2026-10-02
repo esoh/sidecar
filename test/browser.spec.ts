@@ -51,8 +51,13 @@ test('general questions, follow-ups, late replies and independent document title
   await page.getByLabel('Message', { exact: true }).fill('Clarify further');
   await page.getByRole('button', { name: 'Send message' }).click();
   await expect(page.locator('#threads').getByText('Clarify further', { exact: true })).toBeVisible();
+  const followUp = await lastRequest();
   await page.getByRole('button', { name: 'Resolve thread', exact: true }).click();
+  await expect(page.getByLabel('Thread status')).toHaveValue('unresolved');
   await answer('A late clarification');
+  await expect(page.getByRole('log')).toHaveCount(0);
+  await page.getByLabel('Thread status').selectOption('resolved');
+  await page.locator(`[data-thread-id="${followUp.threadId}"]`).click();
   await expect(page.locator('#threads').getByText('A late clarification', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Reopen thread', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Edit document name' }).click();
@@ -192,6 +197,10 @@ test('partial replies update live without losing a follow-up draft or rendering 
   await expect(page.locator('#threads img')).toHaveCount(0);
   expect((await state()).requests[request.id].status).toBe('claimed');
   await page.getByRole('button', { name: 'Resolve thread', exact: true }).click();
+  await expect(page.getByLabel('Thread status')).toHaveValue('unresolved');
+  await page.getByLabel('Thread status').selectOption('resolved');
+  await page.locator(`[data-thread-id="${request.threadId}"]`).click();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
   await page.reload();
   await expect(page.locator('#threads').getByText('First <img src=x onerror=alert(1)>', { exact: true })).toBeVisible();
   await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
@@ -244,7 +253,10 @@ test('floating comments retain their highlight, retry safely, and reopen the sav
   await expect(page.getByRole('button', { name: 'Threads', exact: true })).toBeFocused();
   await page.getByRole('button', { name: 'Resolve thread', exact: true }).click();
   await expect(page.locator('#document mark')).toHaveCount(0);
-  await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', request.threadId);
+  await expect(page.getByLabel('Thread status')).toHaveValue('unresolved');
+  await expect(page.locator(`[data-thread-id="${request.threadId}"]`)).toHaveCount(0);
+  await page.getByLabel('Thread status').selectOption('resolved');
+  await page.locator(`[data-thread-id="${request.threadId}"]`).click();
   await expect(page.getByRole('button', { name: 'Reopen thread', exact: true })).toBeVisible();
 });
 
@@ -474,8 +486,15 @@ test('sidebar filters, preserves per-thread drafts, and keeps background replies
   await expect(message).toHaveValue('Draft in the first conversation');
   await expect(page.locator('#threads')).not.toContainText('Background reply');
   await page.getByRole('button', { name: 'Resolve thread' }).click();
-  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await expect(page.getByLabel('Thread status')).toHaveValue('unresolved');
+  await expect(page.getByLabel('Thread status')).toBeFocused();
   await expect(page.locator(`[data-thread-id="${first.threadId}"]`)).toHaveCount(0);
+  await page.getByLabel('Thread status').selectOption('resolved');
+  await page.locator(`[data-thread-id="${first.threadId}"]`).click();
+  await page.getByRole('button', { name: 'Reopen thread' }).click();
+  await expect(message).toHaveValue('Draft in the first conversation');
+  await page.getByRole('button', { name: 'Resolve thread' }).click();
+  await expect(page.getByLabel('Thread status')).toHaveValue('unresolved');
   await page.getByLabel('Thread status').selectOption('resolved');
   await page.locator(`[data-thread-id="${first.threadId}"]`).click();
   await page.getByRole('button', { name: 'Reopen thread' }).click();
@@ -679,6 +698,42 @@ test('one header status follows native activity across documents without repeati
   await expect(dot).toHaveAttribute('data-activity', 'waiting');
   await signal('agent-disconnected'); await expect(status).toHaveText('Claude · Disconnected');
   await expect(dot).toHaveAttribute('data-activity', 'disconnected');
+});
+
+test('conversation messages show their own queued and working status until answered', async ({ page }) => {
+  const doc = await f.register(); await page.goto(`${f.url}/?document=${doc.id}`);
+  const message = page.getByLabel('Message', { exact: true });
+  await message.fill('First question'); await message.press('Enter'); await expect(message).toHaveValue('');
+  const first = await lastRequest();
+  await message.fill('Follow-up question'); await message.press('Enter'); await expect(message).toHaveValue('');
+  const second = await lastRequest();
+  const firstStatus = page.locator('.message.user').filter({ hasText: 'First question' }).getByRole('status');
+  const secondStatus = page.locator('.message.user').filter({ hasText: 'Follow-up question' }).getByRole('status');
+  await expect(firstStatus).toHaveText('Queued');
+  await expect(secondStatus).toHaveText('Queued');
+  await f.agent(`/agent/requests/${first.id}/claim`, {});
+  await expect(firstStatus).toHaveText('Working…');
+  await expect(secondStatus).toHaveText('Queued');
+  await page.reload();
+  await expect(firstStatus).toHaveText('Working…');
+  await expect(secondStatus).toHaveText('Queued');
+  const markers = await (await f.agent('/agent/streams', { requestId: first.id, documentId: doc.id, threadId: first.threadId })).json();
+  await f.agent('/agent/stream-events', { ownerKey: `claude-${f.owner.sessionId}`, messageId: 'status-reply', turnId: 'status-turn', index: 0, delta: markers.prefix + 'First answer', final: false });
+  await expect(page.getByRole('log')).toContainText('First answer');
+  await expect(firstStatus).toHaveCount(0);
+  await expect(secondStatus).toHaveText('Queued');
+  await page.reload();
+  await expect(firstStatus).toHaveCount(0);
+  await expect(secondStatus).toHaveText('Queued');
+  await f.agent('/agent/replies', { requestId: first.id, documentId: doc.id, threadId: first.threadId, text: 'First answer' });
+  await expect(page.getByRole('log')).toContainText('First answer');
+  await expect(firstStatus).toHaveCount(0);
+  await expect(secondStatus).toHaveText('Queued');
+  await f.agent(`/agent/requests/${second.id}/claim`, {});
+  await expect(secondStatus).toHaveText('Working…');
+  await f.agent('/agent/replies', { requestId: second.id, documentId: doc.id, threadId: second.threadId, text: 'Second answer' });
+  await expect(page.getByRole('log')).toContainText('Second answer');
+  await expect(page.getByRole('log').getByRole('status')).toHaveCount(0);
 });
 
 test('thread previews show unread dots and active-request spinners independently', async ({ page }) => {
@@ -1055,7 +1110,7 @@ test('resolved annotations disappear, preserve overlapping open threads, and ret
   const first = await annotate('First passage question');
   await annotate('Second passage question');
   await page.getByRole('button', { name: 'Resolve thread', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Reopen thread', exact: true })).toBeVisible();
+  await expect(page.getByLabel('Thread status')).toHaveValue('unresolved');
   const marks = page.locator('#document mark');
   await expect(marks).toHaveText('world');
   await marks.click();
@@ -1064,10 +1119,10 @@ test('resolved annotations disappear, preserve overlapping open threads, and ret
   await page.getByRole('button', { name: 'Resolve thread', exact: true }).click();
   await expect(marks).toHaveCount(0);
   await expect(page.locator('#document')).toContainText('Hello world.');
+  await expect(page.getByLabel('Thread status')).toHaveValue('unresolved');
   await page.reload();
-  await expect(page.getByRole('button', { name: 'Reopen thread', exact: true })).toBeVisible();
+  await expect(page.getByLabel('Thread status')).toHaveValue('unresolved');
   await expect(marks).toHaveCount(0);
-  await page.getByRole('button', { name: 'Threads', exact: true }).click();
   await page.getByLabel('Thread status').selectOption('resolved');
   await expect(page.locator('[data-thread-id]')).toHaveCount(2);
   await page.locator(`[data-thread-id="${first.threadId}"]`).click();
