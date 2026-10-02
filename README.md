@@ -88,7 +88,7 @@ Standalone HTML input, independent model sessions, and compaction cancellation a
 
 Select text and click **Comment** or press **C** to open a floating composer beside the passage. The shortcut leaves typing and Ctrl/Cmd+C untouched. The highlight remains visible while you type. Clicking outside dismisses an empty composer; a composer with a draft stays open. **Send** (or Enter) starts a thread with the original agent; **Cancel** or Escape discards the unsent comment. Select another passage at any time to start a separate comment; reselecting a passage restores its draft while this page stays open. Failed sends preserve the draft for retry. Shift+Enter adds a new line. Textboxes grow with their contents and then scroll.
 
-Saved passages remain highlighted after reload. Click a highlight, or focus it with Tab and press Enter, to reach its thread. When threads overlap, choose the question you want. Resolved threads retain a muted highlight and can be reopened. If a file edit makes a passage missing or ambiguous, its thread and quote remain, marked “Passage changed.”
+Saved passages remain highlighted after reload. Click a highlight, or focus it with Tab and press Enter, to reach its thread. When threads overlap, choose the question you want. Resolving a thread removes its highlight while keeping its conversation in the Resolved list. Reopening restores the highlight if the passage still exists. Overlapping unresolved threads remain highlighted. If a file edit makes a passage missing or ambiguous, its thread and quote remain, marked “Passage changed.”
 
 ## Document conversations
 

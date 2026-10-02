@@ -236,7 +236,7 @@ function App() {
     [],
   );
   const anchors = JSON.stringify(
-    threads.filter((thread) => thread.quote).map(({ id, quote, isResolved }) => ({ id, quote, isResolved })),
+    threads.filter((thread) => thread.quote && !thread.isResolved).map(({ id, quote }) => ({ id, quote })),
   );
   useLayoutEffect(() => {
     const root = article.current;
@@ -260,7 +260,7 @@ function App() {
     if (!root || !painter) return;
     let paintingId = '';
     const releaseId = painter.hooks.Render.UUID.tap(() => paintingId);
-    const targets: { id: string; quote?: Quote; isResolved?: boolean }[] = documentError ? [] : JSON.parse(anchors);
+    const targets: { id: string; quote?: Quote }[] = documentError ? [] : JSON.parse(anchors);
     if (selection && !documentError) targets.push({ id: 'selection', quote: selection });
     const desired = new Map(targets.map((target) => [target.id, JSON.stringify(target.quote)]));
     for (const [id, quote] of painted.current) {
@@ -281,7 +281,6 @@ function App() {
     for (const mark of painter.getDoms()) {
       const ids = [painter.getIdByDom(mark), ...painter.getExtraIdByDom(mark)];
       mark.toggleAttribute('data-pending', ids.includes('selection'));
-      mark.removeAttribute('data-resolved');
       mark.removeAttribute('tabindex');
       mark.removeAttribute('role');
       mark.removeAttribute('title');
@@ -290,7 +289,6 @@ function App() {
         mark.tabIndex = 0;
         mark.setAttribute('role', 'button');
         mark.title = 'Open passage thread';
-        if (saved.every((target) => target.isResolved)) mark.dataset.resolved = '';
       }
     }
   }, [content.version, anchors, selection, documentError, highlightRevision, documentText]);
