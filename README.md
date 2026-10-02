@@ -90,6 +90,8 @@ Ask Codex or Claude to “open Sidecar’s document library,” or run `sidecar 
 
 The library groups saved documents across all local Codex and Claude sessions. Live entries open their original Sidecar viewer. Stopped sessions have a read-only Markdown preview, including local images; return to the original agent to resume questions and revisions. Browsing never creates a coding conversation, starts another agent, claims its requests, or reassigns documents. The library reads the existing state directory and does not create a second database. Use **Refresh** to update the list.
 
+The document library shows last-opened times. Documents sort newest first, and agent groups sort by the latest open among their documents. Legacy entries show an unknown time until next opened.
+
 Click the **Claude/Codex** label in a viewer or the library to see and copy its original session ID. Session IDs identify the owning conversation; an active Sidecar viewer does not by itself prove its agent is online.
 
 ## Passage comments
@@ -99,6 +101,12 @@ Select text and click **Comment** or press **C** to open a floating composer bes
 Saved passages remain highlighted after reload. Click a highlight, or focus it with Tab and press Enter, to reach its thread. The active thread’s passage has a violet highlight and outline; other passages stay amber. Clicking the quote in the conversation scrolls to its passage and briefly emphasizes it (unless reduced motion is enabled). When threads overlap, choose the question you want. Resolving a thread removes its highlight while keeping its conversation in the Resolved list. Reopening restores the highlight if the passage still exists. Overlapping unresolved threads remain highlighted. If a file edit makes a passage missing or ambiguous, its thread and quote remain, marked “Passage changed.”
 
 Click **View original document** on a changed passage to temporarily show the saved Markdown in the main pane, with its original passage highlighted. The conversation and draft stay available. **Return to current** restores the latest document. Sidecar saves versions as they are viewed, so versions from before this feature may be unavailable; their quoted text is still kept and the original-document link is hidden. Saved Markdown lives under `versions/` in the owner’s state directory and survives app restarts. Linked images are loaded from their current locations, not archived.
+
+## Closing a document
+
+The **Close document** button in the top bar asks for confirmation before permanently deleting that document’s threads, messages, highlights, browser drafts, and saved revisions. The Markdown file (including agent-generated files), other documents, text sizes, and panel settings remain. There is no undo. Browser cleanup applies to the current local origin; a small closed-document marker prevents suspended tabs from saving an old draft again.
+
+Queued, running, or interrupted requests must finish or be reconciled by the original agent before closing. The viewer shows **Document closed** with **Browse all documents**. The app remains available for browsing even after closing its last document; use `sidecar stop --owner KEY` to stop it explicitly. The coding agent keeps running. Last-opened metadata for the closed document is removed. Other open viewers receive the closure. A disk or browser cleanup failure is reported explicitly.
 
 ## Document conversations
 
@@ -149,5 +157,3 @@ The header shows “Compacting” between matching start/completion signals. A r
 Schemas checked against the official [Codex hooks reference](https://learn.chatgpt.com/docs/hooks) and [Claude hooks reference](https://code.claude.com/docs/en/hooks).
 
 For browser checks, install the test browser once with `pnpm exec playwright install chromium`, then run `pnpm exec playwright test`.
-
-The document library shows last-opened times. Documents sort newest first, and agent groups sort by the latest open among their documents. Legacy entries show an unknown time until next opened.

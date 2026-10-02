@@ -1494,3 +1494,64 @@ test('Settings opens the all-agent library and session popovers copy original ID
   await expect(library.locator('.library-session').first()).toHaveAttribute('aria-label', `codex ${old.owner.sessionId}`);
   await expect(library.getByRole('link', { name: /Saved document/ }).locator('time')).toHaveCount(1);
 });
+
+test('close confirmation preserves cancel, blocks pending work, and clears drafts in every open tab', async ({ page, context }) => {
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const message = page.getByLabel('Message', { exact: true });
+  await message.fill('Keep this question'); await message.press('Enter');
+  await expect(message).toHaveValue('');
+  const request = await lastRequest();
+  await page.getByRole('button', { name: 'Close document', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('pending agent requests');
+  await answer('Done');
+  await expect(page.getByRole('log')).toContainText('Done');
+  await message.fill('Unsent draft');
+  page.once('dialog', async dialog => {
+    expect(dialog.message()).toContain('permanently deletes all threads');
+    expect(dialog.message()).toContain('Markdown file stays untouched');
+    await dialog.dismiss();
+  });
+  await page.getByRole('button', { name: 'Close document', exact: true }).click();
+  await expect(message).toHaveValue('Unsent draft');
+  expect((await state()).documents[doc.id]).toBeDefined();
+  const otherTab = await context.newPage();
+  await otherTab.goto(`${f.url}/?document=${doc.id}`);
+  await expect(otherTab.getByLabel('Message', { exact: true })).toHaveValue('Unsent draft');
+  await otherTab.getByLabel('Message', { exact: true }).fill('Draft from another tab');
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: 'Close document', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Document closed', exact: true })).toBeVisible();
+  await expect(otherTab.getByRole('heading', { name: 'Document closed', exact: true })).toBeVisible();
+  for (const tab of [page, otherTab]) {
+    expect(await tab.evaluate(({ documentId, threadId }) => ({
+      drafts: Object.keys(localStorage).filter(key => key.startsWith(`sidecar-draft:${documentId}:`)),
+      read: localStorage.getItem(`sidecar-read-reply:${threadId}`),
+      selected: sessionStorage.getItem(`sidecar-thread:${documentId}`),
+    }), { documentId: doc.id, threadId: request.threadId })).toEqual({ drafts: [], read: null, selected: null });
+  }
+  await page.getByRole('link', { name: 'Browse all documents', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Documents', exact: true })).toBeVisible();
+  expect((await state()).documents).toEqual({});
+});
+
+test('closing one document offers the library and keeps the remaining document draft', async ({ page }) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'sidecar-close-library-')));
+  cleanup.push(() => rm(root, { recursive: true, force: true }));
+  f = await fixture({ after: fn => cleanup.unshift(fn) }, 20, root);
+  const doc = await f.register(), other = await f.register('other.md', '# Keep me');
+  await page.goto(`${f.url}/?document=${other.id}`);
+  const message = page.getByLabel('Message', { exact: true });
+  await message.fill('Keep the other draft');
+  await page.getByLabel('Documents', { exact: true }).selectOption(doc.id);
+  await expect(page).toHaveTitle('First heading');
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: 'Close document', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Document closed', exact: true })).toBeVisible();
+  await page.getByRole('link', { name: 'Browse all documents', exact: true }).click();
+  await page.getByRole('link', { name: /Keep me/ }).click();
+  await expect(page).toHaveTitle('Keep me');
+  await expect(message).toHaveValue('Keep the other draft');
+  const saved = await state();
+  expect(Object.keys(saved.documents)).toEqual([other.id]);
+});
