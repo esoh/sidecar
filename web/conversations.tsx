@@ -144,7 +144,7 @@ export function QuestionForm({
           placeholder="Ask a question or request a change…"
           required
           value={text}
-          readOnly={busy}
+          readOnly={busy || disabled}
           onChange={(event) => {
             setText(event.target.value);
             drafts.set(draftKey, { text: event.target.value, retry: retry.current });
@@ -339,7 +339,8 @@ export function ConversationSidebar({
 }) {
   const [filter, setFilter] = useState('unresolved'),
     [error, setError] = useState(''),
-    [creating, setCreating] = useState(false);
+    [creating, setCreating] = useState(false),
+    [isLeaving, setLeaving] = useState(false);
   const readKey = 'sidecar-read-reply:';
   const [readReplies, setReadReplies] = useState<Record<string, string>>(() => {
     try {
@@ -435,6 +436,28 @@ export function ConversationSidebar({
       setCreating(false);
     }
   }
+  async function leaveConversation() {
+    if (!active || isLeaving) return;
+    // Pending submissions retain their draft until accepted; don't discard them.
+    if (active.messages.length || drafts.current.get(active.id)?.text.trim()) {
+      onOpen(null);
+      return;
+    }
+    setLeaving(true);
+    try {
+      const result = await api<{ isDeleted: boolean }>(`/api/threads/${active.id}`, undefined, 'DELETE');
+      if (result.isDeleted) {
+        drafts.current.delete(active.id);
+        positions.current.delete(active.id);
+      }
+      setError('');
+      if (!previousId.current || previousId.current === active.id) onOpen(null);
+    } catch (reason) {
+      setError(errorText(reason));
+    } finally {
+      setLeaving(false);
+    }
+  }
   const problems = new Set(
     active
       ? requests
@@ -456,7 +479,10 @@ export function ConversationSidebar({
               className="back-button"
               aria-label="Threads"
               title="Back to threads"
-              onClick={() => onOpen(null)}
+              disabled={isLeaving}
+              onClick={() => {
+                void leaveConversation();
+              }}
             >
               <Icon name="back" />
             </button>
@@ -608,6 +634,7 @@ export function ConversationSidebar({
             threadId={active.id}
             drafts={drafts.current}
             draftKey={active.id}
+            disabled={isLeaving}
             onSent={() => {
               if (previousId.current === active.id) {
                 atBottom.current = true;

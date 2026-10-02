@@ -196,3 +196,20 @@ test('renderer fonts and images require viewer access and stay within the docume
   assert.match(csp, /script-src 'self' 'wasm-unsafe-eval';/);
   assert.doesNotMatch(csp, /script-src[^;]*'unsafe-inline'/);
 });
+
+test('discarding an empty thread is idempotent and cannot remove a submitted message', async t => {
+  const f = await fixture(t);
+  const doc = await f.register();
+  const initial = await (await f.view('/api/state')).json();
+  const id = Object.keys(initial.threads)[0];
+  const discard = () => f.view(`/api/threads/${id}`, undefined, 'DELETE');
+  assert.deepEqual(await (await discard()).json(), { isDeleted: true });
+  assert.deepEqual(await (await discard()).json(), { isDeleted: false });
+  await f.reopen();
+  assert.equal((await (await f.view('/api/state')).json()).threads[id], undefined);
+  const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'Keep this question', clientMessageId: 'keep' })).json();
+  assert.deepEqual(await (await f.view(`/api/threads/${request.threadId}`, undefined, 'DELETE')).json(), { isDeleted: false });
+  const saved = await (await f.view('/api/state')).json();
+  assert.equal(saved.threads[request.threadId].messages[0].text, 'Keep this question');
+  assert.equal(saved.requests[request.id].status, 'queued');
+});

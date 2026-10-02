@@ -222,6 +222,7 @@ test('conversation Markdown renders both roles, keeps heading links local and sa
   await page.goto(`${f.url}/?document=${doc.id}`);
   await page.getByLabel('Message', { exact: true }).fill('Please explain **bold** and `code`.');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(page.locator('.message.user strong')).toHaveText('bold');
   await answer(`# Shared heading
 
 [Jump to reply heading](#shared-heading)
@@ -1192,6 +1193,7 @@ test('text sizes adjust each pane independently and persist across sessions', as
   await page.getByRole('button', { name: 'Comment', exact: true }).click();
   await page.getByLabel('Comment', { exact: true }).fill('Explain **this**');
   await page.getByRole('button', { name: 'Send comment', exact: true }).click();
+  await expect(page.getByLabel('Comment', { exact: true })).toHaveCount(0);
   await answer('A **readable reply** with `code`.');
   await expect(page.locator('.message.agent strong')).toBeVisible();
   await page.evaluate(() => document.fonts.ready);
@@ -1235,4 +1237,35 @@ test('text sizes adjust each pane independently and persist across sessions', as
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(documentSize).toHaveValue('100');
   await expect(conversationSize).toHaveValue('100');
+});
+
+test('Back discards empty conversations but retains drafts and in-flight messages', async ({ page }) => {
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
+  const firstId = await page.locator('#threads').getAttribute('data-active-thread');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await expect(page.getByLabel('Thread status')).toBeVisible();
+  await expect.poll(async () => (await state()).threads[firstId!]).toBeUndefined();
+  await page.getByRole('button', { name: 'New conversation' }).click();
+  await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
+  const draftId = await page.locator('#threads').getAttribute('data-active-thread');
+  await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await page.locator(`[data-thread-id="${draftId}"]`).click();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/api/questions', async route => { await gate; await route.continue(); }, { times: 1 });
+  try {
+    await page.getByRole('button', { name: 'Send message', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled();
+    await page.getByRole('button', { name: 'Threads', exact: true }).click();
+    await expect(page.locator(`[data-thread-id="${draftId}"]`)).toBeVisible();
+    release();
+    await expect.poll(async () => (await state()).threads[draftId!].messages.length).toBe(1);
+    await page.reload();
+    await expect(page.locator(`[data-thread-id="${draftId}"]`)).toBeVisible();
+    expect((await state()).threads[firstId!]).toBeUndefined();
+  } finally { release(); }
 });
