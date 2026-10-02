@@ -1210,3 +1210,24 @@ pre code.pn-code[data-keep-layout] {
 .plannotator-content :is(button, button *, svg, svg *, input, textarea) {
   -webkit-text-fill-color: currentColor;
 }
+
+.draft-selection {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  color: var(--subtle);
+  font-size: 11px;
+}
+.selection-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--subtle);
+}
+.selection-badge .sidecar-icon { width: 12px; height: 12px; }
+.message-selection { margin: 0 0 8px auto; max-width: 90%; }
+.message[data-active] .message-selection { border-color: oklch(0.75 0.18 280); }
+.draft-selection .cancel-button { width: 24px; height: 24px; padding: 4px; }

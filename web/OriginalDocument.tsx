@@ -8,12 +8,12 @@ import { excludedSelection, quoteRange } from './selection.ts';
 
 export function OriginalDocument({
   documentId,
-  threadId,
+  messageId,
   quote,
   onReturn,
 }: {
   documentId: string;
-  threadId: string;
+  messageId: string;
   quote: Quote;
   onReturn: () => void;
 }) {
@@ -81,7 +81,7 @@ export function OriginalDocument({
           ref={article}
           className="document-card w-full bg-card rounded-xl p-5 md:p-8 lg:p-10 xl:p-12 shadow-xl border border-border/50"
         >
-          <MarkdownDocument markdown={markdown} documentId={documentId} anchorPrefix={`original-${threadId}-`} />
+          <MarkdownDocument markdown={markdown} documentId={documentId} anchorPrefix={`original-${messageId}-`} />
         </article>
       )}
     </section>

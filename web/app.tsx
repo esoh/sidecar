@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import Highlighter from '@plannotator/web-highlighter';
@@ -6,13 +6,12 @@ import type { Quote, RequestRecord } from '../src/store.ts';
 import { api, errorText, type ViewerState, type ClosedDocument } from './api.ts';
 import {
   AgentStatus,
-  forgetDocument,
   ConversationSidebar,
   Icon,
   QuestionForm,
   TitleForm,
-  type QuestionDraft,
 } from './conversations.tsx';
+import { useQuestionDrafts, forgetDocument, type QuestionDraft, type QuestionDrafts } from './useQuestionDrafts.ts';
 import { locateQuote, quoteRange, selectionText, selectionSentence, excludedSelection } from './selection.ts';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
 import { DocumentLibrary } from './DocumentLibrary.tsx';
@@ -76,6 +75,10 @@ function usePosition(
   }, [ref, anchor, width, preferAbove]);
 }
 
+function keepsAttachment(target: EventTarget | null) {
+  return target instanceof Element && !!target.closest('.sidebar .composer, .sidebar-header, .thread-row, .sidebar-toggle');
+}
+
 function App() {
   const [state, setState] = useState<ViewerState | null>(null),
     [content, setContent] = useState<Content>({ html: '', markdown: '', version: '' });
@@ -101,14 +104,24 @@ function App() {
   const requestedDocument = new URL(location.href).searchParams.get('document');
   const documentId = requestedDocument ?? Object.keys(state?.documents ?? {})[0] ?? '';
   const current = state?.documents[documentId];
+  const drafts = useQuestionDrafts(documentId);
+  const floatingDrafts = useMemo<QuestionDrafts>(() => ({
+    get: id => passageDrafts.current.get(id),
+    set: (id, draft) => { passageDrafts.current.set(id, draft); },
+    remove: (id, expected) => { if (!expected || passageDrafts.current.get(id) === expected) passageDrafts.current.delete(id); },
+    flush: () => {}, error: '',
+  }), []);
   useEffect(() => {
     if (current) void api(`/api/documents/${documentId}/opened`, {}).catch(reason => setError(errorText(reason)));
   }, [documentId, !!current]);
   const threads = Object.values(state?.threads ?? {}).filter((thread) => thread.documentId === documentId);
   const [activeThreadId, setActiveThreadId] = useState<string | null | undefined>(undefined);
-  const [originalThreadId, setOriginalThreadId] = useState<string | null>(null);
-  const originalThread =
-    originalThreadId === activeThreadId ? threads.find((thread) => thread.id === originalThreadId) : undefined;
+  const [activeMessageId, setActiveMessageId] = useState<string | null>(null);
+  const [sentRequestId, setSentRequestId] = useState<string | null>(null);
+  const [messageVisit, setMessageVisit] = useState(0);
+  const [originalMessageId, setOriginalMessageId] = useState<string | null>(null);
+  const selectedMessages = threads.flatMap(thread => thread.messages.filter(message => message.quote).map(message => ({ thread, message })));
+  const originalMessage = selectedMessages.find(({ thread, message }) => thread.id === activeThreadId && message.id === originalMessageId)?.message;
   const [isSidebarShown, setSidebarShown] = useState(() => innerWidth > 850);
   const panelResize = useResizablePanel({
     storageKey: 'sidecar-panel-width',
@@ -122,8 +135,13 @@ function App() {
   }, [panelResize.width]);
   const openThread = useCallback(
     (id: string | null) => {
-      setOriginalThreadId(null);
+      setOriginalMessageId(null);
+      drafts.flush();
+      setSelection(id ? drafts.get(id)?.quote : undefined);
+      setComposing(false);
+      setChoices(null);
       setActiveThreadId(id);
+      setActiveMessageId(null);
       setSidebarShown(true);
       if (id) requestAnimationFrame(() => document.getElementById('conversation-back')?.focus({ preventScroll: true }));
       try {
@@ -132,7 +150,7 @@ function App() {
         /* Private browsing may disable storage. */
       }
     },
-    [documentId],
+    [documentId, drafts],
   );
   useEffect(() => {
     if (!current || activeThreadId !== undefined) return;
@@ -146,7 +164,7 @@ function App() {
       saved === 'list'
         ? null
         : (threads.find((thread) => thread.id === saved)?.id ??
-            threads.find((thread) => thread.scope === 'document' && !thread.isResolved)?.id ??
+            threads.find((thread) => !thread.isResolved)?.id ??
             null),
     );
   }, [current, activeThreadId, documentId, threads]);
@@ -158,19 +176,43 @@ function App() {
       /* In-memory selection still works. */
     }
   }, [activeThreadId, documentId, closedDocument]);
+  const pendingQuote = activeThreadId ? drafts.get(activeThreadId)?.quote : undefined;
+  useEffect(() => {
+    if (!composing && isSidebarShown && activeThreadId) setSelection(pendingQuote);
+  }, [activeThreadId, pendingQuote, composing, isSidebarShown]);
+  useEffect(() => {
+    if (activeMessageId && selectedMessages.some(({ thread, message }) => thread.id === activeThreadId && message.id === activeMessageId)) return;
+    setActiveMessageId(selectedMessages.filter(({ thread }) => thread.id === activeThreadId).at(-1)?.message.id ?? null);
+  }, [activeThreadId, activeMessageId, selectedMessages.map(({ message }) => message.id).join(',')]);
+  useEffect(() => {
+    if (!sentRequestId) return;
+    const thread = threads.find(thread => thread.messages.some(message => message.role === 'user' && message.requestId === sentRequestId));
+    const message = thread?.messages.find(message => message.role === 'user' && message.requestId === sentRequestId);
+    if (message) {
+      if (thread?.id === activeThreadId && message.quote) setActiveMessageId(message.id);
+      setSentRequestId(null);
+    }
+  }, [sentRequestId, state, activeThreadId]);
+  const removeAttachment = useCallback(() => {
+    if (!activeThreadId) return;
+    const draft = drafts.get(activeThreadId);
+    if (draft?.quote) { const { quote, ...rest } = draft; drafts.set(activeThreadId, rest); }
+  }, [activeThreadId, drafts]);
   const clearSelection = useCallback(() => {
     // Plannotator's handleToolbarClose removes only the pending source, before
     // the browser starts its next gesture. Keep saved highlight nodes in place.
+    removeAttachment();
     highlighter.current?.remove('selection');
     painted.current.delete('selection');
     setSelection(undefined);
     setComposing(false);
     setChoices(null);
-  }, []);
+  }, [removeAttachment]);
   const openComment = useCallback(() => {
+    removeAttachment();
     setComposing(true);
     window.getSelection()?.removeAllRanges();
-  }, []);
+  }, [removeAttachment]);
 
   const documentClosed = useCallback((result: ClosedDocument) => {
     const storageError = forgetDocument(result.documentId, result.threadIds);
@@ -269,7 +311,7 @@ function App() {
     [],
   );
   const anchors = JSON.stringify(
-    threads.filter((thread) => thread.quote && !thread.isResolved).map(({ id, quote }) => ({ id, quote })),
+    selectedMessages.filter(({ thread }) => !thread.isResolved).map(({ message }) => ({ id: message.id, quote: message.quote })),
   );
   useLayoutEffect(() => {
     const root = article.current;
@@ -314,7 +356,7 @@ function App() {
     for (const mark of painter.getDoms()) {
       const ids = [painter.getIdByDom(mark), ...painter.getExtraIdByDom(mark)];
       mark.toggleAttribute('data-pending', ids.includes('selection'));
-      mark.toggleAttribute('data-active', !!activeThreadId && ids.includes(activeThreadId));
+      mark.toggleAttribute('data-active', !!activeMessageId && ids.includes(activeMessageId));
       mark.removeAttribute('tabindex');
       mark.removeAttribute('role');
       mark.removeAttribute('title');
@@ -325,12 +367,12 @@ function App() {
         mark.title = 'Open passage thread';
       }
     }
-  }, [content.version, anchors, selection, documentError, highlightRevision, documentText, activeThreadId]);
+  }, [content.version, anchors, selection, documentError, highlightRevision, documentText, activeMessageId]);
 
   useEffect(() => {
     const outside = (event: MouseEvent) => {
       if (
-        ignoreClick.current ||
+        ignoreClick.current || keepsAttachment(event.target) ||
         (event.target instanceof Node &&
           (toolbar.current?.contains(event.target) || composer.current?.contains(event.target)))
       )
@@ -393,7 +435,7 @@ function App() {
     const outside = (event: MouseEvent) => {
       // Preserve double/triple-click selection gestures before removing highlight nodes.
       if (event.detail >= 2) return;
-      if (!(event.target instanceof Node) || toolbar.current?.contains(event.target)) return;
+      if (!(event.target instanceof Node) || toolbar.current?.contains(event.target) || keepsAttachment(event.target)) return;
       // A press on document text may begin an overlapping drag. Keep its text
       // nodes alive until mouseup captures the new range (or dismisses a click).
       if (article.current?.contains(event.target)) return;
@@ -408,7 +450,7 @@ function App() {
   useEffect(() => {
     if (!composing) return;
     const outside = (event: PointerEvent) => {
-      if (!(event.target instanceof Node) || composer.current?.contains(event.target)) return;
+      if (!(event.target instanceof Node) || composer.current?.contains(event.target) || keepsAttachment(event.target)) return;
       if (article.current?.contains(event.target)) return;
       if (sendingComment.current || passageDrafts.current.get(draftKey)?.text.trim()) return;
       passageDrafts.current.delete(draftKey);
@@ -463,7 +505,7 @@ function App() {
     requestAnimationFrame(() => {
       ignoreClick.current = false;
     });
-    setSelection({
+    const quote: Quote = {
       exact,
       prefix: text.slice(Math.max(0, start - 32), start),
       suffix: text.slice(end, end + 32),
@@ -471,9 +513,21 @@ function App() {
       end,
       version: content.version,
       ...(sentence ? { sentence } : {}),
-    });
+    };
+    setSelection(quote);
+    if (activeThreadId && isSidebarShown) {
+      const draft = drafts.get(activeThreadId) ?? { text: '', retry: null };
+      drafts.set(activeThreadId, { ...draft, quote });
+    }
     setComposing(false);
     setChoices(null);
+  }
+  function openMessage(id: string) {
+    const selected = selectedMessages.find(({ message }) => message.id === id);
+    if (!selected) return;
+    openThread(selected.thread.id);
+    setActiveMessageId(id);
+    setMessageVisit(visit => visit + 1);
   }
   function visitHighlight(target: EventTarget | null) {
     if (ignoreClick.current || sendingComment.current || !(target instanceof Element)) return;
@@ -481,12 +535,12 @@ function App() {
       painter = highlighter.current;
     if (!mark || !painter) return;
     const ids = [...new Set([painter.getIdByDom(mark), ...painter.getExtraIdByDom(mark)])].filter((id) =>
-      threads.some((thread) => thread.id === id),
+      selectedMessages.some(({ message }) => message.id === id),
     );
     if (ids.length) setSidebarShown(true);
     if (ids.length === 1) {
       clearSelection();
-      openThread(ids[0]);
+      openMessage(ids[0]);
     } else if (ids.length > 1) {
       setComposing(false);
       setSelection(undefined);
@@ -583,16 +637,16 @@ function App() {
       <div className={`layout${isSidebarShown ? '' : ' sidebar-collapsed'}`}>
         <main className="canvas">
           <div className="reading-width">
-            {originalThread?.quote && (
+            {originalMessage?.quote && (
               <OriginalDocument
-                key={originalThread.id}
+                key={originalMessage.id}
                 documentId={documentId}
-                threadId={originalThread.id}
-                quote={originalThread.quote}
-                onReturn={() => setOriginalThreadId(null)}
+                messageId={originalMessage.id}
+                quote={originalMessage.quote}
+                onReturn={() => setOriginalMessageId(null)}
               />
             )}
-            {!originalThread && (documentError || !current) && (
+            {!originalMessage && (documentError || !current) && (
               <p data-testid="document-error" role="alert">
                 {documentError || 'Open a document from your agent.'}
               </p>
@@ -600,7 +654,7 @@ function App() {
             <article
               className="document-card w-full bg-card rounded-xl p-5 md:p-8 lg:p-10 xl:p-12 shadow-xl border border-border/50"
               id="document"
-              hidden={!!originalThread}
+              hidden={!!originalMessage}
               ref={article}
               tabIndex={-1}
               aria-label="Document"
@@ -656,14 +710,23 @@ function App() {
           stream={state?.stream ?? null}
           passageChanged={passageChanged}
           isShown={isSidebarShown}
-          showOriginal={(threadId) => {
+          drafts={drafts}
+          onRemoveSelection={clearSelection}
+          activeMessageId={activeMessageId}
+          messageVisit={messageVisit}
+          onMessageSent={request => setSentRequestId(request.id)}
+          showOriginal={(messageId) => {
             clearSelection();
             window.getSelection()?.removeAllRanges();
-            setOriginalThreadId(threadId);
+            setOriginalMessageId(messageId);
+            setActiveMessageId(messageId);
             if (innerWidth <= 850) setSidebarShown(false);
           }}
-          showPassage={(quote) => {
-            setOriginalThreadId(null);
+          showPassage={(message) => {
+            if (!message.quote) return;
+            const quote = message.quote;
+            setActiveMessageId(message.id);
+            setOriginalMessageId(null);
             requestAnimationFrame(() => {
               const root = article.current,
                 range = root && quoteRange(root, quote);
@@ -672,8 +735,8 @@ function App() {
               node?.scrollIntoView({ block: 'center', behavior: 'smooth' });
               if (innerWidth <= 850) setSidebarShown(false);
               (node?.closest('mark') ?? root)?.focus({ preventScroll: true });
-              if (activeThreadId && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
-                for (const mark of highlighter.current?.getDoms(activeThreadId) ?? [])
+              if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
+                for (const mark of highlighter.current?.getDoms(message.id) ?? [])
                   mark.animate(
                     [{ boxShadow: '0 0 0 5px oklch(0.75 0.18 280 / 0.6)' }, { boxShadow: '0 0 0 0 transparent' }],
                     { duration: 700 },
@@ -699,10 +762,10 @@ function App() {
                   key={id}
                   onClick={() => {
                     clearSelection();
-                    openThread(id);
+                    openMessage(id);
                   }}
                 >
-                  {threads.find((thread) => thread.id === id)?.messages[0]?.text ?? 'Open thread'}
+                  {selectedMessages.find(({ message }) => message.id === id)?.message.text ?? 'Open message'}
                 </button>
               ))
             ) : (
@@ -738,7 +801,7 @@ function App() {
               floating
               onCancel={cancel}
               onSent={sent}
-              drafts={passageDrafts.current}
+              drafts={floatingDrafts}
               draftKey={draftKey}
               onSendingChange={(sending) => {
                 sendingComment.current = sending;
