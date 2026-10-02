@@ -147,7 +147,7 @@ body {
   margin-bottom: 25px;
 }
 .annotation-highlight {
-  background: oklch(0.7 0.18 60 / 0.3);
+  background: color-mix(in srgb, oklch(0.7 0.18 60 / 0.3) var(--sidecar-highlight-intensity, 100%), transparent);
   color: inherit;
   border: 0;
   border-bottom: 2px solid oklch(0.7 0.2 60);
@@ -643,8 +643,8 @@ select {
   overflow-wrap: anywhere;
 }
 .annotation-highlight[data-pending] {
-  background: #ffff00;
-  color: #000;
+  background: color-mix(in srgb, #ffff00 var(--sidecar-highlight-intensity, 100%), transparent);
+  color: var(--sidecar-highlight-text, #000);
   border-bottom-color: transparent;
   filter: none;
 }
@@ -1103,7 +1103,7 @@ pre code.pn-code[data-keep-layout] {
 }
 
 .annotation-highlight[data-active]:not([data-pending]) {
-  background: oklch(0.75 0.18 280 / 0.3);
+  background: color-mix(in srgb, oklch(0.75 0.18 280 / 0.3) var(--sidecar-highlight-intensity, 100%), transparent);
   border-bottom-color: var(--primary);
   outline: 1px solid var(--primary);
   outline-offset: 1px;

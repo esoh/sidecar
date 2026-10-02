@@ -69,7 +69,9 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   assert.ok(event.stream.prefix && event.stream.suffix);
   assert.ok(Buffer.byteLength(JSON.stringify(event)) < 1000, 'large documents must not enlarge the event or force a fetch');
   assert.equal(JSON.parse(await readFile(join(directory, 'state.json'), 'utf8')).requests[req.id].status, 'claimed', 'the app still claims the request');
-  assert.equal((await state()).requests[req.id].status, 'queued', 'delivery is not evidence the agent has started');
+  for (let i = 0; i < 100 && !(await state()).requests[req.id].acceptedAt; i++) await delay(10);
+  assert.ok((await state()).requests[req.id].acceptedAt, 'record the successful native handoff');
+  assert.equal((await state()).requests[req.id].status, 'claimed', 'successful handoff is shown as Working');
   await post(`/agent/threads/${req.threadId}/title`, { title: 'Widget retry behavior' });
   const next = await (await post('/api/questions', { documentId: doc.id, threadId: req.threadId, text: 'Why?', clientMessageId: 'second' })).json();
   const later = await (await post('/api/questions', { documentId: doc.id, threadId: req.threadId, text: 'And after that?', clientMessageId: 'third' })).json();
@@ -81,6 +83,20 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   } else {
     for (let i = 0; i < 70; i++) await forwardHook('claude', { session_id: owner.sessionId, hook_event_name: 'MessageDisplay', message_id: `unrelated-${i}`, turn_id: 'ordinary', index: 0, delta: 'Unrelated terminal answer.', final: true });
   }
+  assert.ok(event.stream.progress?.prefix && event.stream.progress?.suffix);
+  const update = event.stream.progress.prefix + 'I’ll check the retry setting.' + event.stream.progress.suffix;
+  if (agent === 'codex') {
+    for (const socket of sockets) {
+      socket.send(JSON.stringify({ method: 'item/agentMessage/delta', params: { threadId: owner.sessionId, turnId: 'reply', itemId: 'progress', delta: update } }));
+      socket.send(JSON.stringify({ method: 'item/completed', params: { threadId: owner.sessionId, turnId: 'reply', item: { id: 'progress', type: 'agentMessage', text: update } } }));
+    }
+  } else await forwardHook('claude', { session_id: owner.sessionId, hook_event_name: 'MessageDisplay', message_id: 'progress', turn_id: 'reply', index: 0, delta: update, final: true });
+  for (let i = 0; i < 100 && !(await state()).threads[req.threadId].messages.some((m: any) => m.role === 'agent'); i++) await delay(10);
+  const working = await state();
+  assert.equal(working.requests[req.id].status, 'claimed');
+  assert.equal(working.requests[req.id].answer, undefined, 'progress must not complete the request');
+  assert.equal(working.threads[req.threadId].messages.at(-1).text, 'I’ll check the retry setting.');
+  assert.equal(working.requests[next.id].status, 'queued', 'progress must not release the next request');
   const answer = event.stream.prefix + 'Three retries.' + event.stream.suffix;
   if (agent === 'codex') {
     for (const socket of sockets) {
@@ -95,7 +111,7 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   assert.equal(second.history, undefined, 'history is available on demand, not repeated in every event');
   const saved = await state();
   assert.equal(saved.requests[req.id].status, 'completed');
-  assert.equal(saved.threads[req.threadId].messages.filter((m: any) => m.role === 'agent').length, 1);
+  assert.equal(saved.threads[req.threadId].messages.filter((m: any) => m.role === 'agent').length, 2);
   assert.notEqual(event.stream.prefix, second.stream.prefix);
 
   await post('/agent/replies', { requestId: next.id, documentId: doc.id, threadId: req.threadId, text: 'Because the retry limit is three.' });
@@ -104,7 +120,7 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   assert.equal(third.thread.lastRequestId, next.id, 'use the preceding request, never a later queued request');
   const history = await (await post(`/agent/requests/${later.id}/claim`, {})).json();
   assert.equal(history.claimStatus, 'already-claimed');
-  assert.equal(history.thread.messages.filter((m: any) => m.role === 'agent').length, 2);
+  assert.equal(history.thread.messages.filter((m: any) => m.role === 'agent').length, 3);
   await post('/agent/replies', { requestId: later.id, documentId: doc.id, threadId: req.threadId, text: 'Then it stops retrying.' });
   const exact = 'The widget retries three times.';
   const quote = { exact, prefix: 'Context\n', suffix: '\n', start: 8, end: 8 + exact.length, version };

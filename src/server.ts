@@ -11,7 +11,7 @@ import { ReplyStream, isStreamEvent } from './stream.ts';
 import { readDocument } from './documents.ts';
 import { readAppVersion } from './version.ts';
 import { libraryDocument, listLibrary, recordDocumentOpen } from './library.ts';
-import { claim, createThread, closeDocument, discardEmptyThread, nameThread, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, resolveThread, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput } from './store.ts';
+import { claim, createThread, closeDocument, discardEmptyThread, nameThread, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput } from './store.ts';
 
 const rendererRequire = createRequire(import.meta.resolve('@plannotator/ui/components/BlockRenderer'));
 const rendererFonts = {
@@ -101,7 +101,13 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   async function acceptStream(event: import('./stream.ts').StreamEvent) {
     const active = stream;
     if (!active || closed) return;
-    active.accept(event);
+    const progress = active.accept(event);
+    if (progress) {
+      try { await store.update(state => recordProgress(state, { ...active.route, ...progress })); }
+      catch { active.fail('Could not save the progress update. Send a complete reply to recover.'); }
+      changed();
+      return;
+    }
     streamChanged();
     if (active.done && !finalizing) {
       finalizing = (async () => {
@@ -176,9 +182,10 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   }
   function snapshot() {
     const state = store.read();
-    // Reserving delivery is not evidence that the native agent has started answering.
+    // Show Working once native delivery succeeds; reserving the request alone is still Queued.
     const delivered = directRequestId && state.requests[directRequestId];
-    if (delivered && delivered.status === 'claimed' && !stream?.hasStarted) delivered.status = 'queued';
+    if (delivered && delivered.status === 'claimed' && !delivered.acceptedAt && !stream?.hasStarted) delivered.status = 'queued';
+    for (const request of Object.values(state.requests)) if (request.status === 'queued' && request.acceptedAt) request.status = 'claimed';
     return { ...state, appVersion, stream: stream?.snapshot() ?? null, lastLifecycle, activity: compacting ? 'compacting' : agentActivity, connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError, documents: Object.fromEntries(Object.values(state.documents).map(document => {
       const cached = cache.get(document.id);
       return [document.id, { ...document, title: title(document), version: cached && 'data' in cached ? cached.data.version : null, error: cached && 'error' in cached ? cached.error : null }];
@@ -196,7 +203,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       const created = new ReplyStream(route); stream = created;
       streamReady = owner.agent === 'codex' ? (async () => {
         try {
-          const stop = await observeCodex(owner.sessionId, event => { if (stream === created) void acceptStream(event); }, message => { if (stream === created) { created.fail(message); changed(); } }, undefined, created.prefix);
+          const stop = await observeCodex(owner.sessionId, event => { if (stream === created) void acceptStream(event); }, message => { if (stream === created) { created.fail(message); changed(); } }, undefined, [created.prefix, created.progress.prefix]);
           if (closed || stream !== created) { stop(); throw new Error('Sidecar stopped'); }
           stopObserver = stop;
         } catch (error) { created.fail('Streaming unavailable. Use a complete reply.'); changed(); throw error; }
@@ -205,7 +212,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     const active = stream;
     await streamReady;
     if (closed || stream !== active) throw new Error('Sidecar stream was replaced');
-    return { prefix: stream.prefix, suffix: stream.suffix };
+    return { prefix: stream.prefix, suffix: stream.suffix, progress: stream.progress };
   }
   async function prepareNotification(id: string) {
     const notification = { type: 'sidecar.request', ownerKey: ownerKey(owner), requestId: id };
@@ -464,6 +471,12 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       if (method === 'PATCH' && renameTitle?.[1]) {
         const id = renameTitle[1], value = text(body, 'title');
         await store.update(state => setTitle(state, id, value)); changed(); json(response, { ok: true }); return;
+      }
+      const acceptedPath = path.match(/^\/agent\/requests\/([^/]+)\/accepted$/);
+      if (method === 'POST' && acceptedPath?.[1]) {
+        const id = acceptedPath[1];
+        await store.update(state => { const request = get(state.requests, id); request.acceptedAt ??= Date.now(); });
+        changed(); json(response, { ok: true }); return;
       }
       const preparePath = path.match(/^\/agent\/requests\/([^/]+)\/prepare$/);
       if (method === 'POST' && preparePath?.[1]) { json(response, await prepareNotification(preparePath[1])); return; }

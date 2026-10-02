@@ -484,6 +484,7 @@ export function ConversationSidebar({
     return () => { stopped = true; };
   }, [originalPath]);
   const requestStatuses = new Map(requests.map((request) => [request.id, request.status]));
+  const latestMessages = new Map(active?.messages.map(message => [message.requestId, message.id]));
   const inProgress = new Set(
     requests.filter((request) => request.status === 'claimed').map((request) => request.threadId),
   );
@@ -709,7 +710,8 @@ export function ConversationSidebar({
               </div>
             )}
             {active.messages.map((message) => {
-              const status = message.role === 'user' ? requestStatuses.get(message.requestId) : undefined;
+              const status = requestStatuses.get(message.requestId);
+              const isLatest = latestMessages.get(message.requestId) === message.id;
               const hasStreamedReply = stream?.requestId === message.requestId && !!stream.text;
               return (
                 <div className={`message ${message.role}`} key={message.id}>
@@ -717,10 +719,10 @@ export function ConversationSidebar({
                     <MarkdownDocument
                       markdown={message.text}
                       documentId={documentId}
-                      anchorPrefix={`message-${message.requestId}-${message.role}-`}
+                      anchorPrefix={`message-${message.id}-`}
                     />
                   </div>
-                  {!hasStreamedReply && (status === 'queued' || status === 'claimed') && (
+                  {isLatest && !hasStreamedReply && (status === 'queued' || status === 'claimed') && (
                     <div className="message-status" role="status">
                       {status === 'queued' ? 'Queued' : 'Working…'}
                     </div>

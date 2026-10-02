@@ -158,6 +158,20 @@ export function claim(state: State, requestId: string, options: {resume?: boolea
   request.status = 'claimed';
   return { claimStatus: 'claimed', request };
 }
+export function recordProgress(state: State, input: ReplyInput & { messageId: string }): void {
+  const request = get(state.requests, input.requestId);
+  if (request.documentId !== input.documentId || request.threadId !== input.threadId) throw new DomainError('Progress routing does not match the request', 409);
+  if (request.status !== 'claimed') throw new DomainError('Claim the request before reporting progress', 409);
+  if (!input.text.trim()) throw new DomainError('Progress text is required');
+  const thread = get(state.threads, request.threadId);
+  const id = `progress:${request.id}:${input.messageId}`;
+  const previous = thread.messages.find(message => message.id === id);
+  if (previous) {
+    if (previous.text !== input.text) throw new DomainError('A different progress update already exists', 409);
+    return;
+  }
+  thread.messages.push({ id, role: 'agent', text: input.text, requestId: request.id, createdAt: Date.now() });
+}
 export function reply(state: State, input: ReplyInput): void {
   const request = get(state.requests, input.requestId);
   if (request.documentId !== input.documentId || request.threadId !== input.threadId) throw new DomainError('Reply routing does not match the request', 409);

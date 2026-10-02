@@ -259,7 +259,7 @@ const answer = 42;
   await expect(reply.locator('script, [onerror]')).toHaveCount(0);
   expect(await page.evaluate(() => (window as any).__sidecarReplyScriptRan)).toBeUndefined();
   const id = await reply.getByRole('heading', { name: 'Shared heading' }).getAttribute('id');
-  expect(id).toBe(`message-${(await lastRequest()).id}-agent-shared-heading`);
+  expect(id).toMatch(/^message-.+-shared-heading$/);
   await page.evaluate(() => {
     (window as any).__lastScrollTarget = '';
     Element.prototype.scrollIntoView = function () { (window as any).__lastScrollTarget = this.id; };
@@ -1686,4 +1686,53 @@ test('document badges, copy and brightness preserve text anchors and controls', 
   await page.setViewportSize({ width: 600, height: 800 });
   const badgeBox = (await page.locator('.document-tools').boundingBox())!;
   expect((await page.locator('#document h2').boundingBox())!.y).toBeGreaterThan(badgeBox.y + badgeBox.height);
+});
+
+test('progress updates remain in history and Working moves below the latest update', async ({ page }) => {
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByLabel('Message', { exact: true }).fill('Inspect this document');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(page.locator('#threads').getByRole('status').filter({ hasText: 'Queued' })).toBeVisible();
+  const request = await lastRequest();
+  const event = await (await f.agent(`/agent/requests/${request.id}/prepare`, {})).json();
+  await f.agent(`/agent/requests/${request.id}/accepted`, {});
+  await expect(page.locator('#threads').getByRole('status').filter({ hasText: 'Working' })).toBeVisible();
+  const emit = (messageId: string, delta: string) => f.agent('/agent/stream-events', { ownerKey: ownerKey(f.owner), turnId: 'test', messageId, index: 0, delta, final: true });
+  await emit('progress', event.stream.progress.prefix + 'I’ll inspect the file.' + event.stream.progress.suffix);
+  await expect(page.locator('.message.agent').getByText('I’ll inspect the file.', { exact: true })).toBeVisible();
+  await expect(page.locator('.message.agent').getByRole('status')).toHaveText('Working…');
+  await expect(page.locator('.message.user').getByRole('status')).toHaveCount(0);
+  await emit('final', event.stream.prefix + 'The file looks good.' + event.stream.suffix);
+  await expect(page.locator('.message.agent')).toHaveCount(2);
+  await expect(page.locator('#threads').getByRole('status').filter({ hasText: 'Working' })).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator('.message.agent')).toHaveCount(2);
+  await expect(page.getByRole('log')).toContainText('I’ll inspect the file.');
+  await expect(page.getByRole('log')).toContainText('The file looks good.');
+});
+
+test('highlight intensity dims selections without dimming text and persists across reload', async ({ page }) => {
+  const doc = await f.register('a.md', '# Highlight settings\n\nSelect this passage.');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document')).toContainText('Select this passage.');
+  await select(page, 'Select this passage.');
+  const original = await page.locator('mark[data-pending]').evaluate(e => getComputedStyle(e).backgroundColor);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const slider = page.getByRole('slider', { name: 'Highlight intensity', exact: true });
+  await slider.fill('30');
+  await slider.press('Escape');
+  await select(page, 'Select this passage.');
+  const dimmed = page.locator('mark[data-pending]');
+  await expect(dimmed).toHaveText('Select this passage.');
+  expect(await dimmed.evaluate(e => getComputedStyle(e).backgroundColor)).not.toBe(original);
+  expect(await dimmed.evaluate(e => getComputedStyle(e).color)).toBe('rgb(255, 255, 255)');
+  await page.reload();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(slider).toHaveValue('30');
+  await page.getByRole('button', { name: 'Reset highlight intensity' }).click();
+  await expect(slider).toHaveValue('100');
+  await slider.press('Escape');
+  await select(page, 'Select this passage.');
+  expect(await page.locator('mark[data-pending]').evaluate(e => getComputedStyle(e).backgroundColor)).toBe(original);
 });

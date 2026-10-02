@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { DomainError, isObject } from './store.ts';
 
 export type StreamEvent = { messageId: string; turnId: string; index: number; delta: string; final: boolean };
+export type ProgressReply = { messageId: string; text: string };
 export type ReplyRoute = { requestId: string; documentId: string; threadId: string };
 export function isStreamEvent(value: unknown): value is StreamEvent {
   return isObject(value) && typeof value.messageId === 'string' && value.messageId.length > 0 && value.messageId.length < 256 && typeof value.turnId === 'string' && value.turnId.length > 0 && value.turnId.length < 256 && Number.isSafeInteger(value.index) && Number(value.index) >= 0 && typeof value.delta === 'string' && typeof value.final === 'boolean';
@@ -12,26 +13,30 @@ export function isStreamEvent(value: unknown): value is StreamEvent {
 export class ReplyStream {
   readonly prefix: string;
   readonly suffix: string;
+  readonly progress: { prefix: string; suffix: string };
   text = '';
   error: string | null = null;
   done = false;
   private messages = new Map<string, { next: number; raw: string; pending: Map<number, StreamEvent>; ignored: boolean }>();
   private bound: string | undefined;
+  private started = false;
+  private completedProgress = new Set<string>();
   private received = 0;
   constructor(readonly route: ReplyRoute) {
     const nonce = randomUUID();
     this.prefix = `[[sidecar:${nonce}]]\n`;
     this.suffix = `\n[[/sidecar:${nonce}]]`;
+    this.progress = { prefix: `[[sidecar-progress:${nonce}]]\n`, suffix: `\n[[/sidecar-progress:${nonce}]]` };
   }
-  get hasStarted() { return this.bound !== undefined; }
+  get hasStarted() { return this.started; }
   fail(message: string) { if (!this.done) this.error = message; }
-  accept(event: StreamEvent) {
+  accept(event: StreamEvent): ProgressReply | undefined {
     if (this.done || this.error) return;
     const key = `${event.turnId}/${event.messageId}`;
-    if (this.bound && this.bound !== key) return;
+    if ((this.bound && this.bound !== key) || this.completedProgress.has(key)) return;
     let candidate = this.messages.get(key);
     if (!candidate) {
-      if (this.messages.size >= 64) { this.fail('Too many messages while waiting for a reply. Send a complete reply.'); return; }
+      if (this.messages.size + this.completedProgress.size >= 64) { this.fail('Too many messages while waiting for a reply. Send a complete reply.'); return; }
       candidate = { next: 0, raw: '', pending: new Map(), ignored: false };
       this.messages.set(key, candidate);
     }
@@ -45,27 +50,39 @@ export class ReplyStream {
       if (!next) break;
       candidate.pending.delete(candidate.next++);
       candidate.raw += next.delta;
-      if (!candidate.raw.startsWith(this.prefix)) {
-        if (!this.prefix.startsWith(candidate.raw) || next.final) { candidate.ignored = true; this.received -= candidate.raw.length; candidate.raw = ''; if (next.final || [...candidate.pending.values()].some(event => event.final)) this.messages.delete(key); candidate.pending.clear(); return; }
+      const isProgress = candidate.raw.startsWith(this.progress.prefix);
+      const prefix = isProgress ? this.progress.prefix : this.prefix;
+      if (!candidate.raw.startsWith(prefix)) {
+        if ((!this.prefix.startsWith(candidate.raw) && !this.progress.prefix.startsWith(candidate.raw)) || next.final) { candidate.ignored = true; this.received -= candidate.raw.length; candidate.raw = ''; if (next.final || [...candidate.pending.values()].some(event => event.final)) this.messages.delete(key); candidate.pending.clear(); return; }
         continue;
       }
-      this.bound = key;
-      this.render(candidate.raw, next.final);
+      this.started = true;
+      if (!isProgress) this.bound = key;
+      const suffix = isProgress ? this.progress.suffix : this.suffix;
+      const isComplete = this.render(candidate.raw, next.final, prefix, suffix);
+      if (isComplete && isProgress) {
+        const update = { messageId: key, text: this.text };
+        this.completedProgress.add(key);
+        this.messages.delete(key);
+        this.text = '';
+        return update;
+      }
+      if (isComplete) this.done = true;
       if (this.done || this.error) return;
     }
   }
-  private render(raw: string, final: boolean) {
-    const body = raw.slice(this.prefix.length);
-    const end = body.indexOf(this.suffix);
+  private render(raw: string, final: boolean, prefix: string, suffix: string) {
+    const body = raw.slice(prefix.length);
+    const end = body.indexOf(suffix);
     if (end !== -1) this.text = body.slice(0, end);
     else {
-      let held = Math.min(body.length, this.suffix.length - 1);
-      while (held > 0 && !body.endsWith(this.suffix.slice(0, held))) held--;
+      let held = Math.min(body.length, suffix.length - 1);
+      while (held > 0 && !body.endsWith(suffix.slice(0, held))) held--;
       this.text = body.slice(0, body.length - held);
     }
     if (final) {
-      if (end < 0 || body.slice(end + this.suffix.length).trim() !== '' || !this.text.trim()) this.fail('The streamed reply ended without a complete reply boundary. Send a complete reply to recover.');
-      else this.done = true;
+      if (end < 0 || body.slice(end + suffix.length).trim() !== '' || !this.text.trim()) this.fail('The streamed reply ended without a complete reply boundary. Send a complete reply to recover.');
+      else return true;
     }
   }
   finish(route: ReplyRoute) {
