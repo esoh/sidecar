@@ -23,6 +23,28 @@ test('retrying a question creates one request and rejects conflicting reuse', ()
   assert.throws(() => submit(state, { ...input, text: 'Different question' }));
 });
 
+test('new user messages reopen resolved threads, while invalid submissions and retries retain resolution', () => {
+  for (const quote of [undefined, { exact: 'hello', prefix: '', suffix: ' world', start: 0, end: 5, version: 'v1' }]) {
+    const { state, input } = setup();
+    const firstInput = { ...input, quote };
+    const first = submit(state, firstInput);
+    resolveThread(state, first.threadId, true);
+    submit(state, firstInput);
+    assert.equal(state.threads[first.threadId]?.isResolved, true);
+    const followInput = { ...input, threadId: first.threadId, text: 'One more question', clientMessageId: 'follow' };
+    assert.throws(() => submit(state, { ...followInput, text: ' ' }));
+    assert.equal(state.threads[first.threadId]?.isResolved, true);
+    const follow = submit(state, followInput);
+    assert.equal(follow.threadId, first.threadId);
+    assert.equal(state.threads[first.threadId]?.isResolved, false);
+    assert.deepEqual(follow.quote, quote);
+    resolveThread(state, first.threadId, true);
+    assert.equal(submit(state, followInput).id, follow.id);
+    assert.equal(state.threads[first.threadId]?.isResolved, true);
+    assert.equal(state.threads[first.threadId]?.messages.length, 2);
+  }
+});
+
 test('a claim grants execution once and prevents a second active request', () => {
   const { state, input } = setup();
   const first = submit(state, input);

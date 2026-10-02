@@ -1147,7 +1147,7 @@ test('hidden streaming replies preserve a reader’s scroll position', async ({ 
   await expect.poll(() => log.evaluate(el => el.scrollTop)).toBe(position);
 });
 
-test('resolved annotations disappear, preserve overlapping open threads, and return on reopen', async ({ page }) => {
+test('resolved annotations disappear, preserve overlapping open threads, and reopen when a new message is sent', async ({ page }) => {
   const doc = await f.register();
   await page.goto(`${f.url}/?document=${doc.id}`);
   await expect(page.locator('#document')).toContainText('world');
@@ -1179,8 +1179,16 @@ test('resolved annotations disappear, preserve overlapping open threads, and ret
   await expect(page.locator('[data-thread-id]')).toHaveCount(2);
   await page.locator(`[data-thread-id="${first.threadId}"]`).click();
   await expect(page.getByRole('log')).toContainText('First passage question');
-  await page.getByRole('button', { name: 'Reopen thread', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Reopen thread', exact: true })).toBeVisible();
+  await page.getByLabel('Message', { exact: true }).fill('Another passage question');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByRole('button', { name: 'Resolve thread', exact: true })).toBeVisible();
+  await expect(page.getByRole('log')).toContainText('Another passage question');
+  expect((await lastRequest()).threadId).toBe(first.threadId);
   await expect(marks).toHaveText('world');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await expect(page.getByLabel('Thread status')).toHaveValue('unresolved');
+  await expect(page.locator(`[data-thread-id="${first.threadId}"]`)).toBeVisible();
   await page.reload();
   await expect(marks).toHaveText('world');
 });
