@@ -120,7 +120,7 @@ async function main() {
     return;
   }
   if (values.help || !positionals.length) {
-    process.stdout.write('Sidecar — document conversations with your existing agent.\n\nUsage: sidecar COMMAND [options]\nCommands: open, status, request, name-thread, stream, reply, watch, stop, hook\n\nOpen: sidecar open --agent codex|claude --session UUID --file /absolute/document.md\nUse the Sidecar skill in the original agent to establish live delivery.\n');
+    process.stdout.write('Sidecar — document conversations with your existing agent.\n\nUsage: sidecar COMMAND [options]\nCommands: open, browse, status, request, name-thread, stream, reply, watch, stop, hook\n\nOpen: sidecar open --agent codex|claude --session UUID --file /absolute/document.md\nUse the Sidecar skill in the original agent to establish live delivery.\n');
     return;
   }
   const [command, requestId] = positionals;
@@ -129,6 +129,16 @@ async function main() {
     const payload = JSON.parse(await stdin());
     await forwardHook(values.agent, payload);
     if (values.agent === 'codex' && payload.hook_event_name === 'Stop') output({});
+    return;
+  }
+  if (command === 'browse') {
+    const nativeKinds = [process.env.CODEX_THREAD_ID && 'codex', (process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID) && 'claude'].filter(Boolean);
+    const owner = selectOwner(values.agent ?? (nativeKinds.length === 1 ? nativeKinds[0] : undefined), values.session);
+    const key = ownerKey(owner);
+    await ensureApp(key);
+    const runtime = await readRuntime(key), url = `${runtime.url}/?library=1`;
+    output({ ownerKey: key, url });
+    if (!values['no-browser']) await openBrowser(url);
     return;
   }
   if (command === 'open') {
@@ -178,7 +188,7 @@ async function main() {
   if (command === 'reply' && requestId) {
     output(await agentCall(key, '/agent/replies', { requestId, documentId: values.document, threadId: values.thread, ...(values.stream ? { stream: true } : { text: await stdin() }), isError: Boolean(values.error) })); return;
   }
-  throw new Error('Commands: open, status, request, name-thread, stream, reply, watch, stop, hook');
+  throw new Error('Commands: open, browse, status, request, name-thread, stream, reply, watch, stop, hook');
 }
 if (process.argv[1] && resolve(process.argv[1]) === cliPath) {
   main().catch(error => { process.stderr.write((error instanceof Error ? error.message : String(error)) + '\n'); process.exitCode = 1; });

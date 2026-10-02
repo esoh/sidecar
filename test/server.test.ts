@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { writeFile, rename, unlink, symlink } from 'node:fs/promises';
+import { writeFile, readFile, rename, unlink, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fixture } from './support.ts';
@@ -235,4 +235,58 @@ test('viewed document versions survive replacement and restart without exposing 
   assert.equal((await f.view(`/api/documents/${doc.id}/versions/agent-token`)).status, 404);
   const other = await f.register('other.md', before.markdown);
   assert.equal((await f.view(`/api/documents/${other.id}/versions/${before.version}`)).status, 404);
+});
+
+
+test('closing a document deletes its conversations and snapshots while keeping files and other documents', async t => {
+  const f = await fixture(t), doc = await f.register(), other = await f.register('other.md');
+  const before = await (await f.view(`/api/documents/${doc.id}`)).json();
+  const otherVersion = await (await f.view(`/api/documents/${other.id}`)).json();
+  const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'Explain', clientMessageId: 'close' })).json();
+  const queued = await (await f.view('/api/questions', { documentId: other.id, text: 'Keep working', clientMessageId: 'keep' })).json();
+  const close = () => f.view(`/api/documents/${doc.id}`, undefined, 'DELETE');
+  assert.equal((await close()).status, 409);
+  await f.agent(`/agent/requests/${request.id}/claim`, {});
+  assert.equal((await close()).status, 409);
+  await f.reopen();
+  assert.equal((await close()).status, 409);
+  await f.agent(`/agent/requests/${request.id}/claim`, { resume: true });
+  const reply = { requestId: request.id, documentId: doc.id, threadId: request.threadId, text: 'Done' };
+  await f.agent('/agent/replies', reply);
+  const reads = Array.from({ length: 8 }, () => f.view(`/api/documents/${doc.id}`));
+  const response = await close();
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.documentId, doc.id);
+  assert.ok(result.threadIds.includes(request.threadId));
+  assert.equal(result.nextDocumentId, other.id);
+  assert.equal(result.cleanupError, undefined);
+  await Promise.all(reads);
+  await assert.rejects(readFile(join(f.directory, 'versions', doc.id, `${before.version}.md`)), { code: 'ENOENT' });
+  assert.equal(await readFile(doc.path, 'utf8'), before.markdown);
+  assert.equal((await f.agent('/agent/replies', reply)).status, 404);
+  assert.equal((await f.view(`/api/documents/${other.id}/versions/${otherVersion.version}`)).status, 200);
+  await f.reopen();
+  const state = await (await f.view('/api/state')).json();
+  assert.equal(state.documents[doc.id], undefined);
+  assert.ok(state.documents[other.id]);
+  assert.equal(state.requests[request.id], undefined);
+  assert.equal(state.requests[queued.id].status, 'queued');
+  assert.ok(Object.values<any>(state.threads).every(thread => thread.documentId === other.id));
+  assert.equal((await f.view('/api/documents/__proto__', undefined, 'DELETE')).status, 404);
+  assert.equal((await fetch(`${f.url}/api/documents/${other.id}`, { method: 'DELETE', headers: { Cookie: f.cookie, Origin: 'https://elsewhere.example' } })).status, 403);
+});
+
+test('closing the last document leaves its server available for browsing with no saved conversations', async t => {
+  const f = await fixture(t), doc = await f.register();
+  const response = await f.view(`/api/documents/${doc.id}`, undefined, 'DELETE');
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).nextDocumentId, null);
+  assert.equal((await f.view('/api/state')).status, 200);
+  await f.reopen();
+  const state = await (await f.view('/api/state')).json();
+  assert.deepEqual(state.documents, {});
+  assert.deepEqual(state.threads, {});
+  assert.deepEqual(state.requests, {});
+  assert.match(await readFile(doc.path, 'utf8'), /Hello/);
 });

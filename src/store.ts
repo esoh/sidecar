@@ -52,7 +52,7 @@ function isRequest(v: unknown): v is RequestRecord {
 function records<T extends {id: string}>(v: unknown, check: (v: unknown) => v is T): v is Record<string,T> {
   return isObject(v) && Object.entries(v).every(([key, item]) => check(item) && key === item.id && /^[0-9a-f-]{36}$/i.test(key));
 }
-function isState(v: unknown): v is State {
+export function isState(v: unknown): v is State {
   return isObject(v) && v.version === 1 && isOwner(v.owner) && records(v.documents, isDocument) && records(v.threads, isThread) && records(v.requests, isRequest);
 }
 export function get<T>(items: Record<string,T>, id: string): T {
@@ -76,6 +76,17 @@ export function registerDocument(state: State, input: {path: string; title?: str
   ensureGeneralThread(state, document.id);
   if (input.title?.trim()) document.providedTitle = input.title.trim();
   return document;
+}
+export function closeDocument(state: State, documentId: string): string[] {
+  get(state.documents, documentId);
+  const requests = Object.values(state.requests).filter(request => request.documentId === documentId);
+  if (requests.some(request => ['queued', 'claimed', 'uncertain'].includes(request.status)))
+    throw new DomainError('Wait for this document’s pending agent requests to finish before closing it.', 409);
+  const threadIds = Object.values(state.threads).filter(thread => thread.documentId === documentId).map(thread => thread.id);
+  for (const id of threadIds) delete state.threads[id];
+  for (const request of requests) delete state.requests[request.id];
+  delete state.documents[documentId];
+  return threadIds;
 }
 export function createThread(state: State, input: { id?: string; documentId: string; quote?: Quote }): Thread {
   get(state.documents, input.documentId);

@@ -3,14 +3,15 @@ import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readFile, writeFile, realpath, mkdir, rename, unlink } from 'node:fs/promises';
+import { readFile, writeFile, realpath, mkdir, rename, unlink, rm } from 'node:fs/promises';
 import { basename, join, dirname, relative, isAbsolute, extname } from 'node:path';
 import { notifyCodex } from './agent.ts';
 import { observeCodex, readCodexActivity } from './codex-stream.ts';
 import { ReplyStream, isStreamEvent } from './stream.ts';
 import { readDocument } from './documents.ts';
 import { readAppVersion } from './version.ts';
-import { claim, createThread, discardEmptyThread, nameThread, DomainError, get, isObject, isQuote, openStore, ownerKey, registerDocument, reply, resolveThread, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput } from './store.ts';
+import { libraryDocument, listLibrary, recordDocumentOpen } from './library.ts';
+import { claim, createThread, closeDocument, discardEmptyThread, nameThread, DomainError, get, isObject, isQuote, openStore, ownerKey, registerDocument, reply, resolveThread, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput } from './store.ts';
 
 const rendererRequire = createRequire(import.meta.resolve('@plannotator/ui/components/BlockRenderer'));
 const rendererFonts = {
@@ -74,6 +75,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   const viewerToken = randomBytes(32).toString('hex');
   const cookieName = `sidecar_${ownerKey(owner).replaceAll('-', '_')}`;
   const cache = new Map<string, Cached>();
+  const documentReads = new Set<{ documentId: string; done: Promise<void> }>();
   const viewers = new Set<ServerResponse>();
   const agents = new Map<ServerResponse, Set<string>>();
   let url = '';
@@ -125,6 +127,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     const previous = cache.get(document.id);
     const oldKey = previous && ('data' in previous ? previous.data.version : previous.error);
     const newKey = 'data' in result ? result.data.version : result.error;
+    if (!Object.hasOwn(store.read().documents, document.id)) return result;
     cache.set(document.id, result);
     if (oldKey !== newKey) changed();
     return result;
@@ -150,14 +153,14 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       if ('claimStatus' in notification && notification.claimStatus !== 'claimed') return;
       if (closed) return;
       await notifyCodex(owner, notification, transportAbort.signal);
-      await store.update(state => { get(state.requests, request.id).acceptedAt = Date.now(); });
+      await store.update(state => { if (state.requests[request.id]) state.requests[request.id].acceptedAt = Date.now(); });
       connectionError = null;
     } catch (error) {
       if (!closed) {
         // A failed queue command may already have delivered. Do not automatically execute it twice.
         await store.update(state => {
-          const current = get(state.requests, request.id);
-          if (current.status === 'claimed' && directRequestId === current.id) current.status = error instanceof Error && 'code' in error && error.code === 'ENOENT' ? 'queued' : 'uncertain';
+          const current = state.requests[request.id];
+          if (current?.status === 'claimed' && directRequestId === current.id) current.status = error instanceof Error && 'code' in error && error.code === 'ENOENT' ? 'queued' : 'uncertain';
         });
         if (directRequestId === request.id) directRequestId = undefined;
         if (stream?.route.requestId === request.id) { stopObserver?.(); stopObserver = undefined; stream = undefined; }
@@ -237,6 +240,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     response.setHeader('X-Content-Type-Options', 'nosniff');
     response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
     try {
+      if (closed) throw new DomainError('Sidecar is stopping. Reopen it from your agent.', 503);
       if (request.headers.host !== new URL(url).host) throw new DomainError('Invalid host', 403);
       if (request.headers.origin !== undefined && request.headers.origin !== url) throw new DomainError('Foreign origin', 403);
       const target = new URL(request.url ?? '/', url);
@@ -286,7 +290,10 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         return;
       }
       if (method === 'GET' && path === '/api/image') {
-        const document = get(store.read().documents, target.searchParams.get('document') ?? '');
+        const key = target.searchParams.get('owner');
+        const document = key
+          ? await libraryDocument(dirname(directory), key, target.searchParams.get('document') ?? '')
+          : get(store.read().documents, target.searchParams.get('document') ?? '');
         const base = dirname(document.path);
         const imageUrl = new URL(target.searchParams.get('path') ?? '', pathToFileURL(document.path));
         if (imageUrl.protocol !== 'file:') throw new DomainError('Expected a local image', 400);
@@ -308,6 +315,23 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         return;
       }
       if (method === 'GET' && path === '/api/state') { json(response, snapshot()); return; }
+      if (method === 'GET' && path === '/api/library') { json(response, await listLibrary(dirname(directory))); return; }
+      const libraryRead = path.match(/^\/api\/library\/([^/]+)\/documents\/([^/]+)$/);
+      if (method === 'GET' && libraryRead) {
+        const document = await libraryDocument(dirname(directory), libraryRead[1], libraryRead[2]);
+        const content = await readDocument(document.path);
+        json(response, { ...content, title: document.userTitle ?? document.providedTitle ?? content.heading ?? basename(document.path) }); return;
+      }
+      const openedDocument = path.match(/^\/api\/documents\/([^/]+)\/opened$/);
+      if (method === 'POST' && openedDocument) {
+        const document = get(store.read().documents, openedDocument[1]);
+        await recordDocumentOpen(directory, document.id); json(response, { ok: true }); return;
+      }
+      const openedPreview = path.match(/^\/api\/library\/([^/]+)\/documents\/([^/]+)\/opened$/);
+      if (method === 'POST' && openedPreview) {
+        const document = await libraryDocument(dirname(directory), openedPreview[1], openedPreview[2]);
+        await recordDocumentOpen(join(dirname(directory), openedPreview[1]), document.id); json(response, { ok: true }); return;
+      }
       const original = path.match(/^\/api\/documents\/([^/]+)\/versions\/([a-f0-9]{64})$/);
       if ((method === 'GET' || method === 'HEAD') && original) {
         const document = get(store.read().documents, original[1]);
@@ -324,19 +348,43 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       }
       if (method === 'GET' && path.startsWith('/api/documents/')) {
         const document = get(store.read().documents, path.slice('/api/documents/'.length));
-        const result = await refresh(document);
-        if ('error' in result) { json(response, { error: result.error }, result.status); return; }
-        // Keep each version actually shown to a reader, including unsent passage drafts.
-        // ponytail: retain viewed Markdown versions; add pruning if snapshot storage grows large.
-        const versions = join(directory, 'versions', document.id);
-        await mkdir(versions, { recursive: true, mode: 0o700 });
-        const temporary = join(versions, `${randomUUID()}.tmp`);
-        try {
-          await writeFile(temporary, result.data.markdown, { flag: 'wx', mode: 0o600 });
-          await rename(temporary, join(versions, `${result.data.version}.md`));
-        } finally { await unlink(temporary).catch(() => {}); }
-        json(response, { ...document, ...result.data, title: title(document) }); return;
+        const reading = { documentId: document.id, done: (async () => {
+          const result = await refresh(document);
+          if ('error' in result) { json(response, { error: result.error }, result.status); return; }
+          // Keep each version actually shown to a reader, including unsent passage drafts.
+          // ponytail: retain viewed Markdown versions; add pruning if snapshot storage grows large.
+          const versions = join(directory, 'versions', document.id);
+          await mkdir(versions, { recursive: true, mode: 0o700 });
+          const temporary = join(versions, `${randomUUID()}.tmp`);
+          try {
+            await writeFile(temporary, result.data.markdown, { flag: 'wx', mode: 0o600 });
+            await rename(temporary, join(versions, `${result.data.version}.md`));
+          } finally { await unlink(temporary).catch(() => {}); }
+          json(response, { ...document, ...result.data, title: title(document) });
+        })() };
+        documentReads.add(reading);
+        try { await reading.done; } finally { documentReads.delete(reading); }
+        return;
       }
+      const closingDocument = path.match(/^\/api\/documents\/([^/]+)$/);
+      if (method === 'DELETE' && closingDocument) {
+        const id = closingDocument[1];
+        const threadIds = await store.update(state => closeDocument(state, id));
+        // Finish reads that started before deletion so none can recreate a removed snapshot.
+        await Promise.allSettled([...documentReads].filter(reading => reading.documentId === id).map(reading => reading.done));
+        let cleanupError: string | undefined;
+        try {
+          await rm(join(directory, 'versions', id), { recursive: true, force: true });
+          await rm(join(directory, 'opened', id), { force: true });
+        }
+        catch { cleanupError = 'Conversations were deleted, but saved document metadata could not be completely removed from disk.'; }
+        cache.delete(id);
+        const result = { documentId: id, threadIds, nextDocumentId: Object.keys(store.read().documents)[0] ?? null, ...(cleanupError ? { cleanupError } : {}) };
+        for (const viewer of viewers) if (!viewer.destroyed) viewer.write(`event: document-closed\ndata: ${JSON.stringify(result)}\n\n`);
+        changed(); json(response, result);
+        return;
+      }
+
       if (method === 'GET' && (path === '/api/events' || path === '/agent/events')) {
         response.writeHead(200, { 'Content-Type': isAgent ? 'application/x-ndjson' : 'text/event-stream', Connection: 'keep-alive' });
         response.flushHeaders();
@@ -372,6 +420,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         const canonical = await realpath(text(body, 'path'));
         await readDocument(canonical);
         const document = await store.update(state => registerDocument(state, { path: canonical, title: optionalText(body, 'title'), generated: body.generated === undefined ? false : boolean(body, 'generated') }));
+        if (closed) throw new DomainError('Sidecar stopped while opening the document. Open it again from your agent.', 503);
         await refresh(document); changed(); json(response, { ...document, title: title(document) }); return;
       }
       if (method === 'POST' && path === '/api/threads') {

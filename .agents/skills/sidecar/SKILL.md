@@ -1,6 +1,6 @@
 ---
 name: sidecar
-description: Use when the user wants a Markdown document opened for live questions, selected-passage threads, or revisions in Sidecar, or when this conversation receives a sidecar.request notification.
+description: Use when the user wants to browse saved Sidecar documents, open Markdown for live questions or revisions, or handle a sidecar.request notification.
 hooks:
   MessageDisplay:
     - hooks:
@@ -87,6 +87,12 @@ The user's request to open Sidecar establishes permission to receive their quest
 Run `open --agent codex|claude --session UUID --file /absolute/document.md`. For generated Markdown, use `--stdin` and a quoted heredoc. Optional `--title TEXT`; `--no-browser` is for headless checks. Remember the returned ownerKey and Sidecar root. More documents use the same owner.
 
 For Claude, invoke this skill through the native Skill tool so its streaming and activity hooks register; reading this file alone cannot register hooks. Verify the native **Monitor** tool is available before opening. Start Monitor with `sidecar watch --owner KEY`, timeout 1800 seconds. If Monitor is unavailable or permission-blocked, report that connection is unavailable; do not claim the viewer is connected. No polling shell is a substitute for native wake-up.
+
+## Browse saved documents
+
+To open the all-agent library without registering a file, run `sidecar browse --agent codex|claude --session UUID`. Use this conversation’s native identity as above; never substitute a document’s other owner. `sidecar browse` can infer the agent when exactly one native session environment is present. `--no-browser` prints the URL without opening it. The viewer’s Settings menu also has **View all documents**, which opens the same library in a new tab and preserves the current draft.
+
+The library lists saved documents across local Codex and Claude sessions. A live entry opens its original Sidecar viewer. A stopped session opens a read-only document preview; browsing does not start or resume its coding agent, claim requests, or transfer ownership. Ask the user to return to the original agent for conversation or revision work. Clicking a **Codex/Claude** label shows the original session ID and a Copy button. Browsing alone does not authorize this agent to answer another owner’s threads or re-arm its watcher.
 
 ## Handle a notification
 

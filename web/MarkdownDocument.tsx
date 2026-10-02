@@ -13,7 +13,7 @@ import type { Block } from '@plannotator/ui/types';
 setImageSrcResolver((path, documentId) =>
   /^(https:|data:image\/)/i.test(path)
     ? path
-    : `/api/image?document=${encodeURIComponent(documentId ?? '')}&path=${encodeURIComponent(path)}`,
+    : `/api/image?${documentId?.includes('/') ? `owner=${encodeURIComponent(documentId.split('/')[0])}&document=${encodeURIComponent(documentId.split('/')[1])}` : `document=${encodeURIComponent(documentId ?? '')}`}&path=${encodeURIComponent(path)}`,
 );
 
 // Plannotator's RenderedMarkdown composition, with its Viewer's diagram blocks.
@@ -22,10 +22,12 @@ export const MarkdownDocument = memo(function MarkdownDocument({
   markdown,
   documentId,
   anchorPrefix = '',
+  libraryOwner,
 }: {
   markdown: string;
   documentId: string;
   anchorPrefix?: string;
+  libraryOwner?: string;
 }) {
   const blocks = useMemo(
     () =>
@@ -52,7 +54,7 @@ export const MarkdownDocument = memo(function MarkdownDocument({
       <BlockRenderer
         block={block}
         orderedIndex={orderedIndex}
-        imageBaseDir={documentId}
+        imageBaseDir={libraryOwner ? `${libraryOwner}/${documentId}` : documentId}
         headingAnchorId={headings.has(block.id) ? anchorPrefix + headings.get(block.id) : undefined}
         onNavigateAnchor={
           anchorPrefix

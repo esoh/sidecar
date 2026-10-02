@@ -24,6 +24,7 @@ export function TextSettings({ version }: { version?: string }) {
         <Icon name="settings" />
       </PopoverTrigger>
       <PopoverContent className="text-settings" align="end" sideOffset={8} aria-label="Text size settings">
+        {!new URLSearchParams(location.search).has('library') && <a className="library-menu-link" href="/?library=1" target="_blank" rel="noopener noreferrer">View all documents</a>}
         <div className="text-settings-heading">
           <span>Text size</span>
           <button

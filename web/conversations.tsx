@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Tooltip } from '@plannotator/ui/components/Tooltip';
 import type { Quote, RequestRecord, Thread } from '../src/store.ts';
 import { api, errorText, type ViewerState } from './api.ts';
+import { AgentSession } from './AgentSession.tsx';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
 
 const paths = {
@@ -28,6 +29,19 @@ export function Icon({ name }: { name: keyof typeof paths }) {
 }
 export type QuestionDraft = { text: string; retry: { signature: string; id: string } | null };
 const threadDraftKey = (documentId: string, threadId: string) => `sidecar-draft:${documentId}:${threadId}`;
+const closedDraftDocuments = new Set<string>();
+export function forgetDocument(documentId: string, threadIds: string[]): string | undefined {
+  closedDraftDocuments.add(documentId);
+  try {
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith(`sidecar-draft:${documentId}:`) || threadIds.some(id => key === `sidecar-read-reply:${id}`))
+        localStorage.removeItem(key);
+    }
+    // A suspended tab must not save its old composer again when it wakes up.
+    localStorage.setItem(`sidecar-closed-document:${documentId}`, '1');
+    sessionStorage.removeItem(`sidecar-thread:${documentId}`);
+  } catch { return 'Document closed, but browser drafts could not be fully cleared in this browser.'; }
+}
 function readThreadDraft(key: string): QuestionDraft | undefined {
   try {
     const saved: unknown = JSON.parse(localStorage.getItem(key) ?? 'null');
@@ -90,7 +104,9 @@ export function QuestionForm({
     clearTimeout(saveTimer.current);
     const draft = pendingSave.current;
     if (!storageKey || !draft) return;
+    if (closedDraftDocuments.has(documentId)) { pendingSave.current = undefined; return; }
     try {
+      if (localStorage.getItem(`sidecar-closed-document:${documentId}`)) { pendingSave.current = undefined; return; }
       if (draft.text) localStorage.setItem(storageKey, JSON.stringify(draft));
       else localStorage.removeItem(storageKey);
       pendingSave.current = undefined;
@@ -365,7 +381,7 @@ export function AgentStatus({ state, connected }: { state: ViewerState | null; c
         </span>
       </Tooltip>
       <span>
-        {state ? (state.owner.agent === 'codex' ? 'Codex' : 'Claude') : 'Agent'}
+        {state ? <AgentSession owner={state.owner} /> : 'Agent'}
         <span className="sr-only"> · {label}</span>
         {queued ? ` · ${queued} queued` : ''}
       </span>

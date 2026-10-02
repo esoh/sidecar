@@ -3,9 +3,10 @@ import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import Highlighter from '@plannotator/web-highlighter';
 import type { Quote, RequestRecord } from '../src/store.ts';
-import { api, errorText, type ViewerState } from './api.ts';
+import { api, errorText, type ViewerState, type ClosedDocument } from './api.ts';
 import {
   AgentStatus,
+  forgetDocument,
   ConversationSidebar,
   Icon,
   QuestionForm,
@@ -14,6 +15,7 @@ import {
 } from './conversations.tsx';
 import { locateQuote, quoteRange, selectionText, excludedSelection } from './selection.ts';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
+import { DocumentLibrary } from './DocumentLibrary.tsx';
 import { TextSettings } from './TextSettings.tsx';
 import { OriginalDocument } from './OriginalDocument.tsx';
 import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
@@ -76,6 +78,8 @@ function usePosition(
 function App() {
   const [state, setState] = useState<ViewerState | null>(null),
     [content, setContent] = useState<Content>({ html: '', markdown: '', version: '' });
+  const [closedDocument, setClosedDocument] = useState<ClosedDocument | null>(null),
+    [isClosing, setClosing] = useState(false);
   const [connected, setConnected] = useState(false),
     [error, setError] = useState(''),
     [documentError, setDocumentError] = useState('');
@@ -96,6 +100,9 @@ function App() {
   const requestedDocument = new URL(location.href).searchParams.get('document');
   const documentId = requestedDocument ?? Object.keys(state?.documents ?? {})[0] ?? '';
   const current = state?.documents[documentId];
+  useEffect(() => {
+    if (current) void api(`/api/documents/${documentId}/opened`, {}).catch(reason => setError(errorText(reason)));
+  }, [documentId, !!current]);
   const threads = Object.values(state?.threads ?? {}).filter((thread) => thread.documentId === documentId);
   const [activeThreadId, setActiveThreadId] = useState<string | null | undefined>(undefined);
   const [originalThreadId, setOriginalThreadId] = useState<string | null>(null);
@@ -143,13 +150,13 @@ function App() {
     );
   }, [current, activeThreadId, documentId, threads]);
   useEffect(() => {
-    if (activeThreadId === undefined || !documentId) return;
+    if (closedDocument || activeThreadId === undefined || !documentId) return;
     try {
       sessionStorage.setItem(`sidecar-thread:${documentId}`, activeThreadId ?? 'list');
     } catch {
       /* In-memory selection still works. */
     }
-  }, [activeThreadId, documentId]);
+  }, [activeThreadId, documentId, closedDocument]);
   const clearSelection = useCallback(() => {
     // Plannotator's handleToolbarClose removes only the pending source, before
     // the browser starts its next gesture. Keep saved highlight nodes in place.
@@ -164,7 +171,21 @@ function App() {
     window.getSelection()?.removeAllRanges();
   }, []);
 
+  const documentClosed = useCallback((result: ClosedDocument) => {
+    const storageError = forgetDocument(result.documentId, result.threadIds);
+    if (result.documentId === documentId) {
+      passageDrafts.current.clear();
+      setClosedDocument({ ...result, cleanupError: result.cleanupError ?? storageError });
+      setContent({ html: '', markdown: '', version: '' });
+      setSelection(undefined);
+      setComposing(false);
+      setChoices(null);
+      setError('');
+      document.title = 'Document closed — Sidecar';
+    }
+  }, [documentId]);
   useEffect(() => {
+    if (closedDocument) return;
     let stopped = false,
       refreshing = false,
       again = false,
@@ -183,7 +204,7 @@ function App() {
           setState(next);
           const id = requestedDocument ?? Object.keys(next.documents)[0] ?? '';
           const doc = next.documents[id];
-          if (!doc) continue;
+          if (!doc) { setContent({ html: '', markdown: '', version: '' }); continue; }
           document.title = doc.title;
           setDocumentError(doc.error ?? '');
           if (!version || (doc.version && version !== doc.version)) {
@@ -213,12 +234,17 @@ function App() {
     events.addEventListener('change', () => {
       void refresh();
     });
+    events.addEventListener('document-closed', (event) => {
+      const result: ClosedDocument = JSON.parse(event.data);
+      if (result.documentId === documentId) { stopped = true; events.close(); }
+      documentClosed(result);
+    });
     void refresh();
     return () => {
       stopped = true;
       events.close();
     };
-  }, [requestedDocument]);
+  }, [requestedDocument, documentClosed, closedDocument]);
 
   const [documentText, setDocumentText] = useState('');
   const [highlightRevision, setHighlightRevision] = useState(0);
@@ -477,6 +503,32 @@ function App() {
     pendingFocus.current = request.threadId;
     openThread(request.threadId);
   };
+  async function closeCurrentDocument() {
+    if (!current || isClosing) return;
+    if (Object.values(state?.requests ?? {}).some(request => request.documentId === documentId && ['queued', 'claimed', 'uncertain'].includes(request.status))) {
+      setError('Wait for this document’s pending agent requests to finish before closing it.');
+      return;
+    }
+    if (!window.confirm(`Close “${current.title}”?\n\nThis permanently deletes all threads, messages, highlights, drafts, and saved revisions for this document. Your Markdown file stays untouched. This cannot be undone.`)) return;
+    setClosing(true);
+    try {
+      documentClosed(await api<ClosedDocument>(`/api/documents/${documentId}`, undefined, 'DELETE'));
+    } catch (reason) { setError(errorText(reason)); }
+    finally { setClosing(false); }
+  }
+  if (closedDocument) return (
+    <>
+      <header className="topbar"><div className="brand"><Icon name="logo" />Sidecar</div></header>
+      <main className="canvas">
+        <div className="reading-width">
+          <h1>Document closed</h1>
+          <p>Your Markdown file is unchanged.</p>
+          {closedDocument.cleanupError && <p role="alert">{closedDocument.cleanupError}</p>}
+          <a href="/?library=1">Browse all documents</a>
+        </div>
+      </main>
+    </>
+  );
   return (
     <>
       <header className="topbar">
@@ -514,6 +566,11 @@ function App() {
         >
           <Icon name="panel" />
         </button>
+        {current && (
+          <button className="sidebar-toggle" aria-label="Close document" title="Close document" disabled={isClosing} onClick={() => { void closeCurrentDocument(); }}>
+            <Icon name="close" />
+          </button>
+        )}
       </header>
       {error && (
         <p className="app-error" role="alert">
@@ -690,4 +747,4 @@ function App() {
   );
 }
 const root = document.getElementById('root');
-if (root) createRoot(root).render(<App />);
+if (root) createRoot(root).render(new URLSearchParams(location.search).has('library') ? <DocumentLibrary /> : <App />);

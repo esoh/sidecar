@@ -1,0 +1,102 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { mkdtemp, realpath, mkdir, readFile, writeFile, rm, chmod } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { startServer } from '../src/server.ts';
+import { createState, registerDocument, ownerKey } from '../src/store.ts';
+const exec = promisify(execFile), cliPath = new URL('../src/cli.ts', import.meta.url).pathname, tsx = import.meta.resolve('tsx');
+
+test('all-agent library verifies original viewers and previews stopped sessions without altering saved state', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'sidecar-library-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = createState({ agent: 'codex', sessionId: randomUUID() }), key = ownerKey(original.owner);
+  const directory = join(root, key); await mkdir(directory);
+  const file = join(directory, 'review.md'); await writeFile(file, '# Original review\n\n![local](image.svg)');
+  await writeFile(join(directory, 'image.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>');
+  await writeFile(join(root, 'outside.svg'), '<svg/>');
+  const doc = registerDocument(original, { path: file, generated: false });
+  const saved = JSON.stringify(original); await writeFile(join(directory, 'state.json'), saved);
+  const owner = { agent: 'claude' as const, sessionId: randomUUID() }, hostKey = ownerKey(owner);
+  const host = await startServer({ owner, directory: join(root, hostKey) });
+  t.after(() => host.close());
+  await writeFile(join(root, hostKey, 'runtime.json'), JSON.stringify({ url: host.url, instanceId: host.instanceId, ownerKey: hostKey }));
+  const token = await readFile(join(root, hostKey, 'agent-token'), 'utf8');
+  await fetch(host.url + '/agent/documents', { method: 'POST', headers: { 'X-Sidecar-Token': token }, body: JSON.stringify({ path: file, title: 'Current review' }) });
+  const cookie = (await fetch(host.url)).headers.get('set-cookie')!.split(';')[0]!;
+  const get = (path: string) => fetch(host.url + path, { headers: { Cookie: cookie } });
+  assert.equal((await fetch(host.url + '/api/library')).status, 403);
+  const result = await (await get('/api/library')).json();
+  assert.equal(result.sessions.length, 2);
+  assert.equal(result.unavailable, 0);
+  assert.equal(result.sessions.find((session: any) => session.ownerKey === hostKey).url, host.url);
+  const offline = result.sessions.find((session: any) => session.ownerKey === key);
+  assert.equal(offline.url, null); assert.equal(offline.owner.sessionId, original.owner.sessionId);
+  assert.equal(offline.documents[0].title, 'Original review');
+  const preview = await (await get(`/api/library/${key}/documents/${doc.id}`)).json();
+  assert.equal(preview.markdown, await readFile(file, 'utf8'));
+  assert.equal((await get(`/api/image?owner=${key}&document=${doc.id}&path=image.svg`)).status, 200);
+  assert.equal((await get(`/api/image?owner=${key}&document=${doc.id}&path=../outside.svg`)).status, 403);
+  assert.equal((await get(`/api/library/${key}/documents/__proto__`)).status, 404);
+  assert.equal((await get(`/api/library/not-an-owner/documents/${doc.id}`)).status, 400);
+  assert.equal((await fetch(host.url + `/api/library/${key}/documents/${doc.id}`, { method: 'DELETE', headers: { Cookie: cookie, Origin: host.url } })).status, 404);
+  assert.equal(await readFile(join(directory, 'state.json'), 'utf8'), saved);
+  await assert.rejects(readFile(join(directory, 'runtime.json')), { code: 'ENOENT' });
+});
+
+for (const agent of ['codex', 'claude'] as const) test(`browse infers the ${agent} session without registering a document`, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'sidecar-browse-'));
+  const sessionId = randomUUID(), key = ownerKey({ agent, sessionId });
+  const env: NodeJS.ProcessEnv = { ...process.env, SIDECAR_STATE_DIR: root, PATH: `${root}:${process.env.PATH}` };
+  delete env.CODEX_THREAD_ID; delete env.CLAUDE_SESSION_ID; delete env.CLAUDE_CODE_SESSION_ID;
+  if (agent === 'codex') env.CODEX_THREAD_ID = sessionId; else env.CLAUDE_CODE_SESSION_ID = sessionId;
+  const opener = join(root, process.platform === 'darwin' ? 'open' : 'xdg-open');
+  await writeFile(opener, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(join(root, 'opened.json'))}, JSON.stringify(process.argv.slice(2)));\n`);
+  await chmod(opener, 0o700);
+  const cli = async (...args: string[]) => JSON.parse((await exec(process.execPath, ['--import', tsx, cliPath, ...args], { env })).stdout);
+  t.after(async () => { await cli('stop', '--owner', key).catch(() => {}); await rm(root, { recursive: true, force: true }); });
+  const opened = await cli('browse');
+  assert.equal(opened.ownerKey, key); assert.match(opened.url, /\/\?library=1$/);
+  assert.deepEqual(JSON.parse(await readFile(join(root, 'opened.json'), 'utf8')), [opened.url]);
+  assert.equal((await cli('browse', '--agent', agent, '--no-browser')).url, opened.url);
+  const state = JSON.parse(await readFile(join(root, key, 'state.json'), 'utf8'));
+  assert.deepEqual(state.documents, {}); assert.deepEqual(state.threads, {}); assert.deepEqual(state.requests, {});
+});
+
+test('document opens persist across servers and sort each agent by its most recently opened document', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'sidecar-opened-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const owners = [{ agent: 'claude' as const, sessionId: randomUUID() }, { agent: 'codex' as const, sessionId: randomUUID() }];
+  const docs: any[] = [];
+  for (const owner of owners) {
+    const state = createState(owner), directory = join(root, ownerKey(owner)); await mkdir(directory);
+    for (const name of ['one', 'two']) {
+      const path = join(directory, `${name}.md`); await writeFile(path, `# ${name}`);
+      docs.push(registerDocument(state, { path, generated: false }));
+    }
+    await writeFile(join(directory, 'state.json'), JSON.stringify(state));
+  }
+  const host = await startServer({ owner: owners[0], directory: join(root, ownerKey(owners[0])) }); t.after(() => host.close());
+  const cookie = (await fetch(host.url)).headers.get('set-cookie')!.split(';')[0]!;
+  const request = (path: string, method = 'GET') => fetch(host.url + path, { method, headers: { Cookie: cookie, Origin: host.url } });
+  const list = async () => (await request('/api/library')).json();
+  assert.equal((await list()).sessions[0].documents[0].lastOpenedAt, null);
+  assert.equal((await request(`/api/library/${ownerKey(owners[1])}/documents/${docs[3].id}/opened`, 'POST')).status, 200);
+  let result = await list();
+  assert.equal(result.sessions[0].ownerKey, ownerKey(owners[1]));
+  assert.equal(result.sessions[0].documents[0].id, docs[3].id);
+  const firstOpened = result.sessions[0].documents[0].lastOpenedAt;
+  assert.ok(firstOpened > Date.now() - 10000);
+  assert.equal((await request(`/api/documents/${docs[0].id}/opened`, 'POST')).status, 200);
+  result = await list();
+  assert.equal(result.sessions[0].ownerKey, ownerKey(owners[0]));
+  assert.equal(result.sessions[0].documents[0].id, docs[0].id);
+  assert.ok(result.sessions[0].documents[0].lastOpenedAt >= firstOpened);
+  assert.equal((await request(`/api/documents/${randomUUID()}/opened`, 'POST')).status, 404);
+  await host.close();
+  const { listLibrary } = await import('../src/library.ts');
+  assert.equal((await listLibrary(root)).sessions[0].documents[0].id, docs[0].id);
+});
