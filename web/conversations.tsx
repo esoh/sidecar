@@ -27,6 +27,24 @@ export function Icon({ name }: { name: keyof typeof paths }) {
   );
 }
 export type QuestionDraft = { text: string; retry: { signature: string; id: string } | null };
+const threadDraftKey = (documentId: string, threadId: string) => `sidecar-draft:${documentId}:${threadId}`;
+function readThreadDraft(key: string): QuestionDraft | undefined {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(key) ?? 'null');
+    if (
+      !saved || typeof saved !== 'object' ||
+      !('text' in saved) || typeof saved.text !== 'string' || !('retry' in saved)
+    ) return;
+    if (saved.retry === null) return { text: saved.text, retry: null };
+    const retry = saved.retry;
+    if (
+      retry && typeof retry === 'object' &&
+      'signature' in retry && typeof retry.signature === 'string' &&
+      'id' in retry && typeof retry.id === 'string'
+    )
+      return { text: saved.text, retry: { signature: retry.signature, id: retry.id } };
+  } catch { /* The in-memory draft remains usable when browser storage is unavailable. */ }
+}
 export function QuestionForm({
   documentId,
   threadId,
@@ -52,13 +70,58 @@ export function QuestionForm({
   draftKey: string;
   onSendingChange?: (sending: boolean) => void;
 }) {
-  const initialDraft = drafts.get(draftKey);
+  const storageKey = threadId ? threadDraftKey(documentId, threadId) : null;
+  const [initialDraft] = useState(() => {
+    const draft = drafts.get(draftKey) ?? (storageKey ? readThreadDraft(storageKey) : undefined);
+    if (draft) drafts.set(draftKey, draft);
+    return draft;
+  });
   const [text, setText] = useState(initialDraft?.text ?? ''),
     [error, setError] = useState(''),
+    [draftError, setDraftError] = useState(''),
     [busy, setBusy] = useState(false);
   const input = useRef<HTMLTextAreaElement>(null),
     sending = useRef(false);
   const retry = useRef(initialDraft?.retry ?? null);
+  const pendingSave = useRef<QuestionDraft | undefined>(undefined),
+    saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined),
+    pendingSince = useRef(0);
+  function persistDraft() {
+    clearTimeout(saveTimer.current);
+    const draft = pendingSave.current;
+    if (!storageKey || !draft) return;
+    try {
+      if (draft.text) localStorage.setItem(storageKey, JSON.stringify(draft));
+      else localStorage.removeItem(storageKey);
+      pendingSave.current = undefined;
+      setDraftError('');
+    } catch {
+      setDraftError('Draft could not be saved in this browser. Keep this tab open.');
+    }
+  }
+  function updateDraft(draft: QuestionDraft, immediately = false) {
+    drafts.set(draftKey, draft);
+    if (!storageKey) return;
+    if (!pendingSave.current) pendingSince.current = Date.now();
+    pendingSave.current = draft;
+    clearTimeout(saveTimer.current);
+    // Debounce normal typing, but also save during long uninterrupted input.
+    if (immediately) persistDraft();
+    else saveTimer.current = setTimeout(
+      persistDraft,
+      Math.max(0, Math.min(100, 2000 - (Date.now() - pendingSince.current))),
+    );
+  }
+  useEffect(() => {
+    const onHidden = () => { if (document.visibilityState === 'hidden') persistDraft(); };
+    window.addEventListener('pagehide', persistDraft);
+    document.addEventListener('visibilitychange', onHidden);
+    return () => {
+      persistDraft();
+      window.removeEventListener('pagehide', persistDraft);
+      document.removeEventListener('visibilitychange', onHidden);
+    };
+  }, [storageKey]);
   useLayoutEffect(() => {
     if (floating) input.current?.focus({ preventScroll: true });
   }, [floating]);
@@ -81,7 +144,7 @@ export function QuestionForm({
         const signature = JSON.stringify(body);
         if (retry.current?.signature !== signature) retry.current = { signature, id: crypto.randomUUID() };
         const submittedDraft = { text, retry: retry.current };
-        drafts.set(draftKey, submittedDraft);
+        updateDraft(submittedDraft, true);
         sending.current = true;
         setBusy(true);
         onSendingChange?.(true);
@@ -91,6 +154,14 @@ export function QuestionForm({
           retry.current = null;
           // A remounted composer may already hold a newer draft.
           if (drafts.get(draftKey) === submittedDraft) drafts.delete(draftKey);
+          if (pendingSave.current === submittedDraft) pendingSave.current = undefined;
+          if (storageKey) {
+            try {
+              // A newer draft in this tab or another tab must survive this response.
+              if (localStorage.getItem(storageKey) === JSON.stringify(submittedDraft)) localStorage.removeItem(storageKey);
+              setDraftError('');
+            } catch { setDraftError('Sent, but the saved draft could not be cleared in this browser.'); }
+          }
           setError('');
           onSent(request);
         } catch (reason) {
@@ -145,9 +216,10 @@ export function QuestionForm({
           required
           value={text}
           readOnly={busy || disabled}
+          onBlur={persistDraft}
           onChange={(event) => {
             setText(event.target.value);
-            drafts.set(draftKey, { text: event.target.value, retry: retry.current });
+            updateDraft({ text: event.target.value, retry: retry.current });
           }}
         />
         <div className="composer-actions">
@@ -160,7 +232,7 @@ export function QuestionForm({
           </button>
         </div>
       </div>
-      {error && <p role="alert">{error}</p>}
+      {(error || draftError) && <p role="alert">{error || draftError}</p>}
     </form>
   );
 }
@@ -464,6 +536,7 @@ export function ConversationSidebar({
       const result = await api<{ isDeleted: boolean }>(`/api/threads/${active.id}`, undefined, 'DELETE');
       if (result.isDeleted) {
         drafts.current.delete(active.id);
+        try { localStorage.removeItem(threadDraftKey(documentId, active.id)); } catch { /* No saved input to restore. */ }
         positions.current.delete(active.id);
       }
       setError('');
