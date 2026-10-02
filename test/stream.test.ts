@@ -77,3 +77,41 @@ test('native completion saves a reply even when Claude hook batches arrive out o
   assert.equal((await f.agent('/agent/replies', { ...route, stream: true })).status, 200);
   assert.equal((await snapshot()).threads[request.threadId].messages.length, 2);
 });
+
+
+test('progress updates stream and persist once without completing or blocking the final answer', async t => {
+  const { f, request, markers, emit, snapshot } = await setup(t);
+  assert.ok(markers.progress);
+  await emit(1, ' the file.' + markers.progress.suffix, true, 'progress-a');
+  await emit(0, markers.progress.prefix + 'I’ll read', false, 'progress-a');
+  let state = await snapshot();
+  assert.equal(state.requests[request.id].status, 'claimed');
+  assert.equal(state.requests[request.id].answer, undefined);
+  assert.equal(state.threads[request.threadId].messages.at(-1).text, 'I’ll read the file.');
+  await emit(0, markers.progress.prefix + 'I’ll read', false, 'progress-a');
+  await emit(1, ' the file.' + markers.progress.suffix, true, 'progress-a');
+  assert.equal((await snapshot()).threads[request.threadId].messages.length, 2);
+  await emit(0, markers.progress.prefix + 'Found the setting.', false, 'progress-b');
+  assert.equal((await snapshot()).stream.text, 'Found the setting.');
+  await emit(1, markers.progress.suffix, true, 'progress-b');
+  await emit(0, markers.prefix + 'Three retries.' + markers.suffix, true, 'answer');
+  state = await snapshot();
+  assert.equal(state.requests[request.id].status, 'completed');
+  assert.equal(state.requests[request.id].answer.text, 'Three retries.');
+  assert.deepEqual(state.threads[request.threadId].messages.map((m: any) => m.text), ['Explain', 'I’ll read the file.', 'Found the setting.', 'Three retries.']);
+  await f.reopen();
+  assert.deepEqual((await snapshot()).threads[request.threadId].messages, state.threads[request.threadId].messages);
+});
+
+test('a truncated native event can recover the existing markers without resetting progress', async t => {
+  const { f, request, markers, emit, snapshot } = await setup(t);
+  await emit(0, markers.progress.prefix + 'Checking the file.' + markers.progress.suffix, true, 'progress');
+  const recovered = await (await f.agent(`/agent/requests/${request.id}/claim`, {})).json();
+  assert.equal(recovered.claimStatus, 'already-claimed');
+  assert.deepEqual(recovered.stream, markers);
+  assert.equal((await snapshot()).threads[request.threadId].messages.at(-1).text, 'Checking the file.');
+  await emit(0, recovered.stream.prefix + 'Done.' + recovered.stream.suffix, true, 'final');
+  assert.equal((await snapshot()).requests[request.id].status, 'completed');
+  const completed = await (await f.agent(`/agent/requests/${request.id}/claim`, {})).json();
+  assert.equal(completed.stream, undefined, 'completed requests must not offer a new reply stream');
+});

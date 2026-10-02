@@ -14,7 +14,18 @@ function readBrightness() {
   return Number.isInteger(value) && value >= 50 && value <= 100 && value % 5 === 0 ? value : 100;
 }
 
+function readHighlightIntensity() {
+  const value = Number(storage.getItem('sidecar-highlight-intensity'));
+  return Number.isInteger(value) && value >= 20 && value <= 100 && value % 5 === 0 ? value : 100;
+}
+
 export function TextSettings({ version }: { version?: string }) {
+  const [highlightIntensity, setHighlightIntensity] = useState(readHighlightIntensity);
+  useLayoutEffect(() => {
+    document.documentElement.style.setProperty('--sidecar-highlight-intensity', `${highlightIntensity}%`);
+    document.documentElement.style.setProperty('--sidecar-highlight-text', highlightIntensity <= 40 ? '#fff' : '#000');
+    storage.setItem('sidecar-highlight-intensity', String(highlightIntensity));
+  }, [highlightIntensity]);
   const [brightness, setBrightness] = useState(readBrightness);
   useLayoutEffect(() => {
     document.documentElement.style.setProperty('--sidecar-text-brightness', `${brightness}%`);
@@ -70,6 +81,15 @@ export function TextSettings({ version }: { version?: string }) {
           <span>Brightness</span>
           <output>{brightness}%</output>
           <input type="range" aria-label="Text brightness" aria-valuetext={`${brightness}%`} min={50} max={100} step={5} value={brightness} onChange={(event) => setBrightness(event.target.valueAsNumber)} />
+        </label>
+        <div className="text-settings-heading brightness-heading">
+          <span>Highlights</span>
+          <button type="button" aria-label="Reset highlight intensity" disabled={highlightIntensity === 100} onClick={() => setHighlightIntensity(100)}>Reset</button>
+        </div>
+        <label className="text-size-control">
+          <span>Intensity</span>
+          <output>{highlightIntensity}%</output>
+          <input type="range" aria-label="Highlight intensity" aria-valuetext={`${highlightIntensity}%`} min={20} max={100} step={5} value={highlightIntensity} onChange={(event) => setHighlightIntensity(event.target.valueAsNumber)} />
         </label>
         {version && <div className="settings-version">{version}</div>}
       </PopoverContent>

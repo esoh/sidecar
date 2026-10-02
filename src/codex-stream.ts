@@ -6,7 +6,7 @@ import type { StreamEvent } from './stream.ts';
 
 const defaultSocketPath = () => join(process.env.CODEX_HOME ?? homedir() + '/.codex', 'app-server-control/app-server-control.sock');
 
-export async function observeCodex(threadId: string, onEvent: (event: StreamEvent) => void, onFailure: (message: string) => void, socketPath = defaultSocketPath(), prefix?: string): Promise<() => void> {
+export async function observeCodex(threadId: string, onEvent: (event: StreamEvent) => void, onFailure: (message: string) => void, socketPath = defaultSocketPath(), prefixes?: readonly string[]): Promise<() => void> {
   const socket = new WebSocket(`ws+unix://${socketPath}:/`, { maxPayload: 2 * 1024 * 1024, handshakeTimeout: 5000 });
   let stopped = false, ready = false, nextId = 0;
   const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
@@ -31,8 +31,9 @@ export async function observeCodex(threadId: string, onEvent: (event: StreamEven
         if (!message || message.id !== p.itemId) message = { id: p.itemId, turnId: p.turnId, index: 0, text: '' };
         if (message.ignored) return;
         message.text += p.delta;
-        if (prefix && !message.text.startsWith(prefix)) {
-          if (!prefix.startsWith(message.text)) { message.ignored = true; message.text = ''; }
+        const text = message.text;
+        if (prefixes?.length && !prefixes.some(prefix => text.startsWith(prefix))) {
+          if (!prefixes.some(prefix => prefix.startsWith(text))) { message.ignored = true; message.text = ''; }
           return;
         }
         replyTurnId = p.turnId;

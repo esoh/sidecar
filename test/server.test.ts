@@ -119,7 +119,7 @@ test('documents start with an empty general thread and thread creation retries d
   const snapshot = await (await f.view('/api/state')).json();
   const initial = Object.values<any>(snapshot.threads).filter(thread => thread.documentId === doc.id);
   assert.equal(initial.length, 1);
-  assert.equal(initial[0].scope, 'document');
+  assert.equal(initial[0].scope, undefined);
   assert.equal(initial[0].title, undefined);
   assert.deepEqual(initial[0].messages, []);
   assert.equal(Object.keys(snapshot.requests).length, 0);

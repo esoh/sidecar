@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rename, rm, writeFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createState, registerDocument, submit, claim, reply, resolveThread, setTitle, openStore } from '../src/store.ts';
@@ -37,7 +37,7 @@ test('new user messages reopen resolved threads, while invalid submissions and r
     const follow = submit(state, followInput);
     assert.equal(follow.threadId, first.threadId);
     assert.equal(state.threads[first.threadId]?.isResolved, false);
-    assert.deepEqual(follow.quote, quote);
+    assert.equal(follow.quote, undefined);
     resolveThread(state, first.threadId, true);
     assert.equal(submit(state, followInput).id, follow.id);
     assert.equal(state.threads[first.threadId]?.isResolved, true);
@@ -71,13 +71,13 @@ test('replies validate routing, deduplicate, and retain user resolution', () => 
   assert.equal(state.threads[request.threadId]?.isResolved, false);
 });
 
-test('follow-ups remain in their document and preserve quote context', () => {
+test('follow-ups remain in their document and use only their own quote context', () => {
   const { state, input, other } = setup();
   const quote = { exact: 'hello', prefix: '', suffix: ' world', start: 0, end: 5, version: 'v1', sentence: 'hello world.' };
   const first = submit(state, { ...input, quote });
   const follow = submit(state, { ...input, threadId: first.threadId, text: 'Why?', clientMessageId: 'follow' });
   assert.equal(follow.threadId, first.threadId);
-  assert.deepEqual(follow.quote, quote);
+  assert.equal(follow.quote, undefined);
   assert.throws(() => submit(state, { ...input, quote: { ...quote, sentence: 'unrelated' }, clientMessageId: 'invalid-sentence' }));
   assert.throws(() => submit(state, { ...input, quote: { ...quote, sentence: 'hello' + 'x'.repeat(512) }, clientMessageId: 'long-sentence' }));
   assert.throws(() => submit(state, { ...input, documentId: other.id, threadId: first.threadId, clientMessageId: 'bad' }));
@@ -163,4 +163,84 @@ test('legacy thread metadata is upgraded without losing history or resolution', 
   assert.equal(restored.threads[request.threadId]?.isResolved, true);
   const persisted = JSON.parse(await readFile(join(directory, 'state.json'), 'utf8'));
   assert.equal(persisted.threads[request.threadId].createdAt, request.createdAt);
+});
+
+
+test('one thread can hold selected and unselected inputs without inheriting an earlier quote', () => {
+  const { state, input } = setup();
+  const quote = { exact: 'hello', prefix: '', suffix: ' world', start: 0, end: 5, version: 'v1' };
+  const first = submit(state, { ...input, quote });
+  const unselected = submit(state, { ...input, threadId: first.threadId, clientMessageId: 'general' });
+  const nextQuote = { exact: 'world', prefix: 'hello ', suffix: '', start: 6, end: 11, version: 'v2' };
+  const selectedInput = { ...input, threadId: first.threadId, quote: nextQuote, clientMessageId: 'selected' };
+  const selected = submit(state, selectedInput);
+  assert.equal(submit(state, selectedInput).id, selected.id);
+  assert.deepEqual(state.threads[first.threadId].messages.map(m => m.quote?.exact), ['hello', undefined, 'world']);
+  assert.equal(unselected.quote, undefined);
+  assert.deepEqual(selected.quote, nextQuote);
+  assert.equal('quote' in state.threads[first.threadId], false);
+  assert.equal('scope' in state.threads[first.threadId], false);
+  nextQuote.exact = 'other';
+  assert.equal(state.threads[first.threadId].messages[2].quote?.exact, 'world');
+});
+
+function legacySelectionState() {
+  const documentId = '22222222-2222-4222-8222-222222222222';
+  const threadId = '33333333-3333-4333-8333-333333333333';
+  const firstId = '44444444-4444-4444-8444-444444444444';
+  const nextId = '55555555-5555-4555-8555-555555555555';
+  const quote = { exact: 'hello', prefix: '', suffix: ' world', start: 0, end: 5, version: 'saved-hash' };
+  return {
+    version: 1, owner,
+    documents: { [documentId]: { id: documentId, path: '/tmp/legacy.md', generated: false, userTitle: 'Preserved title' } },
+    threads: { [threadId]: { id: threadId, documentId, scope: 'passage', quote, title: 'Existing thread', createdAt: 1, isResolved: true, messages: [
+      { id: 'first-message', role: 'user', text: 'Explain', requestId: firstId, createdAt: 2 },
+      { id: 'progress-message', role: 'agent', text: 'Checking', requestId: firstId, createdAt: 3 },
+      { id: 'answer-message', role: 'agent', text: 'Answer', requestId: firstId, createdAt: 4 },
+      { id: 'next-message', role: 'user', text: 'Follow-up', requestId: nextId, createdAt: 5 },
+    ] } },
+    requests: {
+      [firstId]: { id: firstId, documentId, threadId, text: 'Explain', clientMessageId: 'old-1', submission: 'preserve-original-signature-1', quote, status: 'completed', createdAt: 2, acceptedAt: 2, answer: { text: 'Answer', isError: false } },
+      [nextId]: { id: nextId, documentId, threadId, text: 'Follow-up', clientMessageId: 'old-2', submission: 'preserve-original-signature-2', quote, status: 'queued', createdAt: 5 },
+    },
+  };
+}
+
+test('v1 selections migrate once to the first user message with a byte-exact backup', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'sidecar-migrate-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const old = legacySelectionState(), raw = JSON.stringify(old, null, 2) + '\n';
+  await writeFile(join(directory, 'state.json'), raw);
+  const result = (await openStore(directory, owner)).read();
+  assert.equal(result.version, 2);
+  const previous = Object.values(old.threads)[0], thread = result.threads[previous.id];
+  assert.deepEqual(thread.messages[0].quote, previous.quote);
+  assert.deepEqual(thread.messages.slice(1), previous.messages.slice(1));
+  assert.equal('quote' in thread, false); assert.equal('scope' in thread, false);
+  assert.equal(thread.title, previous.title); assert.equal(thread.isResolved, true);
+  assert.deepEqual(result.requests, old.requests);
+  assert.deepEqual(result.documents, old.documents);
+  assert.equal(await readFile(join(directory, 'state.v1.backup.json'), 'utf8'), raw);
+  assert.deepEqual((await openStore(directory, owner)).read(), result);
+  assert.equal(await readFile(join(directory, 'state.v1.backup.json'), 'utf8'), raw);
+});
+
+test('ambiguous migration and failed publication preserve the original state', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'sidecar-migrate-fail-'));
+  t.after(async () => { await chmod(directory, 0o700); await rm(directory, { recursive: true, force: true }); });
+  const old = legacySelectionState();
+  Object.values(old.threads)[0].messages = [];
+  const ambiguous = JSON.stringify(old);
+  await writeFile(join(directory, 'state.json'), ambiguous);
+  await assert.rejects(openStore(directory, owner), /selection|user message/i);
+  assert.equal(await readFile(join(directory, 'state.json'), 'utf8'), ambiguous);
+  const raw = JSON.stringify(legacySelectionState());
+  await writeFile(join(directory, 'state.json'), raw);
+  await writeFile(join(directory, 'state.v1.backup.json'), raw);
+  await chmod(directory, 0o500);
+  await assert.rejects(openStore(directory, owner));
+  assert.equal(await readFile(join(directory, 'state.json'), 'utf8'), raw);
+  assert.equal(await readFile(join(directory, 'state.v1.backup.json'), 'utf8'), raw);
+  await chmod(directory, 0o700);
+  assert.equal((await openStore(directory, owner)).read().version, 2);
 });

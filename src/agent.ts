@@ -76,7 +76,10 @@ export async function watchClaude(key: string, signal: AbortSignal): Promise<voi
             const event: unknown = JSON.parse(line);
             if (!isObject(event) || event.type !== 'sidecar.request' || event.ownerKey !== key || typeof event.requestId !== 'string') throw new Error('Invalid Sidecar notification');
             const prepared = await agentCall(key, `/agent/requests/${encodeURIComponent(event.requestId)}/prepare`, {});
-            if (!prepared.claimStatus || prepared.claimStatus === 'claimed') process.stdout.write(JSON.stringify(prepared) + '\n');
+            if (!prepared.claimStatus || prepared.claimStatus === 'claimed') {
+              await new Promise<void>((resolve, reject) => process.stdout.write(JSON.stringify(prepared) + '\n', error => error ? reject(error) : resolve()));
+              await agentCall(key, `/agent/requests/${encodeURIComponent(event.requestId)}/accepted`, {});
+            }
           }
         }
       }

@@ -2,13 +2,16 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem } from '@plannotator/ui/components/ui/dropdown-menu';
 import { threadMatch } from './thread-search.ts';
 import { Tooltip } from '@plannotator/ui/components/Tooltip';
-import type { Quote, RequestRecord, Thread } from '../src/store.ts';
+import type { Message, Quote, RequestRecord, Thread } from '../src/store.ts';
 import { api, errorText, type ViewerState } from './api.ts';
 import { AgentSession } from './AgentSession.tsx';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
 
+import type { QuestionDraft, QuestionDrafts } from './useQuestionDrafts.ts';
+
 const paths = {
   chevron: 'm6 9 6 6 6-6',
+  arrowUpRight: 'M7 17 17 7M7 7h10v10',
   back: 'M19 12H5m6-6-6 6 6 6',
   send: 'M12 19V5m-6 6 6-6 6 6',
   pencil: 'm16 3 5 5L8 21H3v-5L16 3ZM14 5l5 5',
@@ -30,38 +33,6 @@ export function Icon({ name }: { name: keyof typeof paths }) {
     </svg>
   );
 }
-export type QuestionDraft = { text: string; retry: { signature: string; id: string } | null };
-const threadDraftKey = (documentId: string, threadId: string) => `sidecar-draft:${documentId}:${threadId}`;
-const closedDraftDocuments = new Set<string>();
-export function forgetDocument(documentId: string, threadIds: string[]): string | undefined {
-  closedDraftDocuments.add(documentId);
-  try {
-    for (const key of Object.keys(localStorage)) {
-      if (key.startsWith(`sidecar-draft:${documentId}:`) || threadIds.some(id => key === `sidecar-read-reply:${id}`))
-        localStorage.removeItem(key);
-    }
-    // A suspended tab must not save its old composer again when it wakes up.
-    localStorage.setItem(`sidecar-closed-document:${documentId}`, '1');
-    sessionStorage.removeItem(`sidecar-thread:${documentId}`);
-  } catch { return 'Document closed, but browser drafts could not be fully cleared in this browser.'; }
-}
-function readThreadDraft(key: string): QuestionDraft | undefined {
-  try {
-    const saved: unknown = JSON.parse(localStorage.getItem(key) ?? 'null');
-    if (
-      !saved || typeof saved !== 'object' ||
-      !('text' in saved) || typeof saved.text !== 'string' || !('retry' in saved)
-    ) return;
-    if (saved.retry === null) return { text: saved.text, retry: null };
-    const retry = saved.retry;
-    if (
-      retry && typeof retry === 'object' &&
-      'signature' in retry && typeof retry.signature === 'string' &&
-      'id' in retry && typeof retry.id === 'string'
-    )
-      return { text: saved.text, retry: { signature: retry.signature, id: retry.id } };
-  } catch { /* The in-memory draft remains usable when browser storage is unavailable. */ }
-}
 export function QuestionForm({
   documentId,
   threadId,
@@ -74,6 +45,7 @@ export function QuestionForm({
   drafts,
   draftKey,
   onSendingChange,
+  onRemoveSelection,
 }: {
   documentId: string;
   threadId?: string;
@@ -83,64 +55,22 @@ export function QuestionForm({
   floating?: boolean;
   onCancel?: () => void;
   disabled?: boolean;
-  drafts: Map<string, QuestionDraft>;
+  drafts: QuestionDrafts;
   draftKey: string;
   onSendingChange?: (sending: boolean) => void;
+  onRemoveSelection?: () => void;
 }) {
-  const storageKey = threadId ? threadDraftKey(documentId, threadId) : null;
-  const [initialDraft] = useState(() => {
-    const draft = drafts.get(draftKey) ?? (storageKey ? readThreadDraft(storageKey) : undefined);
-    if (draft) drafts.set(draftKey, draft);
-    return draft;
-  });
+  const [initialDraft] = useState(() => drafts.get(draftKey));
   const [text, setText] = useState(initialDraft?.text ?? ''),
     [error, setError] = useState(''),
-    [draftError, setDraftError] = useState(''),
     [busy, setBusy] = useState(false);
-  const input = useRef<HTMLTextAreaElement>(null),
-    sending = useRef(false);
+  const input = useRef<HTMLTextAreaElement>(null), sending = useRef(false);
   const retry = useRef(initialDraft?.retry ?? null);
-  const pendingSave = useRef<QuestionDraft | undefined>(undefined),
-    saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined),
-    pendingSince = useRef(0);
-  function persistDraft() {
-    clearTimeout(saveTimer.current);
-    const draft = pendingSave.current;
-    if (!storageKey || !draft) return;
-    if (closedDraftDocuments.has(documentId)) { pendingSave.current = undefined; return; }
-    try {
-      if (localStorage.getItem(`sidecar-closed-document:${documentId}`)) { pendingSave.current = undefined; return; }
-      if (draft.text) localStorage.setItem(storageKey, JSON.stringify(draft));
-      else localStorage.removeItem(storageKey);
-      pendingSave.current = undefined;
-      setDraftError('');
-    } catch {
-      setDraftError('Draft could not be saved in this browser. Keep this tab open.');
-    }
-  }
-  function updateDraft(draft: QuestionDraft, immediately = false) {
+  const updateDraft = (draft: QuestionDraft, immediately = false) => {
     drafts.set(draftKey, draft);
-    if (!storageKey) return;
-    if (!pendingSave.current) pendingSince.current = Date.now();
-    pendingSave.current = draft;
-    clearTimeout(saveTimer.current);
-    // Debounce normal typing, but also save during long uninterrupted input.
-    if (immediately) persistDraft();
-    else saveTimer.current = setTimeout(
-      persistDraft,
-      Math.max(0, Math.min(100, 2000 - (Date.now() - pendingSince.current))),
-    );
-  }
-  useEffect(() => {
-    const onHidden = () => { if (document.visibilityState === 'hidden') persistDraft(); };
-    window.addEventListener('pagehide', persistDraft);
-    document.addEventListener('visibilitychange', onHidden);
-    return () => {
-      persistDraft();
-      window.removeEventListener('pagehide', persistDraft);
-      document.removeEventListener('visibilitychange', onHidden);
-    };
-  }, [storageKey]);
+    if (immediately) drafts.flush();
+  };
+  useEffect(() => () => drafts.flush(), [drafts, draftKey]);
   useLayoutEffect(() => {
     if (floating) input.current?.focus({ preventScroll: true });
   }, [floating]);
@@ -148,7 +78,7 @@ export function QuestionForm({
     if (!sending.current) {
       setText('');
       retry.current = null;
-      drafts.delete(draftKey);
+      drafts.remove(draftKey);
       setError('');
       onCancel?.();
     }
@@ -159,27 +89,20 @@ export function QuestionForm({
       onSubmit={async (event) => {
         event.preventDefault();
         if (disabled || sending.current || !text.trim() || !documentId) return;
-        const body = { documentId, text, ...(threadId ? { threadId } : quote ? { quote } : {}) };
+        const body = { documentId, text, ...(threadId ? { threadId } : {}), ...(quote ? { quote } : {}) };
         const signature = JSON.stringify(body);
         if (retry.current?.signature !== signature) retry.current = { signature, id: crypto.randomUUID() };
-        const submittedDraft = { text, retry: retry.current };
+        const submittedDraft = { text, retry: retry.current, ...(quote ? { quote } : {}) };
         updateDraft(submittedDraft, true);
         sending.current = true;
         setBusy(true);
         onSendingChange?.(true);
         try {
           const request = await api<RequestRecord>('/api/questions', { ...body, clientMessageId: retry.current.id });
-          setText('');
-          retry.current = null;
-          // A remounted composer may already hold a newer draft.
-          if (drafts.get(draftKey) === submittedDraft) drafts.delete(draftKey);
-          if (pendingSave.current === submittedDraft) pendingSave.current = undefined;
-          if (storageKey) {
-            try {
-              // A newer draft in this tab or another tab must survive this response.
-              if (localStorage.getItem(storageKey) === JSON.stringify(submittedDraft)) localStorage.removeItem(storageKey);
-              setDraftError('');
-            } catch { setDraftError('Sent, but the saved draft could not be cleared in this browser.'); }
+          // A remounted composer or a newly attached quote may hold a newer draft.
+          if (drafts.get(draftKey) === submittedDraft) {
+            setText(''); retry.current = null;
+            drafts.remove(draftKey, submittedDraft);
           }
           setError('');
           onSent(request);
@@ -227,6 +150,13 @@ export function QuestionForm({
           </button>
         </div>
       )}
+      {!floating && quote && (
+        <div className="draft-selection">
+          <span className="selection-badge text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary">selection</span>
+          <span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={quote.exact}>{quote.exact}</span>
+          <button type="button" className="cancel-button" aria-label="Remove selection" onClick={onRemoveSelection}><Icon name="close" /></button>
+        </div>
+      )}
       <div className="composer-box">
         <textarea
           ref={input}
@@ -235,10 +165,10 @@ export function QuestionForm({
           required
           value={text}
           readOnly={busy || disabled}
-          onBlur={persistDraft}
+          onBlur={drafts.flush}
           onChange={(event) => {
             setText(event.target.value);
-            updateDraft({ text: event.target.value, retry: retry.current });
+            updateDraft({ text: event.target.value, retry: retry.current, ...(quote ? { quote } : {}) });
           }}
         />
         <div className="composer-actions">
@@ -251,7 +181,7 @@ export function QuestionForm({
           </button>
         </div>
       </div>
-      {(error || draftError) && <p role="alert">{error || draftError}</p>}
+      {(error || drafts.error) && <p role="alert">{error || drafts.error}</p>}
     </form>
   );
 }
@@ -419,6 +349,11 @@ export function ConversationSidebar({
   showPassage,
   showOriginal,
   isShown,
+  drafts,
+  onRemoveSelection,
+  activeMessageId,
+  messageVisit,
+  onMessageSent,
 }: {
   documentId: string;
   threads: Thread[];
@@ -428,9 +363,14 @@ export function ConversationSidebar({
   requests: RequestRecord[];
   stream: ViewerState['stream'];
   passageChanged: (quote: Quote) => boolean;
-  showPassage: (quote: Quote) => void;
-  showOriginal: (threadId: string) => void;
+  showPassage: (message: Message) => void;
+  showOriginal: (messageId: string) => void;
   isShown: boolean;
+  drafts: QuestionDrafts;
+  onRemoveSelection: () => void;
+  activeMessageId: string | null;
+  messageVisit: number;
+  onMessageSent: (request: RequestRecord) => void;
 }) {
   const [filter, setFilter] = useState('unresolved'),
     [search, setSearch] = useState(''),
@@ -461,29 +401,15 @@ export function ConversationSidebar({
   }, []);
   const creatingId = useRef<string | null>(null),
     createBusy = useRef(false);
-  const drafts = useRef(new Map<string, QuestionDraft>()),
-    positions = useRef(new Map<string, number>());
+  const positions = useRef(new Map<string, number>());
   const messages = useRef<HTMLDivElement>(null),
     back = useRef<HTMLButtonElement>(null),
     filterInput = useRef<HTMLButtonElement>(null);
   const previousId = useRef<string | null>(null),
     atBottom = useRef(true);
   const active = threads.find((thread) => thread.id === activeId);
-  const originalPath = active?.quote && passageChanged(active.quote)
-    ? `/api/documents/${documentId}/versions/${encodeURIComponent(active.quote.version)}`
-    : null;
-  const [availableOriginal, setAvailableOriginal] = useState<string | null>(null);
-  useEffect(() => {
-    let stopped = false;
-    setAvailableOriginal(null);
-    if (originalPath) {
-      void fetch(originalPath, { method: 'HEAD' })
-        .then((response) => { if (!stopped && response.ok) setAvailableOriginal(originalPath); })
-        .catch(() => { /* A missing or unreachable snapshot leaves the conversation intact. */ });
-    }
-    return () => { stopped = true; };
-  }, [originalPath]);
   const requestStatuses = new Map(requests.map((request) => [request.id, request.status]));
+  const latestMessages = new Map(active?.messages.map(message => [message.requestId, message.id]));
   const inProgress = new Set(
     requests.filter((request) => request.status === 'claimed').map((request) => request.threadId),
   );
@@ -529,6 +455,11 @@ export function ConversationSidebar({
     } else if (previousId.current) filterInput.current?.focus({ preventScroll: true });
     previousId.current = active?.id ?? null;
   }, [active?.id, active?.messages.length, text, isShown]);
+  useLayoutEffect(() => {
+    if (!isShown || !activeMessageId) return;
+    const node = Array.from(messages.current?.querySelectorAll<HTMLElement>('[data-message-id]') ?? []).find(node => node.dataset.messageId === activeMessageId);
+    node?.scrollIntoView({ block: 'nearest' });
+  }, [activeMessageId, active?.id, isShown, messageVisit]);
   async function newConversation() {
     if (createBusy.current || !documentId) return;
     createBusy.current = true;
@@ -551,7 +482,7 @@ export function ConversationSidebar({
   async function leaveConversation() {
     if (!active || isLeaving) return;
     // Pending submissions retain their draft until accepted; don't discard them.
-    if (active.messages.length || drafts.current.get(active.id)?.text.trim()) {
+    if (active.messages.length || (drafts.get(active.id)?.text.trim() || drafts.get(active.id)?.quote)) {
       onOpen(null);
       return;
     }
@@ -559,8 +490,7 @@ export function ConversationSidebar({
     try {
       const result = await api<{ isDeleted: boolean }>(`/api/threads/${active.id}`, undefined, 'DELETE');
       if (result.isDeleted) {
-        drafts.current.delete(active.id);
-        try { localStorage.removeItem(threadDraftKey(documentId, active.id)); } catch { /* No saved input to restore. */ }
+        drafts.remove(active.id);
         positions.current.delete(active.id);
       }
       setError('');
@@ -657,39 +587,6 @@ export function ConversationSidebar({
       )}
       {active ? (
         <section className="sidebar-view" id="threads" data-active-thread={active.id} aria-label="Thread conversation">
-          {active.quote && (
-            <div className="conversation-heading">
-              <blockquote className="quote">
-                {passageChanged(active.quote) ? (
-                  <>
-                    <span className="quote-excerpt" title={active.quote.exact}>
-                      {active.quote.exact}
-                    </span>
-                    <div className="passage-context">
-                      <span className="changed">Passage changed</span>
-                      {originalPath && availableOriginal === originalPath && (
-                        <button className="original-link" onClick={() => showOriginal(active.id)}>
-                          View original document <span aria-hidden="true">↗</span>
-                        </button>
-                      )}
-                    </div>
-                  </>
-                ) : (
-                  <button
-                    aria-label={`Show passage: ${active.quote.exact}`}
-                    onClick={() => active.quote && showPassage(active.quote)}
-                  >
-                    <span className="quote-excerpt" title={active.quote.exact}>
-                      {active.quote.exact}
-                    </span>
-                    <span className="quote-link" aria-hidden="true">
-                      ↗
-                    </span>
-                  </button>
-                )}
-              </blockquote>
-            </div>
-          )}
           <div
             className="messages"
             ref={messages}
@@ -703,24 +600,26 @@ export function ConversationSidebar({
           >
             {!active.messages.length && (
               <div className="empty-conversation">
-                <Icon name={active.quote ? 'annotation' : 'chat'} />
+                <Icon name="chat" />
                 <h3>Start a conversation</h3>
-                <p>{active.quote ? 'Ask about the selected passage.' : 'Ask a question about this document.'}</p>
+                <p>Ask a question about this document.</p>
               </div>
             )}
             {active.messages.map((message) => {
-              const status = message.role === 'user' ? requestStatuses.get(message.requestId) : undefined;
+              const status = requestStatuses.get(message.requestId);
+              const isLatest = latestMessages.get(message.requestId) === message.id;
               const hasStreamedReply = stream?.requestId === message.requestId && !!stream.text;
               return (
-                <div className={`message ${message.role}`} key={message.id}>
+                <div className={`message ${message.role}`} key={message.id} data-message-id={message.id} data-active={message.id === activeMessageId || undefined}>
+                  {message.quote && <MessageSelection documentId={documentId} message={message} quote={message.quote} isChanged={passageChanged(message.quote)} showPassage={() => showPassage(message)} showOriginal={() => showOriginal(message.id)} />}
                   <div className="message-bubble">
                     <MarkdownDocument
                       markdown={message.text}
                       documentId={documentId}
-                      anchorPrefix={`message-${message.requestId}-${message.role}-`}
+                      anchorPrefix={`message-${message.id}-`}
                     />
                   </div>
-                  {!hasStreamedReply && (status === 'queued' || status === 'claimed') && (
+                  {isLatest && !hasStreamedReply && (status === 'queued' || status === 'claimed') && (
                     <div className="message-status" role="status">
                       {status === 'queued' ? 'Queued' : 'Working…'}
                     </div>
@@ -754,10 +653,13 @@ export function ConversationSidebar({
             key={active.id}
             documentId={documentId}
             threadId={active.id}
-            drafts={drafts.current}
+            drafts={drafts}
             draftKey={active.id}
+            quote={drafts.get(active.id)?.quote}
+            onRemoveSelection={onRemoveSelection}
             disabled={isLeaving}
-            onSent={() => {
+            onSent={(request) => {
+              onMessageSent(request);
               if (previousId.current === active.id) {
                 setFilter('unresolved');
                 atBottom.current = true;
@@ -771,13 +673,7 @@ export function ConversationSidebar({
           {visible.map((thread) => {
             const match = matches.get(thread.id);
             return <button className="thread-row" data-thread-id={thread.id} key={thread.id} onClick={() => onOpen(thread.id)}>
-              <span
-                className={`thread-icon${thread.quote ? ' annotated' : ''}`}
-                role="img"
-                aria-label={thread.quote ? 'Annotated thread' : 'General thread'}
-              >
-                <Icon name={thread.quote ? 'annotation' : 'chat'} />
-              </span>
+              <span className="thread-icon" aria-hidden="true"><Icon name="chat" /></span>
               <span className="thread-main">
                 <span className="row-top">
                   <span className="thread-title">{thread.title ?? 'Unnamed'}</span>
@@ -802,11 +698,7 @@ export function ConversationSidebar({
                     {match ? <>{match.before}<mark>{match.match}</mark>{match.after}</> : thread.messages.at(-1)?.text ?? 'Start a conversation about this document.'}
                   </span>
                 </span>
-                {thread.quote && passageChanged(thread.quote) ? (
-                  <span className="row-tag changed">Passage changed</span>
-                ) : drafts.current.get(thread.id)?.text ? (
-                  <span className="row-tag">Draft</span>
-                ) : null}
+                {(drafts.get(thread.id)?.text || drafts.get(thread.id)?.quote) && <span className="row-tag">Draft</span>}
               </span>
             </button>;
           })}
@@ -815,4 +707,23 @@ export function ConversationSidebar({
       )}
     </aside>
   );
+}
+
+// Selection badge and excerpt adapted from Plannotator DocumentQAPair (MIT).
+function MessageSelection({ documentId, message, quote, isChanged, showPassage, showOriginal }: {
+  documentId: string; message: Message; quote: Quote; isChanged: boolean; showPassage: () => void; showOriginal: () => void;
+}) {
+  const path = isChanged ? `/api/documents/${documentId}/versions/${encodeURIComponent(quote.version)}` : null;
+  const [available, setAvailable] = useState<string | null>(null);
+  useEffect(() => {
+    let stopped = false; setAvailable(null);
+    if (path) void fetch(path, { method: 'HEAD' }).then(response => { if (!stopped && response.ok) setAvailable(path); }).catch(() => {});
+    return () => { stopped = true; };
+  }, [path]);
+  return <div className="message-selection quote" data-selection-message={message.id}>
+    <span className="selection-badge text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary">selection</span>
+    {isChanged ? <span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={quote.exact}>{quote.exact}</span> :
+      <button aria-label={`Show passage: ${quote.exact}`} onClick={showPassage}><span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={quote.exact}>{quote.exact}</span><span className="passage-arrow"><Icon name="arrowUpRight" /></span></button>}
+    {isChanged && <div className="passage-context"><span className="changed">Passage changed</span>{path && available === path && <button className="original-link" onClick={showOriginal}>View original document <span className="passage-arrow"><Icon name="arrowUpRight" /></span></button>}</div>}
+  </div>;
 }

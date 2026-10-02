@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { readLibrarySession } from '../src/library.ts';
 import { startServer } from '../src/server.ts';
 import { createState, registerDocument, ownerKey } from '../src/store.ts';
 const exec = promisify(execFile), cliPath = new URL('../src/cli.ts', import.meta.url).pathname, tsx = import.meta.resolve('tsx');
@@ -99,4 +100,18 @@ test('document opens persist across servers and sort each agent by its most rece
   await host.close();
   const { listLibrary } = await import('../src/library.ts');
   assert.equal((await listLibrary(root)).sessions[0].documents[0].id, docs[0].id);
+});
+
+for (const version of [1, 2]) test(`library normalizes saved v${version} without writing state or backup`, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'sidecar-library-version-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const owner = { agent: 'codex' as const, sessionId: randomUUID() }, key = ownerKey(owner);
+  const directory = join(root, key); await mkdir(directory);
+  const saved = { version, owner, documents: {}, threads: {}, requests: {} };
+  const bytes = JSON.stringify(saved, null, 2) + '\n';
+  await writeFile(join(directory, 'state.json'), bytes);
+  const normalized = await readLibrarySession(root, key);
+  assert.equal(normalized.version, 2);
+  assert.equal(await readFile(join(directory, 'state.json'), 'utf8'), bytes);
+  await assert.rejects(readFile(join(directory, 'state.v1.backup.json')), { code: 'ENOENT' });
 });

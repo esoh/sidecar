@@ -155,7 +155,7 @@ test('file refresh preserves the captured passage in an unsent question', async 
   const request = await lastRequest();
   expect(request.quote.exact).toBe('Target passage.');
   expect(request.quote.sentence).toBeUndefined();
-  expect((await state()).threads[request.threadId].scope).toBe('passage');
+  expect((await state()).threads[request.threadId].messages[0].quote).toEqual(request.quote);
 });
 
 
@@ -259,7 +259,7 @@ const answer = 42;
   await expect(reply.locator('script, [onerror]')).toHaveCount(0);
   expect(await page.evaluate(() => (window as any).__sidecarReplyScriptRan)).toBeUndefined();
   const id = await reply.getByRole('heading', { name: 'Shared heading' }).getAttribute('id');
-  expect(id).toBe(`message-${(await lastRequest()).id}-agent-shared-heading`);
+  expect(id).toMatch(/^message-.+-shared-heading$/);
   await page.evaluate(() => {
     (window as any).__lastScrollTarget = '';
     Element.prototype.scrollIntoView = function () { (window as any).__lastScrollTarget = this.id; };
@@ -636,15 +636,20 @@ test('a delayed send preserves a newer draft after leaving and reopening its thr
     const response = await route.fetch(); accepted(); await held; await route.fulfill({ response });
   }, { times: 1 });
   try {
+    await expect(page.locator('#document')).toContainText('Hello world.');
+    await select(page, 'Hello');
     await message.fill('First question'); await message.press('Enter'); await saved;
     const request = await lastRequest();
     await page.getByRole('button', { name: 'Threads', exact: true }).click();
     await page.locator(`[data-thread-id="${request.threadId}"]`).click();
+    await select(page, 'world.');
     await message.fill('Keep this newer draft');
     const response = page.waitForResponse('**/api/questions'); release(); await (await response).finished();
     await page.getByRole('button', { name: 'Threads', exact: true }).click();
     await page.locator(`[data-thread-id="${request.threadId}"]`).click();
     await expect(message).toHaveValue('Keep this newer draft');
+    await expect(page.locator('.draft-selection')).toContainText('world.');
+    expect((await state()).requests[request.id].quote.exact).toBe('Hello');
     expect(Object.keys((await state()).requests)).toHaveLength(1);
   } finally { release(); }
 });
@@ -1408,6 +1413,8 @@ test('saved drafts retain retry IDs after a lost response and clear only after s
   const doc = await f.register();
   await page.goto(`${f.url}/?document=${doc.id}`);
   const message = page.getByLabel('Message', { exact: true });
+  await expect(page.locator('#document')).toContainText('Hello world.');
+  await select(page, 'Hello world.');
   await message.fill('Send this exactly once');
   await page.route('**/api/questions', async route => {
     await route.fetch();
@@ -1418,6 +1425,7 @@ test('saved drafts retain retry IDs after a lost response and clear only after s
   const original = await lastRequest();
   await page.reload();
   await expect(message).toHaveValue('Send this exactly once');
+  await expect(page.locator('.draft-selection')).toContainText('Hello world.');
   await message.press('Enter');
   await expect(message).toHaveValue('');
   expect(Object.keys((await state()).requests)).toEqual([original.id]);
@@ -1686,4 +1694,147 @@ test('document badges, copy and brightness preserve text anchors and controls', 
   await page.setViewportSize({ width: 600, height: 800 });
   const badgeBox = (await page.locator('.document-tools').boundingBox())!;
   expect((await page.locator('#document h2').boundingBox())!.y).toBeGreaterThan(badgeBox.y + badgeBox.height);
+});
+
+test('progress updates remain in history and Working moves below the latest update', async ({ page }) => {
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByLabel('Message', { exact: true }).fill('Inspect this document');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(page.locator('#threads').getByRole('status').filter({ hasText: 'Queued' })).toBeVisible();
+  const request = await lastRequest();
+  const event = await (await f.agent(`/agent/requests/${request.id}/prepare`, {})).json();
+  await f.agent(`/agent/requests/${request.id}/accepted`, {});
+  await expect(page.locator('#threads').getByRole('status').filter({ hasText: 'Working' })).toBeVisible();
+  const emit = (messageId: string, delta: string) => f.agent('/agent/stream-events', { ownerKey: ownerKey(f.owner), turnId: 'test', messageId, index: 0, delta, final: true });
+  await emit('progress', event.stream.progress.prefix + 'I’ll inspect the file.' + event.stream.progress.suffix);
+  await expect(page.locator('.message.agent').getByText('I’ll inspect the file.', { exact: true })).toBeVisible();
+  await expect(page.locator('.message.agent').getByRole('status')).toHaveText('Working…');
+  await expect(page.locator('.message.user').getByRole('status')).toHaveCount(0);
+  await emit('final', event.stream.prefix + 'The file looks good.' + event.stream.suffix);
+  await expect(page.locator('.message.agent')).toHaveCount(2);
+  await expect(page.locator('#threads').getByRole('status').filter({ hasText: 'Working' })).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator('.message.agent')).toHaveCount(2);
+  await expect(page.getByRole('log')).toContainText('I’ll inspect the file.');
+  await expect(page.getByRole('log')).toContainText('The file looks good.');
+});
+
+test('highlight intensity dims selections without dimming text and persists across reload', async ({ page }) => {
+  const doc = await f.register('a.md', '# Highlight settings\n\nSelect this passage.');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document')).toContainText('Select this passage.');
+  await select(page, 'Select this passage.');
+  const original = await page.locator('mark[data-pending]').evaluate(e => getComputedStyle(e).backgroundColor);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const slider = page.getByRole('slider', { name: 'Highlight intensity', exact: true });
+  await slider.fill('30');
+  await slider.press('Escape');
+  await select(page, 'Select this passage.');
+  const dimmed = page.locator('mark[data-pending]');
+  await expect(dimmed).toHaveText('Select this passage.');
+  expect(await dimmed.evaluate(e => getComputedStyle(e).backgroundColor)).not.toBe(original);
+  expect(await dimmed.evaluate(e => getComputedStyle(e).color)).toBe('rgb(255, 255, 255)');
+  await page.reload();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(slider).toHaveValue('30');
+  await page.getByRole('button', { name: 'Reset highlight intensity' }).click();
+  await expect(slider).toHaveValue('100');
+  await slider.press('Escape');
+  await select(page, 'Select this passage.');
+  expect(await page.locator('mark[data-pending]').evaluate(e => getComputedStyle(e).backgroundColor)).toBe(original);
+});
+
+test('message selection attaches to the next input, replaces, dismisses and moves to a new comment', async ({ page }) => {
+  const doc = await f.register('selections.md', '# Selections\n\nFirst passage. Second passage.');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const message = page.getByLabel('Message', { exact: true });
+  await message.fill('Keep this text');
+  await select(page, 'First passage.');
+  const badge = page.locator('.sidebar .draft-selection');
+  await expect(badge).toContainText('First passage.');
+  await message.click();
+  await expect(badge).toBeVisible();
+  await select(page, 'Second passage.');
+  await expect(badge).toContainText('Second passage.');
+  await page.locator('.brand').click();
+  await expect(badge).toHaveCount(0);
+  await expect(page.locator('mark[data-pending]')).toHaveCount(0);
+  await expect(message).toHaveValue('Keep this text');
+  await select(page, 'First passage.');
+  await page.getByRole('button', { name: 'Remove selection', exact: true }).click();
+  await expect(badge).toHaveCount(0);
+  const initialId = await page.locator('#threads').getAttribute('data-active-thread');
+  await select(page, 'Second passage.');
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await expect(badge).toHaveCount(0);
+  await page.getByLabel('Comment', { exact: true }).fill('New selected conversation');
+  await page.getByLabel('Send comment', { exact: true }).click();
+  await expect(page.getByRole('log')).toContainText('New selected conversation');
+  const request = await lastRequest();
+  expect(request.threadId).not.toBe(initialId);
+  expect(request.quote.exact).toBe('Second passage.');
+  await page.getByLabel('Threads', { exact: true }).click();
+  await page.locator(`[data-thread-id="${initialId}"]`).click();
+  await expect(message).toHaveValue('Keep this text');
+  await expect(badge).toHaveCount(0);
+});
+
+test('selection draft survives thread switches and reload, then each message owns its passage', async ({ page }) => {
+  const doc = await f.register('selections.md', '# Selections\n\nFirst passage. Second passage.');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const message = page.getByLabel('Message', { exact: true });
+  await expect(message).toBeVisible();
+  const id = await page.locator('#threads').getAttribute('data-active-thread');
+  await select(page, 'First passage.');
+  await page.getByLabel('Threads', { exact: true }).click();
+  await expect(page.locator(`[data-thread-id="${id}"]`)).toContainText('Draft');
+  await page.locator(`[data-thread-id="${id}"]`).click();
+  await page.reload();
+  await expect(page.locator('.draft-selection')).toContainText('First passage.');
+  await message.fill('First question'); await message.press('Enter');
+  await expect(page.locator('.message-selection')).toHaveCount(1);
+  await expect(page.locator('.draft-selection')).toHaveCount(0);
+  await message.fill('General follow-up'); await message.press('Enter');
+  await expect(page.getByRole('log')).toContainText('General follow-up');
+  await select(page, 'Second passage.');
+  await message.fill('Second question'); await message.press('Enter');
+  await expect(page.locator('.message-selection')).toHaveCount(2);
+  expect((await state()).threads[id!].messages.filter((m: any) => m.role === 'user').map((m: any) => m.quote?.exact)).toEqual(['First passage.', undefined, 'Second passage.']);
+  await expect.poll(() => page.locator('#document mark[data-active]').allTextContents().then(t => t.join(''))).toBe('Second passage.');
+  await page.getByRole('button', { name: 'Show passage: First passage.', exact: true }).click();
+  await expect.poll(() => page.locator('#document mark[data-active]').allTextContents().then(t => t.join(''))).toBe('First passage.');
+  await page.getByRole('button', { name: 'Show passage: Second passage.', exact: true }).click();
+  await expect.poll(() => page.locator('#document mark[data-active]').allTextContents().then(t => t.join(''))).toBe('Second passage.');
+});
+
+test('message history navigates identical selections within one thread and preserves per-message old versions', async ({ page }) => {
+  const doc = await f.register('history.md', '# History\n\nAlpha bravo charlie.');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const message = page.getByLabel('Message', { exact: true });
+  await expect(message).toBeVisible();
+  const id = await page.locator('#threads').getAttribute('data-active-thread');
+  for (const question of ['First reference', 'Second reference']) {
+    await select(page, 'Alpha bravo');
+    await message.fill(question); await message.press('Enter');
+    await expect(page.getByRole('log')).toContainText(question);
+  }
+  const saved = (await state()).threads[id!].messages;
+  await page.locator('#document mark').filter({ hasText: 'Alpha bravo' }).click();
+  await expect(page.locator('.selection-actions').getByRole('button', { name: 'First reference', exact: true })).toBeVisible();
+  await page.locator('.selection-actions').getByRole('button', { name: 'First reference', exact: true }).click();
+  await expect(page.locator(`[data-message-id="${saved[0].id}"]`)).toHaveAttribute('data-active', 'true');
+  await page.locator('#document mark').filter({ hasText: 'Alpha bravo' }).click();
+  await page.locator('.selection-actions').getByRole('button', { name: 'Second reference', exact: true }).click();
+  await expect(page.locator(`[data-message-id="${saved[1].id}"]`)).toHaveAttribute('data-active', 'true');
+  await writeFile(join(f.directory, 'history.md'), '# Changed\n\nDifferent passage.');
+  await expect(page.locator('#document h1')).toHaveText('Changed');
+  await expect(page.getByText('Passage changed', { exact: true })).toHaveCount(2);
+  await page.locator(`[data-message-id="${saved[0].id}"]`).getByRole('button', { name: 'View original document' }).click();
+  await expect(page.getByRole('region', { name: 'Original document', exact: true })).toContainText('Alpha bravo charlie.');
+  await expect(page.getByRole('log')).toBeVisible();
+  await page.getByRole('button', { name: 'Return to current' }).click();
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await page.getByLabel('Search threads').fill('Alpha bravo');
+  await expect(page.locator('.thread-preview mark')).toHaveText('Alpha bravo');
 });
