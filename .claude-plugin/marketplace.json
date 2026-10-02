@@ -1,0 +1,16 @@
+{
+  "name": "sidecar",
+  "owner": {
+    "name": "esoh"
+  },
+  "plugins": [
+    {
+      "name": "sidecar",
+      "source": "./",
+      "description": "Discuss and revise Markdown documents with your existing coding agent."
+    }
+  ],
+  "metadata": {
+    "description": "Sidecar document conversations for coding agents."
+  }
+}

@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+# Follow the installed symlink, preserving the caller's working directory/stdin.
+sidecar_script=$0
+while [ -L "$sidecar_script" ]; do
+  sidecar_directory=$(cd -P "$(dirname "$sidecar_script")" && pwd)
+  sidecar_script=$(readlink "$sidecar_script")
+  case "$sidecar_script" in /*) ;; *) sidecar_script="$sidecar_directory/$sidecar_script" ;; esac
+done
+sidecar_root=$(cd -P "$(dirname "$sidecar_script")/.." && pwd)
+exec node --import "$sidecar_root/node_modules/tsx/dist/loader.mjs" "$sidecar_root/src/cli.ts" "$@"

@@ -2,16 +2,67 @@
 
 A local Markdown viewer for questions and revisions in your existing Codex or Claude Code conversation. Select a passage or ask a general question; replies stay in persistent threads across documents. Only you resolve or reopen threads.
 
+## Install (macOS / Linux)
+
+Sidecar has two parts: the local `sidecar` app and a native plugin for each coding agent. Install the app first. It requires **Node 22+, pnpm 11+, and Git**; the installer installs the app's locked production dependencies, without needing a development checkout.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/esoh/sidecar/main/install.sh | bash
+sidecar --version
+```
+
+The command is installed at `~/.local/bin/sidecar`. If that directory is not on your shell's `PATH`, add it to your shell configuration and restart the terminal before starting your agents:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Then install the integration for each agent you use:
+
+**Codex** (requires a CLI with `codex plugin add`):
+
+```sh
+codex plugin marketplace add esoh/sidecar
+codex plugin add sidecar@sidecar
+```
+
+**Claude Code:**
+
+```sh
+claude plugin marketplace add esoh/sidecar
+claude plugin install sidecar@sidecar
+```
+
+Restart the agent. Invoke Sidecar's skill from the plugin's commands/skills menu (Claude: `/sidecar:sidecar`; Codex: select the Sidecar skill with `$`). Ask it to open an existing Markdown file or generate and open a document. Claude still requires its native Monitor tool, and Codex still requires native queue delivery, as described below. Codex may ask you to review/trust the bundled hooks; installing the plugin does not bypass native hook trust.
+
+If you previously installed Sidecar with personal skill symlinks, remove those **Sidecar-only links** before enabling the plugin to avoid duplicate commands. The source-checkout workflow below remains available for development.
+
+### Update
+
+Rerun the installer above to update the local app to the latest `main`. Then refresh the plugin in each host you use:
+
+```sh
+codex plugin marketplace upgrade sidecar
+codex plugin add sidecar@sidecar
+
+claude plugin marketplace update sidecar
+claude plugin update sidecar@sidecar
+```
+
+Restart the agent to load the updated skill/hooks. Ask the original agent to stop and reopen its Sidecar app to load the updated app code; closing the browser alone does not stop it. Documents and threads are kept in `~/.local/state/sidecar`.
+
+The installer prepares each Git revision in `~/.local/share/sidecar/releases/` and switches `current` only after dependencies and the launcher pass a startup check. A failed install leaves the current app selected. Old releases are retained so running viewers can continue using their files. It does not modify agent settings or install the plugins for you. `SIDECAR_REF` selects a branch or tag; `SIDECAR_INSTALL_DIR` and `SIDECAR_BIN_DIR` override absolute install paths. Maintainer tests can use `SIDECAR_REPOSITORY` to install a local Git fixture.
+
 ## Development
 
-Node 22+ and pnpm. Run `pnpm install`, `pnpm test`, and `pnpm typecheck`. Nothing is installed globally. The shared [Sidecar skill](.agents/skills/sidecar/SKILL.md) is also linked from `.claude/skills/sidecar`.
+Node 22+ and pnpm 11+. Run `pnpm install`, `pnpm test`, and `pnpm typecheck`. Development commands do not install anything globally. The shared [Sidecar skill](.agents/skills/sidecar/SKILL.md) is also linked from `.claude/skills/sidecar`. To run a development checkout instead of the installed app, substitute `pnpm --dir /absolute/sidecar sidecar COMMAND` for `sidecar COMMAND`. The native hooks use the installed command.
 
 ## Use from an agent
 
-Ask the existing agent to read the skill, then open a file. From another repository use the absolute checkout path and absolute document path:
+Invoke the Sidecar skill in the existing agent, then ask it to open a file. The skill runs the installed command with that conversation’s native identity and an absolute document path:
 
 ```sh
-pnpm --dir /absolute/sidecar sidecar open --agent codex --session NATIVE_UUID --file /absolute/review.md
+sidecar open --agent codex --session NATIVE_UUID --file /absolute/review.md
 ```
 
 Use `--agent claude` for Claude. Explicit IDs must match the selected agent's native environment when present. Generated Markdown can be piped to `open ... --stdin`. The launch result contains the owner key, document ID, and browser URL. Opening additional documents reuses this conversation's app. `--no-browser` suppresses the opener for headless use.
@@ -21,8 +72,8 @@ The agent must load the skill before opening: it explains request claims and rep
 Codex needs native `codex queue` support and its original session accessible to the local client. Claude needs its native Monitor tool: the agent runs `watch --owner KEY` in Monitor, then re-arms it after expiry only if the app is still running. Monitor has a 30-minute limit; re-arming consumes an agent turn. If Monitor is unavailable for the client's provider/settings, Claude live delivery is unavailable. The CLI does not create a replacement model conversation.
 
 ```sh
-pnpm --dir /absolute/sidecar sidecar status --owner KEY
-pnpm --dir /absolute/sidecar sidecar stop --owner KEY
+sidecar status --owner KEY
+sidecar stop --owner KEY
 ```
 
 Stop closes only Sidecar; the coding conversation remains alive. Closing a browser tab does not stop the app. A fresh open restores documents, titles, threads, and pending requests. A claimed request interrupted by a crash becomes uncertain: the agent must inspect the file before explicitly resuming. Identical replies and submission retries are deduplicated.
@@ -73,7 +124,9 @@ The top-right header shows the original agent’s name with a small status dot: 
 
 Codex status is sampled once a second from its existing local daemon while a viewer is connected, using read-only `thread/read` without resuming the conversation. Claude registers activity hooks alongside streaming when the updated Sidecar skill is invoked through its native Skill tool. Existing Claude sessions must invoke the updated skill to register these hooks. Missing/unsupported signals show Unknown. Claude user interrupts do not fire Stop; its last reported status may remain until the next activity or idle notification. Subagent hooks never overwrite the original owner's status.
 
-## Optional lifecycle hooks
+## Lifecycle hooks
+
+The Codex plugin bundles activity/compaction hooks. Claude's shared skill registers its streaming and activity hooks when invoked through the native Skill tool. Both call the installed `sidecar` command and only forward events to an already-running matching app. Do not also configure the examples below when using the plugin; that would duplicate events.
 
 The [Codex](hooks/codex.example.json) and [Claude](hooks/claude.example.json) examples forward native activity and PreCompact/PostCompact events to an already-running app. Replace `/absolute/sidecar`; preserve `SIDECAR_STATE_DIR` if you use a custom directory. Merge the examples into the project's `.codex/hooks.json` or Claude's `.claude/settings.local.json` yourself; Sidecar does not change settings. Native hook trust and permissions still apply.
 

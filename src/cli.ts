@@ -113,7 +113,17 @@ export async function forwardHook(agent: string | undefined, payload: unknown): 
   });
 }
 async function main() {
-  const { values, positionals } = parseArgs({ allowPositionals: true, options: { agent: { type: 'string' }, session: { type: 'string' }, owner: { type: 'string' }, file: { type: 'string' }, title: { type: 'string' }, document: { type: 'string' }, thread: { type: 'string' }, stdin: { type: 'boolean' }, resume: { type: 'boolean' }, error: { type: 'boolean' }, 'no-browser': { type: 'boolean' }, stream: { type: 'boolean' } } });
+  const { values, positionals } = parseArgs({ allowPositionals: true, options: { help: { type: 'boolean', short: 'h' }, version: { type: 'boolean' }, agent: { type: 'string' }, session: { type: 'string' }, owner: { type: 'string' }, file: { type: 'string' }, title: { type: 'string' }, document: { type: 'string' }, thread: { type: 'string' }, stdin: { type: 'boolean' }, resume: { type: 'boolean' }, error: { type: 'boolean' }, 'no-browser': { type: 'boolean' }, stream: { type: 'boolean' } } });
+  if (values.version) {
+    const { version } = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+    const revision = await readFile(new URL('../.sidecar-revision', import.meta.url), 'utf8').catch(() => '');
+    process.stdout.write(`Sidecar ${version}${revision ? ` (${revision.trim().slice(0, 12)})` : ''}\n`);
+    return;
+  }
+  if (values.help || !positionals.length) {
+    process.stdout.write('Sidecar — document conversations with your existing agent.\n\nUsage: sidecar COMMAND [options]\nCommands: open, status, request, name-thread, stream, reply, watch, stop, hook\n\nOpen: sidecar open --agent codex|claude --session UUID --file /absolute/document.md\nUse the Sidecar skill in the original agent to establish live delivery.\n');
+    return;
+  }
   const [command, requestId] = positionals;
   const output = (value: unknown) => process.stdout.write(JSON.stringify(value) + '\n');
   if (command === 'hook') {
