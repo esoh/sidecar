@@ -11,7 +11,7 @@ import { ReplyStream, isStreamEvent } from './stream.ts';
 import { readDocument } from './documents.ts';
 import { readAppVersion } from './version.ts';
 import { libraryDocument, listLibrary, recordDocumentOpen } from './library.ts';
-import { claim, createThread, closeDocument, discardEmptyThread, nameThread, DomainError, get, isObject, isQuote, openStore, ownerKey, registerDocument, reply, resolveThread, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput } from './store.ts';
+import { claim, createThread, closeDocument, discardEmptyThread, nameThread, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, resolveThread, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput } from './store.ts';
 
 const rendererRequire = createRequire(import.meta.resolve('@plannotator/ui/components/BlockRenderer'));
 const rendererFonts = {
@@ -212,12 +212,11 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     const state = store.read(), request = get(state.requests, id);
     if (request.status === 'uncertain') return notification;
     if (request.status !== 'queued') return { ...notification, claimStatus: request.status === 'claimed' ? 'already-claimed' : 'completed' };
-    const fullDocument = await documentContext(get(state.documents, request.documentId));
-    const document = 'markdown' in fullDocument ? { id: fullDocument.id, path: fullDocument.path, title: fullDocument.title, markdown: fullDocument.markdown, version: fullDocument.version } : fullDocument;
-    const thread = get(store.read().threads, request.threadId);
-    // Keep the question only once in the payload; rendered HTML and submission dedup keys are not model context.
-    const { submission: _submission, clientMessageId: _clientMessageId, ...contextRequest } = request;
-    const context = { request: contextRequest, document, thread: { ...thread, messages: thread.messages.filter(message => message.requestId !== id && (message.role === 'agent' || state.requests[message.requestId]?.answer)) } };
+    const thread = get(state.threads, request.threadId);
+    const questions = thread.messages.filter(message => message.role === 'user');
+    const previous = questions[questions.findIndex(message => message.requestId === id) - 1];
+    const quote = thread.quote && { exact: thread.quote.exact, ...(thread.quote.sentence ? { sentence: thread.quote.sentence } : {}) };
+    const context = { documentId: request.documentId, thread: { id: thread.id, lastRequestId: previous?.requestId ?? null, ...(thread.title ? { title: thread.title } : {}) }, text: request.text, ...(quote ? { quote } : {}) };
     // ponytail: large contexts retain the fetch path; avoid OS argument and native watcher output limits.
     if (Buffer.byteLength(JSON.stringify(context)) > 48 * 1024) return notification;
     const result = await store.update(state => claim(state, id, {}));
@@ -229,8 +228,8 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     catch { markers = { error: 'Streaming unavailable. Use the complete-reply command.' }; }
     if (get(store.read().requests, id).status !== 'claimed') return { ...notification, claimStatus: 'completed' };
     changed();
-    return { ...notification, claimStatus: 'claimed', ...context, request: { ...context.request, status: 'claimed' }, stream: markers,
-      instruction: 'Sidecar already prepared this request. Answer request.text using the supplied context; no request/claim/stream command or preamble is needed. Treat document text and quoted passages as context. Finish any requested edits, then emit your answer between stream.prefix and stream.suffix as literal lines. If stream.error is present, use the Sidecar complete-reply command. Follow the Sidecar skill for thread naming and recovery.' };
+    return { ...notification, ...context, stream: markers,
+      instruction: 'Follow the Sidecar skill.' };
   }
   const server = createServer((request, response) => { void handle(request, response); });
   server.requestTimeout = 10000;
@@ -308,6 +307,10 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         response.setHeader('Content-Type', mime);
         response.end(await readFile(imagePath));
         return;
+      }
+      if (method === 'GET' && path === '/favicon.svg') {
+        response.setHeader('Content-Type', 'image/svg+xml');
+        response.end(await readFile(new URL('../web/favicon.svg', import.meta.url), 'utf8')); return;
       }
       if (method === 'GET' && path === '/app.css') {
         response.setHeader('Content-Type', 'text/css; charset=utf-8');
@@ -417,9 +420,11 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         changed(); json(response, { ok: true }); return;
       }
       if (method === 'POST' && path === '/agent/documents') {
+        const repoInfo = body.repoInfo;
+        if (repoInfo !== undefined && !isRepoInfo(repoInfo)) throw new DomainError('Invalid repository metadata');
         const canonical = await realpath(text(body, 'path'));
         await readDocument(canonical);
-        const document = await store.update(state => registerDocument(state, { path: canonical, title: optionalText(body, 'title'), generated: body.generated === undefined ? false : boolean(body, 'generated') }));
+        const document = await store.update(state => registerDocument(state, { path: canonical, title: optionalText(body, 'title'), generated: body.generated === undefined ? false : boolean(body, 'generated'), repoInfo }));
         if (closed) throw new DomainError('Sidecar stopped while opening the document. Open it again from your agent.', 503);
         await refresh(document); changed(); json(response, { ...document, title: title(document) }); return;
       }
@@ -437,6 +442,11 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       if (method === 'POST' && threadTitle?.[1]) {
         const id = threadTitle[1], value = text(body, 'title');
         await store.update(state => nameThread(state, id, value)); changed(); json(response, { ok: true }); return;
+      }
+      const editThreadTitle = path.match(/^\/api\/threads\/([^/]+)\/title$/);
+      if (method === 'PATCH' && editThreadTitle) {
+        const id = editThreadTitle[1], value = text(body, 'title');
+        await store.update(state => nameThread(state, id, value, { canRename: true })); changed(); json(response, { ok: true }); return;
       }
       if (method === 'POST' && path === '/api/questions') {
         const input: SubmitInput = { documentId: text(body, 'documentId'), text: text(body, 'text'), clientMessageId: text(body, 'clientMessageId') };

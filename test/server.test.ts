@@ -152,9 +152,14 @@ test('agent thread naming stays unset until supplied, persists, and cannot overw
   assert.equal((await f.agent(path, { title: '  Preserving drafts  ' })).status, 200);
   assert.equal((await f.agent(path, { title: 'Preserving drafts' })).status, 200);
   assert.equal((await f.agent(path, { title: 'A different name' })).status, 409);
+  const editPath = `/api/threads/${request.threadId}/title`;
+  assert.equal((await f.view(editPath, { title: 'User title' }, 'PATCH')).status, 200);
+  assert.equal((await f.view(editPath, { title: 'Updated user title' }, 'PATCH')).status, 200);
+  assert.equal((await f.agent(path, { title: 'Agent overwrite' })).status, 409);
+  assert.equal((await f.view(editPath, { title: ' ' }, 'PATCH')).status, 400);
   await f.reopen();
   const thread = (await (await f.view('/api/state')).json()).threads[request.threadId];
-  assert.equal(thread.title, 'Preserving drafts');
+  assert.equal(thread.title, 'Updated user title');
   assert.equal(thread.messages.length, 3);
 });
 

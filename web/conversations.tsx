@@ -1,4 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem } from '@plannotator/ui/components/ui/dropdown-menu';
+import { threadMatch } from './thread-search.ts';
 import { Tooltip } from '@plannotator/ui/components/Tooltip';
 import type { Quote, RequestRecord, Thread } from '../src/store.ts';
 import { api, errorText, type ViewerState } from './api.ts';
@@ -6,6 +8,7 @@ import { AgentSession } from './AgentSession.tsx';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
 
 const paths = {
+  chevron: 'm6 9 6 6 6-6',
   back: 'M19 12H5m6-6-6 6 6 6',
   send: 'M12 19V5m-6 6 6-6 6 6',
   pencil: 'm16 3 5 5L8 21H3v-5L16 3ZM14 5l5 5',
@@ -253,7 +256,9 @@ export function QuestionForm({
   );
 }
 
-export function TitleForm({ id, title }: { id: string; title: string }) {
+export function TitleForm({ id, title, kind = 'document' }: { id: string; title: string; kind?: 'document' | 'thread' }) {
+  const label = kind === 'thread' ? 'Thread title' : 'Document name';
+  const Heading = kind === 'thread' ? 'h2' : 'span';
   const [draft, setDraft] = useState<string | null>(null),
     [error, setError] = useState('');
   const input = useRef<HTMLInputElement>(null),
@@ -283,7 +288,7 @@ export function TitleForm({ id, title }: { id: string; title: string }) {
         queuedSave.current = null;
         try {
           if (pending.value && pending.value !== savedTitle) {
-            await api(`/api/documents/${id}/title`, { title: pending.value }, 'PATCH');
+            await api(`/api/${kind === 'thread' ? 'threads' : 'documents'}/${id}/title`, { title: pending.value }, 'PATCH');
             savedTitle = pending.value;
           }
           setError('');
@@ -300,16 +305,16 @@ export function TitleForm({ id, title }: { id: string; title: string }) {
     }
   }
   return (
-    <div className="document-name">
-      <span hidden={draft !== null} title={title}>
+    <div className={`document-name${kind === 'thread' ? ' thread-name' : ''}`}>
+      <Heading className={kind === 'thread' ? 'conversation-title' : undefined} hidden={draft !== null} title={title}>
         {title}
-      </span>
+      </Heading>
       <button
         ref={pencil}
         className="edit-title"
         hidden={draft !== null}
-        aria-label="Edit document name"
-        title="Edit document name"
+        aria-label={`Edit ${label.toLowerCase()}`}
+        title={`Edit ${label.toLowerCase()}`}
         onClick={() => {
           revision.current++;
           setDraft(title);
@@ -326,8 +331,8 @@ export function TitleForm({ id, title }: { id: string; title: string }) {
         >
           <input
             ref={input}
-            aria-label="Document name"
-            maxLength={120}
+            aria-label={label}
+            maxLength={kind === 'thread' ? 80 : 120}
             value={draft}
             onChange={(event) => {
               revision.current++;
@@ -392,15 +397,15 @@ export function AgentStatus({ state, connected }: { state: ViewerState | null; c
 function activity(thread: Thread) {
   return thread.messages.at(-1)?.createdAt ?? thread.createdAt ?? 0;
 }
-function age(time: number) {
-  const minutes = Math.max(0, Math.floor((Date.now() - time) / 60000));
-  return minutes < 1
-    ? 'now'
-    : minutes < 60
-      ? `${minutes}m`
-      : minutes < 1440
-        ? `${Math.floor(minutes / 60)}h`
-        : `${Math.floor(minutes / 1440)}d`;
+export function age(time: number, now = Date.now()) {
+  const minutes = Math.max(0, Math.floor((now - time) / 60000));
+  if (minutes < 1) return 'now';
+  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 1440) return `${Math.floor(minutes / 60)}h`;
+  if (minutes < 10080) return `${Math.floor(minutes / 1440)}d`;
+  if (minutes < 43200) return `${Math.floor(minutes / 10080)}w`;
+  if (minutes < 525600) return `${Math.floor(minutes / 43200)}mo`;
+  return `${Math.floor(minutes / 525600)}y`;
 }
 export function ConversationSidebar({
   documentId,
@@ -428,6 +433,7 @@ export function ConversationSidebar({
   isShown: boolean;
 }) {
   const [filter, setFilter] = useState('unresolved'),
+    [search, setSearch] = useState(''),
     [error, setError] = useState(''),
     [creating, setCreating] = useState(false),
     [isLeaving, setLeaving] = useState(false);
@@ -459,7 +465,7 @@ export function ConversationSidebar({
     positions = useRef(new Map<string, number>());
   const messages = useRef<HTMLDivElement>(null),
     back = useRef<HTMLButtonElement>(null),
-    filterInput = useRef<HTMLSelectElement>(null);
+    filterInput = useRef<HTMLButtonElement>(null);
   const previousId = useRef<string | null>(null),
     atBottom = useRef(true);
   const active = threads.find((thread) => thread.id === activeId);
@@ -505,8 +511,10 @@ export function ConversationSidebar({
       window.removeEventListener('resize', markRead);
     };
   }, [active, isShown, readReplies]);
+  const query = search.trim();
+  const matches = new Map(threads.map(thread => [thread.id, query ? threadMatch(thread, query) : null]));
   const visible = threads
-    .filter((thread) => thread.isResolved === (filter === 'resolved'))
+    .filter((thread) => (filter === 'all' || thread.isResolved === (filter === 'resolved')) && (!query || matches.get(thread.id)))
     .sort((a, b) => activity(b) - activity(a));
   const text = active && stream?.threadId === active.id ? stream.text : '';
   useLayoutEffect(() => {
@@ -591,9 +599,7 @@ export function ConversationSidebar({
             >
               <Icon name="back" />
             </button>
-            <h2 className="conversation-title" title={active.title ?? 'Unnamed'}>
-              {active.title ?? 'Unnamed'}
-            </h2>
+            <TitleForm key={active.id} id={active.id} title={active.title ?? 'Unnamed'} kind="thread" />
             <button
               className={`resolve-button${active.isResolved ? ' is-resolved' : ''}`}
               aria-label={active.isResolved ? 'Reopen thread' : 'Resolve thread'}
@@ -616,15 +622,19 @@ export function ConversationSidebar({
           </div>
         ) : (
           <div className="list-header">
-            <select
-              ref={filterInput}
-              aria-label="Thread status"
-              value={filter}
-              onChange={(event) => setFilter(event.target.value)}
-            >
-              <option value="unresolved">Unresolved</option>
-              <option value="resolved">Resolved</option>
-            </select>
+            <input className="thread-search" type="search" aria-label="Search threads" placeholder="Search threads" value={search} onChange={event => setSearch(event.target.value)} />
+            <DropdownMenu>
+              <DropdownMenuTrigger ref={filterInput} className="thread-filter" aria-label="Thread status">
+                {filter === 'all' ? 'All' : filter === 'resolved' ? 'Resolved' : 'Unresolved'}<Icon name="chevron" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="thread-filter-menu">
+                <DropdownMenuRadioGroup value={filter} onValueChange={value => setFilter(value)}>
+                  <DropdownMenuRadioItem closeOnClick value="unresolved">Unresolved</DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem closeOnClick value="resolved">Resolved</DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem closeOnClick value="all">All</DropdownMenuRadioItem>
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
             <span className="count">{visible.length}</span>
             <button
               className="new-button"
@@ -758,8 +768,9 @@ export function ConversationSidebar({
         </section>
       ) : (
         <div className="thread-list" aria-label="Threads">
-          {visible.map((thread) => (
-            <button className="thread-row" data-thread-id={thread.id} key={thread.id} onClick={() => onOpen(thread.id)}>
+          {visible.map((thread) => {
+            const match = matches.get(thread.id);
+            return <button className="thread-row" data-thread-id={thread.id} key={thread.id} onClick={() => onOpen(thread.id)}>
               <span
                 className={`thread-icon${thread.quote ? ' annotated' : ''}`}
                 role="img"
@@ -788,7 +799,7 @@ export function ConversationSidebar({
                     </span>
                   ) : null}
                   <span className="thread-preview">
-                    {thread.messages.at(-1)?.text ?? 'Start a conversation about this document.'}
+                    {match ? <>{match.before}<mark>{match.match}</mark>{match.after}</> : thread.messages.at(-1)?.text ?? 'Start a conversation about this document.'}
                   </span>
                 </span>
                 {thread.quote && passageChanged(thread.quote) ? (
@@ -797,9 +808,9 @@ export function ConversationSidebar({
                   <span className="row-tag">Draft</span>
                 ) : null}
               </span>
-            </button>
-          ))}
-          {!visible.length && <p className="empty-list">No {filter} threads.</p>}
+            </button>;
+          })}
+          {!visible.length && <p className="empty-list">{query ? 'No matching threads.' : filter === 'all' ? 'No threads.' : `No ${filter} threads.`}</p>}
         </div>
       )}
     </aside>

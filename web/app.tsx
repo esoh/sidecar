@@ -13,10 +13,11 @@ import {
   TitleForm,
   type QuestionDraft,
 } from './conversations.tsx';
-import { locateQuote, quoteRange, selectionText, excludedSelection } from './selection.ts';
+import { locateQuote, quoteRange, selectionText, selectionSentence, excludedSelection } from './selection.ts';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
 import { DocumentLibrary } from './DocumentLibrary.tsx';
 import { TextSettings } from './TextSettings.tsx';
+import { DocumentHeader } from './DocumentHeader.tsx';
 import { OriginalDocument } from './OriginalDocument.tsx';
 import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
 import { ResizeHandle } from '@plannotator/ui/components/ResizeHandle';
@@ -453,6 +454,7 @@ function App() {
       clearSelection();
       return;
     }
+    const sentence = selectionSentence(range);
     lastRect.current = range.getBoundingClientRect();
     // As in web-highlighter's pointer-end handler, the painted mark owns the
     // preview; a native selection left here makes the next drag move text.
@@ -468,6 +470,7 @@ function App() {
       start,
       end,
       version: content.version,
+      ...(sentence ? { sentence } : {}),
     });
     setComposing(false);
     setChoices(null);
@@ -622,6 +625,7 @@ function App() {
                 }
               }}
             >
+              {current && !documentError && <DocumentHeader key={documentId} repoInfo={current.repoInfo} markdown={content.markdown} onError={setError} />}
               <MarkdownDocument markdown={content.markdown} documentId={documentId} />
             </article>
           </div>

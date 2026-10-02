@@ -73,11 +73,13 @@ test('replies validate routing, deduplicate, and retain user resolution', () => 
 
 test('follow-ups remain in their document and preserve quote context', () => {
   const { state, input, other } = setup();
-  const quote = { exact: 'hello', prefix: '', suffix: ' world', start: 0, end: 5, version: 'v1' };
+  const quote = { exact: 'hello', prefix: '', suffix: ' world', start: 0, end: 5, version: 'v1', sentence: 'hello world.' };
   const first = submit(state, { ...input, quote });
   const follow = submit(state, { ...input, threadId: first.threadId, text: 'Why?', clientMessageId: 'follow' });
   assert.equal(follow.threadId, first.threadId);
   assert.deepEqual(follow.quote, quote);
+  assert.throws(() => submit(state, { ...input, quote: { ...quote, sentence: 'unrelated' }, clientMessageId: 'invalid-sentence' }));
+  assert.throws(() => submit(state, { ...input, quote: { ...quote, sentence: 'hello' + 'x'.repeat(512) }, clientMessageId: 'long-sentence' }));
   assert.throws(() => submit(state, { ...input, documentId: other.id, threadId: first.threadId, clientMessageId: 'bad' }));
   assert.throws(() => submit(state, { ...input, documentId: '__proto__', clientMessageId: 'bad' }));
   assert.throws(() => submit(state, { ...input, text: ' ', clientMessageId: 'empty' }));

@@ -9,7 +9,17 @@ function readSize(target: string) {
   return Number.isInteger(value) && value >= 80 && value <= 150 && value % 5 === 0 ? value : 100;
 }
 
+function readBrightness() {
+  const value = Number(storage.getItem('sidecar-text-brightness'));
+  return Number.isInteger(value) && value >= 50 && value <= 100 && value % 5 === 0 ? value : 100;
+}
+
 export function TextSettings({ version }: { version?: string }) {
+  const [brightness, setBrightness] = useState(readBrightness);
+  useLayoutEffect(() => {
+    document.documentElement.style.setProperty('--sidecar-text-brightness', `${brightness}%`);
+    storage.setItem('sidecar-text-brightness', String(brightness));
+  }, [brightness]);
   const [sizes, setSizes] = useState(() => ({ document: readSize('document'), conversation: readSize('conversation') }));
   useLayoutEffect(() => {
     for (const target of targets) {
@@ -23,7 +33,7 @@ export function TextSettings({ version }: { version?: string }) {
       <PopoverTrigger className="settings-toggle" aria-label="Settings" title="Settings">
         <Icon name="settings" />
       </PopoverTrigger>
-      <PopoverContent className="text-settings" align="end" sideOffset={8} aria-label="Text size settings">
+      <PopoverContent className="text-settings" align="end" sideOffset={8} aria-label="Reading settings">
         {!new URLSearchParams(location.search).has('library') && <a className="library-menu-link" href="/?library=1" target="_blank" rel="noopener noreferrer">View all documents</a>}
         <div className="text-settings-heading">
           <span>Text size</span>
@@ -52,6 +62,15 @@ export function TextSettings({ version }: { version?: string }) {
             />
           </label>
         ))}
+        <div className="text-settings-heading brightness-heading">
+          <span>Text brightness</span>
+          <button type="button" aria-label="Reset text brightness" disabled={brightness === 100} onClick={() => setBrightness(100)}>Reset</button>
+        </div>
+        <label className="text-size-control">
+          <span>Brightness</span>
+          <output>{brightness}%</output>
+          <input type="range" aria-label="Text brightness" aria-valuetext={`${brightness}%`} min={50} max={100} step={5} value={brightness} onChange={(event) => setBrightness(event.target.valueAsNumber)} />
+        </label>
         {version && <div className="settings-version">{version}</div>}
       </PopoverContent>
     </Popover>

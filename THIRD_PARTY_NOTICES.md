@@ -35,6 +35,10 @@ and `Viewer` diagram/image rendering. Code-block layout in `web/app.css` is
 copied from `packages/editor/index.css` at the source revision above.
 Source: https://github.com/backnotprop/plannotator/blob/435dac656cbdb9af07bab9ffbb20d791b520d172/packages/editor/index.css
 
+Repository and branch badges directly reuse `DocBadges` from `@plannotator/ui`
+0.47.0. The Copy file button in `web/DocumentHeader.tsx` follows its `Viewer.tsx`
+markup and styling, under the MIT license below.
+
 Inter and Geist Mono are served from Plannotator's Fontsource dependencies;
 the fonts use the SIL Open Font License 1.1 distributed with those packages.
 KaTeX and its fonts retain the licenses included in the KaTeX dependency.

@@ -1,9 +1,9 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, rm, open, rename } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseArgs } from 'node:util';
+import { parseArgs, promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { agentCall, appStatus, ownerDirectory, parseOwner, readRuntime, selectOwner, watchClaude } from './agent.ts';
 import { isObject, isOwner, ownerKey } from './store.ts';
@@ -11,6 +11,16 @@ import { startServer } from './server.ts';
 import { readAppVersion } from './version.ts';
 const cliPath = fileURLToPath(import.meta.url);
 const tsx = import.meta.resolve('tsx');
+// Capture the opening workspace, including linked worktrees and generated documents.
+export async function repositoryInfo(cwd = process.cwd()) {
+  const git = async (...args: string[]) => (await promisify(execFile)('git', args, { cwd, timeout: 2000 })).stdout.trim();
+  try {
+    const common = await git('rev-parse', '--path-format=absolute', '--git-common-dir');
+    const display = basename(common) === '.git' ? basename(dirname(common)) : basename(common).replace(/\.git$/, '');
+    const branch = await git('symbolic-ref', '--short', 'HEAD').catch(() => '');
+    return { display, ...(branch ? { branch } : {}) };
+  } catch { return undefined; }
+}
 async function stdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
@@ -147,7 +157,7 @@ async function main() {
     await ensureApp(key);
     let path = values.file ? resolve(values.file) : '';
     if (values.stdin) { path = join(ownerDirectory(key), `generated-${randomUUID()}.md`); await writeFile(path, await stdin(), { mode: 0o600, flag: 'wx' }); }
-    const document = await agentCall(key, '/agent/documents', { path, title: values.title, generated: Boolean(values.stdin) });
+    const document = await agentCall(key, '/agent/documents', { path, title: values.title, generated: Boolean(values.stdin), repoInfo: await repositoryInfo() });
     const runtime = await readRuntime(key), url = `${runtime.url}/?document=${document.id}`;
     output({ ownerKey: key, documentId: document.id, url });
     if (!values['no-browser']) await openBrowser(url);
