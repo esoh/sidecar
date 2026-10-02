@@ -14,6 +14,8 @@ import {
 } from './conversations.tsx';
 import { locateQuote, quoteRange, selectionText, excludedSelection } from './selection.ts';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
+import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
+import { ResizeHandle } from '@plannotator/ui/components/ResizeHandle';
 import { onCodeHighlightSwap } from '@plannotator/ui/utils/codeHighlight';
 
 type Content = { html: string; markdown: string; version: string };
@@ -52,6 +54,9 @@ function usePosition(
     update();
     const observer = new ResizeObserver(update);
     observer.observe(node);
+    // Sidebar resizing changes the passage position without resizing the window.
+    const canvas = document.querySelector('.canvas');
+    if (canvas) observer.observe(canvas);
     window.addEventListener('scroll', update, true);
     window.addEventListener('resize', update);
     window.visualViewport?.addEventListener('resize', update);
@@ -91,7 +96,17 @@ function App() {
   const current = state?.documents[documentId];
   const threads = Object.values(state?.threads ?? {}).filter((thread) => thread.documentId === documentId);
   const [activeThreadId, setActiveThreadId] = useState<string | null | undefined>(undefined);
-  const [isSidebarShown, setSidebarShown] = useState(false);
+  const [isSidebarShown, setSidebarShown] = useState(() => innerWidth > 850);
+  const panelResize = useResizablePanel({
+    storageKey: 'sidecar-panel-width',
+    defaultWidth: innerWidth >= 1500 ? 410 : 365,
+    onSnapClose: () => setSidebarShown(false),
+    onClick: () => setSidebarShown(false),
+    apply: (width) => document.documentElement.style.setProperty('--sidecar-panel-width', `${width}px`),
+  });
+  useLayoutEffect(() => {
+    document.documentElement.style.setProperty('--sidecar-panel-width', `${panelResize.width}px`);
+  }, [panelResize.width]);
   const openThread = useCallback(
     (id: string | null) => {
       setActiveThreadId(id);
@@ -434,6 +449,7 @@ function App() {
     const ids = [...new Set([painter.getIdByDom(mark), ...painter.getExtraIdByDom(mark)])].filter((id) =>
       threads.some((thread) => thread.id === id),
     );
+    if (ids.length) setSidebarShown(true);
     if (ids.length === 1) {
       clearSelection();
       openThread(ids[0]);
@@ -482,8 +498,15 @@ function App() {
           </select>
         )}
         <AgentStatus state={state} connected={connected} />
-        <button className="show-sidebar" aria-label="Show conversations" onClick={() => setSidebarShown(true)}>
-          <Icon name="chat" />
+        <button
+          className="sidebar-toggle"
+          aria-label={isSidebarShown ? 'Hide conversations' : 'Show conversations'}
+          title={isSidebarShown ? 'Hide conversations' : 'Show conversations'}
+          aria-expanded={isSidebarShown}
+          aria-controls="conversation-sidebar"
+          onClick={() => setSidebarShown((shown) => !shown)}
+        >
+          <Icon name="panel" />
         </button>
       </header>
       {error && (
@@ -491,7 +514,7 @@ function App() {
           {error}
         </p>
       )}
-      <div className="layout">
+      <div className={`layout${isSidebarShown ? '' : ' sidebar-collapsed'}`}>
         <main className="canvas">
           <div className="reading-width">
             {(documentError || !current) && (
@@ -530,6 +553,16 @@ function App() {
             </article>
           </div>
         </main>
+        {isSidebarShown && (
+          <ResizeHandle
+            {...panelResize.handleProps}
+            className="sidebar-resize"
+            side="right"
+            hideHoverTrack
+            tooltip="Drag to resize · Click to collapse"
+            onCollapse={() => setSidebarShown(false)}
+          />
+        )}
         <ConversationSidebar
           documentId={documentId}
           threads={threads}
@@ -546,7 +579,6 @@ function App() {
           stream={state?.stream ?? null}
           passageChanged={passageChanged}
           isShown={isSidebarShown}
-          onHide={() => setSidebarShown(false)}
           showPassage={(quote) => {
             const root = article.current,
               range = root && quoteRange(root, quote);
