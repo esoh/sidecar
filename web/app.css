@@ -400,43 +400,27 @@ body {
 .message:last-child {
   margin-bottom: 5px;
 }
-.message-byline {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 11px;
-  font-weight: 600;
-  margin-bottom: 8px;
-}
-.avatar {
-  width: 21px;
-  height: 21px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 5px;
-  background: var(--muted);
-  font-size: 10px;
-  color: var(--subtle);
-}
-.avatar.agent {
-  color: var(--primary);
-  background: oklch(0.75 0.18 280 / 0.12);
-}
 .message p {
   font-size: 12px;
   line-height: 1.8;
   white-space: pre-wrap;
   margin: 0;
 }
-.message.user {
+.message-status {
+  margin-top: 12px;
+  color: var(--subtle);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.message.user .message-bubble {
+  width: fit-content;
+  max-width: 90%;
+  margin-left: auto;
+  overflow-wrap: anywhere;
   background: oklch(0.26 0.02 260 / 0.6);
   border: 1px solid var(--line);
-  padding: 12px;
+  padding: 8px 10px;
   border-radius: 8px;
-}
-.message.user .message-byline {
-  margin-bottom: 6px;
 }
 .message time {
   margin-left: auto;

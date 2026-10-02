@@ -4,7 +4,7 @@ export type ViewerState = Omit<State, 'documents'> & {
   documents: Record<string, DocumentRecord & { title: string; version: string | null; error: string | null }>;
   activity: 'unknown' | 'busy' | 'idle' | 'waiting' | 'disconnected' | 'compacting';
   connectionError: string | null;
-  stream: { threadId: string; text: string; error: string | null } | null;
+  stream: { requestId: string; threadId: string; text: string; error: string | null } | null;
 };
 export const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 export async function api<T>(path: string, body?: unknown, method = body === undefined ? 'GET' : 'POST'): Promise<T> {
