@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Tooltip } from '@plannotator/ui/components/Tooltip';
 import type { Quote, RequestRecord, Thread } from '../src/store.ts';
 import { api, errorText, type ViewerState } from './api.ts';
+import { AgentSession } from './AgentSession.tsx';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
 
 const paths = {
@@ -365,7 +366,7 @@ export function AgentStatus({ state, connected }: { state: ViewerState | null; c
         </span>
       </Tooltip>
       <span>
-        {state ? (state.owner.agent === 'codex' ? 'Codex' : 'Claude') : 'Agent'}
+        {state ? <AgentSession owner={state.owner} /> : 'Agent'}
         <span className="sr-only"> · {label}</span>
         {queued ? ` · ${queued} queued` : ''}
       </span>

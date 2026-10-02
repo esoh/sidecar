@@ -10,6 +10,7 @@ import { observeCodex, readCodexActivity } from './codex-stream.ts';
 import { ReplyStream, isStreamEvent } from './stream.ts';
 import { readDocument } from './documents.ts';
 import { readAppVersion } from './version.ts';
+import { libraryDocument, listLibrary, recordDocumentOpen } from './library.ts';
 import { claim, createThread, discardEmptyThread, nameThread, DomainError, get, isObject, isQuote, openStore, ownerKey, registerDocument, reply, resolveThread, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput } from './store.ts';
 
 const rendererRequire = createRequire(import.meta.resolve('@plannotator/ui/components/BlockRenderer'));
@@ -226,7 +227,10 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         return;
       }
       if (method === 'GET' && path === '/api/image') {
-        const document = get(store.read().documents, target.searchParams.get('document') ?? '');
+        const key = target.searchParams.get('owner');
+        const document = key
+          ? await libraryDocument(dirname(directory), key, target.searchParams.get('document') ?? '')
+          : get(store.read().documents, target.searchParams.get('document') ?? '');
         const base = dirname(document.path);
         const imageUrl = new URL(target.searchParams.get('path') ?? '', pathToFileURL(document.path));
         if (imageUrl.protocol !== 'file:') throw new DomainError('Expected a local image', 400);
@@ -248,6 +252,23 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         return;
       }
       if (method === 'GET' && path === '/api/state') { json(response, snapshot()); return; }
+      if (method === 'GET' && path === '/api/library') { json(response, await listLibrary(dirname(directory))); return; }
+      const libraryRead = path.match(/^\/api\/library\/([^/]+)\/documents\/([^/]+)$/);
+      if (method === 'GET' && libraryRead) {
+        const document = await libraryDocument(dirname(directory), libraryRead[1], libraryRead[2]);
+        const content = await readDocument(document.path);
+        json(response, { ...content, title: document.userTitle ?? document.providedTitle ?? content.heading ?? basename(document.path) }); return;
+      }
+      const openedDocument = path.match(/^\/api\/documents\/([^/]+)\/opened$/);
+      if (method === 'POST' && openedDocument) {
+        const document = get(store.read().documents, openedDocument[1]);
+        await recordDocumentOpen(directory, document.id); json(response, { ok: true }); return;
+      }
+      const openedPreview = path.match(/^\/api\/library\/([^/]+)\/documents\/([^/]+)\/opened$/);
+      if (method === 'POST' && openedPreview) {
+        const document = await libraryDocument(dirname(directory), openedPreview[1], openedPreview[2]);
+        await recordDocumentOpen(join(dirname(directory), openedPreview[1]), document.id); json(response, { ok: true }); return;
+      }
       const original = path.match(/^\/api\/documents\/([^/]+)\/versions\/([a-f0-9]{64})$/);
       if ((method === 'GET' || method === 'HEAD') && original) {
         const document = get(store.read().documents, original[1]);

@@ -3,15 +3,17 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { ownerKey } from '../src/store.ts';
 import { startServer } from '../src/server.ts';
 
-export async function fixture(t: { after: (callback: () => Promise<void>) => void }, pollMs = 20) {
-  const directory = await mkdtemp(join(tmpdir(), 'sidecar-http-'));
+export async function fixture(t: { after: (callback: () => Promise<void>) => void }, pollMs = 20, root?: string) {
   const owner = { agent: 'claude' as const, sessionId: randomUUID() };
+  const directory = root ? join(root, ownerKey(owner)) : await mkdtemp(join(tmpdir(), 'sidecar-http-'));
   let server = await startServer({ owner, directory, pollMs });
   let cookie = '';
   const token = (await readFile(join(directory, 'agent-token'), 'utf8')).trim();
   async function login() {
+    if (root) await writeFile(join(directory, 'runtime.json'), JSON.stringify({ url: server.url, instanceId: server.instanceId, ownerKey: ownerKey(owner) }));
     const response = await fetch(server.url);
     const value = response.headers.get('set-cookie')?.split(';')[0];
     assert.ok(value);

@@ -84,6 +84,14 @@ Only one process writes an owner's state. Dead owner locks are recovered without
 
 Standalone HTML input, independent model sessions, and compaction cancellation are outside this version. The dated [acceptance record](docs/acceptance.md) covers both native agents and the remaining limits.
 
+## Browse all documents
+
+Ask Codex or Claude to “open Sidecar’s document library,” or run `sidecar browse` inside an agent’s native session environment. The explicit form is `sidecar browse --agent codex|claude --session NATIVE_UUID`; `--no-browser` prints its URL. No file path is needed. **Settings → View all documents** opens the same library in a new tab, preserving the current viewer and draft.
+
+The library groups saved documents across all local Codex and Claude sessions. Live entries open their original Sidecar viewer. Stopped sessions have a read-only Markdown preview, including local images; return to the original agent to resume questions and revisions. Browsing never creates a coding conversation, starts another agent, claims its requests, or reassigns documents. The library reads the existing state directory and does not create a second database. Use **Refresh** to update the list.
+
+Click the **Claude/Codex** label in a viewer or the library to see and copy its original session ID. Session IDs identify the owning conversation; an active Sidecar viewer does not by itself prove its agent is online.
+
 ## Passage comments
 
 Select text and click **Comment** or press **C** to open a floating composer beside the passage. The shortcut leaves typing and Ctrl/Cmd+C untouched. The highlight remains visible while you type. Clicking outside dismisses an empty composer; a composer with a draft stays open. **Send** (or Enter) starts a thread with the original agent; **Cancel** or Escape discards the unsent comment. Select another passage at any time to start a separate comment; reselecting a passage restores its draft while this page stays open. Failed sends preserve the draft for retry. Shift+Enter adds a new line. Textboxes grow with their contents and then scroll.
@@ -141,3 +149,5 @@ The header shows “Compacting” between matching start/completion signals. A r
 Schemas checked against the official [Codex hooks reference](https://learn.chatgpt.com/docs/hooks) and [Claude hooks reference](https://code.claude.com/docs/en/hooks).
 
 For browser checks, install the test browser once with `pnpm exec playwright install chromium`, then run `pnpm exec playwright test`.
+
+The document library shows last-opened times. Documents sort newest first, and agent groups sort by the latest open among their documents. Legacy entries show an unknown time until next opened.

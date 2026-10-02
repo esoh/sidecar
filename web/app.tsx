@@ -14,6 +14,7 @@ import {
 } from './conversations.tsx';
 import { locateQuote, quoteRange, selectionText, excludedSelection } from './selection.ts';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
+import { DocumentLibrary } from './DocumentLibrary.tsx';
 import { TextSettings } from './TextSettings.tsx';
 import { OriginalDocument } from './OriginalDocument.tsx';
 import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
@@ -96,6 +97,9 @@ function App() {
   const requestedDocument = new URL(location.href).searchParams.get('document');
   const documentId = requestedDocument ?? Object.keys(state?.documents ?? {})[0] ?? '';
   const current = state?.documents[documentId];
+  useEffect(() => {
+    if (current) void api(`/api/documents/${documentId}/opened`, {}).catch(reason => setError(errorText(reason)));
+  }, [documentId, !!current]);
   const threads = Object.values(state?.threads ?? {}).filter((thread) => thread.documentId === documentId);
   const [activeThreadId, setActiveThreadId] = useState<string | null | undefined>(undefined);
   const [originalThreadId, setOriginalThreadId] = useState<string | null>(null);
@@ -690,4 +694,4 @@ function App() {
   );
 }
 const root = document.getElementById('root');
-if (root) createRoot(root).render(<App />);
+if (root) createRoot(root).render(new URLSearchParams(location.search).has('library') ? <DocumentLibrary /> : <App />);

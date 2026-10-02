@@ -1,6 +1,9 @@
 import { test, expect, type Page } from '@playwright/test';
-import { writeFile, rename, unlink } from 'node:fs/promises';
+import { writeFile, rename, unlink, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
+import { createState, registerDocument, ownerKey } from '../src/store.ts';
 import { fixture } from './support.ts';
 let f: Awaited<ReturnType<typeof fixture>>;
 let cleanup: (() => Promise<void>)[];
@@ -1448,4 +1451,46 @@ test('unavailable browser draft storage preserves typing and does not block a su
   await page.reload();
   await expect(message).toHaveValue('');
   expect(Object.keys((await state()).requests)).toHaveLength(1);
+});
+
+
+test('Settings opens the all-agent library and session popovers copy original IDs', async ({ page, context }) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'sidecar-library-browser-')));
+  cleanup.push(() => rm(root, { recursive: true, force: true }));
+  f = await fixture({ after: fn => cleanup.unshift(fn) }, 20, root);
+  const doc = await f.register('current.md', '# Current document');
+  const old = createState({ agent: 'codex', sessionId: randomUUID() }), key = ownerKey(old.owner);
+  const directory = join(root, key); await mkdir(directory);
+  const path = join(directory, 'saved.md'); await writeFile(path, '# Saved document\n\nOld **content**.\n\n![local](image.svg)');
+  await writeFile(join(directory, 'image.svg'), '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>');
+  registerDocument(old, { path, generated: false });
+  await writeFile(join(directory, 'state.json'), JSON.stringify(old));
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByLabel('Message', { exact: true }).fill('Keep my draft');
+  await page.getByRole('button', { name: 'Claude session details', exact: true }).click();
+  await expect(page.getByText(f.owner.sessionId, { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Copy', exact: true }).click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(f.owner.sessionId);
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const [library] = await Promise.all([context.waitForEvent('page'), page.getByRole('link', { name: 'View all documents', exact: true }).click()]);
+  await expect(library.getByRole('heading', { name: 'Documents', exact: true })).toBeVisible();
+  await expect(library.getByRole('link', { name: /Current document/ })).toHaveAttribute('href', `${f.url}/?document=${doc.id}`);
+  await expect(library.getByRole('link', { name: /Current document/ }).locator('time')).toHaveCount(1);
+  await expect(library.getByRole('link', { name: /Saved document/ })).toContainText('Last opened —');
+  await library.getByRole('button', { name: 'Codex session details', exact: true }).click();
+  await expect(library.getByText(old.owner.sessionId, { exact: true })).toBeVisible();
+  await library.getByRole('button', { name: 'Copy', exact: true }).click();
+  expect(await library.evaluate(() => navigator.clipboard.readText())).toBe(old.owner.sessionId);
+  await library.keyboard.press('Escape');
+  await library.getByRole('link', { name: /Saved document/ }).click();
+  await expect(library.getByRole('article', { name: 'Document' })).toContainText('Old content.');
+  await expect(library.getByText(/Read-only preview/)).toBeVisible();
+  await expect(library.getByRole('textbox')).toHaveCount(0);
+  await expect.poll(() => library.getByAltText('local', { exact: true }).evaluate(img => img instanceof HTMLImageElement && img.complete && img.naturalWidth > 0)).toBe(true);
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep my draft');
+  await library.getByRole('link', { name: 'All documents', exact: true }).click();
+  await expect(library.locator('.library-session').first()).toHaveAttribute('aria-label', `codex ${old.owner.sessionId}`);
+  await expect(library.getByRole('link', { name: /Saved document/ }).locator('time')).toHaveCount(1);
 });

@@ -25,14 +25,14 @@ export function ownerDirectory(key: string): string {
   return join(process.env.SIDECAR_STATE_DIR ?? join(homedir(), '.local/state/sidecar'), ownerKey(parseOwner(key)));
 }
 export type Runtime = { url: string; instanceId: string; ownerKey: string };
-export async function readRuntime(key: string): Promise<Runtime> {
-  const value: unknown = JSON.parse(await readFile(join(ownerDirectory(key), 'runtime.json'), 'utf8'));
+export async function readRuntime(key: string, directory = ownerDirectory(key)): Promise<Runtime> {
+  const value: unknown = JSON.parse(await readFile(join(directory, 'runtime.json'), 'utf8'));
   if (!isObject(value) || value.ownerKey !== ownerKey(parseOwner(key)) || typeof value.url !== 'string' || typeof value.instanceId !== 'string' || !/^http:\/\/127\.0\.0\.1:\d+$/.test(value.url)) throw new Error('Invalid Sidecar runtime record');
   return { url: value.url, instanceId: value.instanceId, ownerKey: value.ownerKey };
 }
-export async function agentFetch(key: string, path: string, body?: unknown, signal?: AbortSignal): Promise<Response> {
-  const runtime = await readRuntime(key);
-  const token = (await readFile(join(ownerDirectory(key), 'agent-token'), 'utf8')).trim();
+export async function agentFetch(key: string, path: string, body?: unknown, signal?: AbortSignal, directory = ownerDirectory(key)): Promise<Response> {
+  const runtime = await readRuntime(key, directory);
+  const token = (await readFile(join(directory, 'agent-token'), 'utf8')).trim();
   return fetch(runtime.url + path, { method: body === undefined ? 'GET' : 'POST', headers: { 'X-Sidecar-Token': token, 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: signal ?? AbortSignal.timeout(5000), redirect: 'error' });
 }
 export async function agentCall(key: string, path: string, body?: unknown): Promise<any> {
@@ -41,10 +41,12 @@ export async function agentCall(key: string, path: string, body?: unknown): Prom
   if (!response.ok) throw new Error(result.error ?? `Sidecar HTTP ${response.status}`);
   return result;
 }
-export async function appStatus(key: string): Promise<any> {
+export async function appStatus(key: string, directory = ownerDirectory(key)): Promise<any> {
   try {
-    const runtime = await readRuntime(key);
-    const status = await agentCall(key, '/agent/status');
+    const runtime = await readRuntime(key, directory);
+    const response = await agentFetch(key, '/agent/status', undefined, undefined, directory);
+    if (!response.ok) throw new Error(`Sidecar HTTP ${response.status}`);
+    const status = await response.json();
     if (status.ownerKey !== key || status.instanceId !== runtime.instanceId) throw new Error('Runtime identity mismatch');
     return status;
   } catch (error) {

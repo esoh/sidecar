@@ -52,7 +52,7 @@ function isRequest(v: unknown): v is RequestRecord {
 function records<T extends {id: string}>(v: unknown, check: (v: unknown) => v is T): v is Record<string,T> {
   return isObject(v) && Object.entries(v).every(([key, item]) => check(item) && key === item.id && /^[0-9a-f-]{36}$/i.test(key));
 }
-function isState(v: unknown): v is State {
+export function isState(v: unknown): v is State {
   return isObject(v) && v.version === 1 && isOwner(v.owner) && records(v.documents, isDocument) && records(v.threads, isThread) && records(v.requests, isRequest);
 }
 export function get<T>(items: Record<string,T>, id: string): T {
