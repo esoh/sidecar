@@ -92,6 +92,13 @@ export function createThread(state: State, input: { id?: string; documentId: str
   state.threads[id] = thread;
   return thread;
 }
+export function discardEmptyThread(state: State, threadId: string): boolean {
+  if (!Object.hasOwn(state.threads, threadId)) return false;
+  const thread = state.threads[threadId];
+  if (thread.messages.length || Object.values(state.requests).some(request => request.threadId === threadId)) return false;
+  delete state.threads[threadId];
+  return true;
+}
 function ensureGeneralThread(state: State, documentId: string) {
   if (!Object.values(state.threads).some(thread => thread.documentId === documentId && thread.scope === 'document')) createThread(state, { documentId });
 }

@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Tooltip } from '@plannotator/ui/components/Tooltip';
 import type { Quote, RequestRecord, Thread } from '../src/store.ts';
 import { api, errorText, type ViewerState } from './api.ts';
+import { MarkdownDocument } from './MarkdownDocument.tsx';
 
 const paths = {
   back: 'M19 12H5m6-6-6 6 6 6',
@@ -15,6 +16,7 @@ const paths = {
   plus: 'M12 5v14M5 12h14',
   close: 'm6 6 12 12M6 18 18 6',
   logo: 'M4 4h16v16H4zM15 4v16',
+  settings: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z',
   panel: 'M14 3v18M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z',
 };
 export function Icon({ name }: { name: keyof typeof paths }) {
@@ -142,7 +144,7 @@ export function QuestionForm({
           placeholder="Ask a question or request a change…"
           required
           value={text}
-          readOnly={busy}
+          readOnly={busy || disabled}
           onChange={(event) => {
             setText(event.target.value);
             drafts.set(draftKey, { text: event.target.value, retry: retry.current });
@@ -337,7 +339,8 @@ export function ConversationSidebar({
 }) {
   const [filter, setFilter] = useState('unresolved'),
     [error, setError] = useState(''),
-    [creating, setCreating] = useState(false);
+    [creating, setCreating] = useState(false),
+    [isLeaving, setLeaving] = useState(false);
   const readKey = 'sidecar-read-reply:';
   const [readReplies, setReadReplies] = useState<Record<string, string>>(() => {
     try {
@@ -433,6 +436,28 @@ export function ConversationSidebar({
       setCreating(false);
     }
   }
+  async function leaveConversation() {
+    if (!active || isLeaving) return;
+    // Pending submissions retain their draft until accepted; don't discard them.
+    if (active.messages.length || drafts.current.get(active.id)?.text.trim()) {
+      onOpen(null);
+      return;
+    }
+    setLeaving(true);
+    try {
+      const result = await api<{ isDeleted: boolean }>(`/api/threads/${active.id}`, undefined, 'DELETE');
+      if (result.isDeleted) {
+        drafts.current.delete(active.id);
+        positions.current.delete(active.id);
+      }
+      setError('');
+      if (!previousId.current || previousId.current === active.id) onOpen(null);
+    } catch (reason) {
+      setError(errorText(reason));
+    } finally {
+      setLeaving(false);
+    }
+  }
   const problems = new Set(
     active
       ? requests
@@ -454,7 +479,10 @@ export function ConversationSidebar({
               className="back-button"
               aria-label="Threads"
               title="Back to threads"
-              onClick={() => onOpen(null)}
+              disabled={isLeaving}
+              onClick={() => {
+                void leaveConversation();
+              }}
             >
               <Icon name="back" />
             </button>
@@ -564,7 +592,11 @@ export function ConversationSidebar({
               return (
                 <div className={`message ${message.role}`} key={message.id}>
                   <div className="message-bubble">
-                    <p>{message.text}</p>
+                    <MarkdownDocument
+                      markdown={message.text}
+                      documentId={documentId}
+                      anchorPrefix={`message-${message.requestId}-${message.role}-`}
+                    />
                   </div>
                   {!hasStreamedReply && (status === 'queued' || status === 'claimed') && (
                     <div className="message-status" role="status">
@@ -576,7 +608,11 @@ export function ConversationSidebar({
             })}
             {text && (
               <div className="message agent">
-                <p>{text}</p>
+                <MarkdownDocument
+                  markdown={text}
+                  documentId={documentId}
+                  anchorPrefix={`message-${stream?.requestId}-agent-`}
+                />
               </div>
             )}
             {!!problems.size && (
@@ -598,6 +634,7 @@ export function ConversationSidebar({
             threadId={active.id}
             drafts={drafts.current}
             draftKey={active.id}
+            disabled={isLeaving}
             onSent={() => {
               if (previousId.current === active.id) {
                 atBottom.current = true;

@@ -180,7 +180,7 @@ test('a delayed title save preserves newer unsaved typing', async ({ page }) => 
 });
 
 
-test('partial replies update live without losing a follow-up draft or rendering HTML', async ({ page }) => {
+test('partial replies render Markdown live without losing a follow-up draft or executing HTML', async ({ page }) => {
   const doc = await f.register();
   await page.goto(`${f.url}/?document=${doc.id}`);
   await page.getByLabel('Message', { exact: true }).fill('Stream the answer');
@@ -192,9 +192,10 @@ test('partial replies update live without losing a follow-up draft or rendering 
   const markers = await (await f.agent('/agent/streams', route)).json();
   const emit = (index: number, delta: string, final = false) => f.agent('/agent/stream-events', { ownerKey: `claude-${f.owner.sessionId}`, messageId: 'message', turnId: 'turn', index, delta, final });
   await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
-  await emit(0, markers.prefix + 'First <img src=x onerror=alert(1)>');
+  await emit(0, markers.prefix + '**First** <img src=x onerror=alert(1)>');
   await expect(page.locator('#threads').getByText('First <img src=x onerror=alert(1)>', { exact: true })).toBeVisible();
   await expect(page.locator('#threads img')).toHaveCount(0);
+  await expect(page.locator('#threads .message.agent strong')).toHaveText('First');
   expect((await state()).requests[request.id].status).toBe('claimed');
   await page.getByRole('button', { name: 'Resolve thread', exact: true }).click();
   await expect(page.getByLabel('Thread status')).toHaveValue('unresolved');
@@ -213,6 +214,57 @@ test('partial replies update live without losing a follow-up draft or rendering 
   await expect(page.locator('#threads').getByText('First <img src=x onerror=alert(1)> second.', { exact: true })).toHaveCount(1);
   await expect(page.locator('#threads').getByText('Agent is responding.')).toHaveCount(0);
   expect((await state()).threads[request.threadId].isResolved).toBe(true);
+});
+
+
+test('conversation Markdown renders both roles, keeps heading links local and sanitizes HTML', async ({ page }) => {
+  const doc = await f.register('markdown.md', '# Shared heading\n\nDocument stays here.');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByLabel('Message', { exact: true }).fill('Please explain **bold** and `code`.');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(page.locator('.message.user strong')).toHaveText('bold');
+  await answer(`# Shared heading
+
+[Jump to reply heading](#shared-heading)
+
+A **bold answer** with \`inline code\`.
+
+- First item
+- Second item
+
+| Name | Result |
+| --- | --- |
+| Parser | Ready |
+
+\`\`\`typescript
+const answer = 42;
+\`\`\`
+
+<details><summary>Details</summary><p>Safe content.</p><img src="x" onerror="window.__sidecarReplyScriptRan=true"></details>
+
+<script>window.__sidecarReplyScriptRan=true</script>
+`);
+  const reply = page.locator('.message.agent');
+  await expect(page.locator('.message.user strong')).toHaveText('bold');
+  await expect(page.locator('.message.user code')).toHaveText('code');
+  await expect(reply.locator('strong')).toHaveText('bold answer');
+  await expect(reply.locator('code.language-typescript')).toContainText('const answer = 42;');
+  await expect(reply.locator('table')).toContainText('Parser');
+  await expect(reply).toContainText('Second item');
+  await expect(reply.locator('script, [onerror]')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).__sidecarReplyScriptRan)).toBeUndefined();
+  const id = await reply.getByRole('heading', { name: 'Shared heading' }).getAttribute('id');
+  expect(id).toBe(`message-${(await lastRequest()).id}-agent-shared-heading`);
+  await page.evaluate(() => {
+    (window as any).__lastScrollTarget = '';
+    Element.prototype.scrollIntoView = function () { (window as any).__lastScrollTarget = this.id; };
+  });
+  await reply.getByRole('link', { name: 'Jump to reply heading' }).click();
+  expect(await page.evaluate(() => (window as any).__lastScrollTarget)).toBe(id);
+  await expect(page.locator('#document h1')).toHaveAttribute('id', 'shared-heading');
+  await page.reload();
+  await expect(reply.locator('strong')).toHaveText('bold answer');
+  await expect(reply.locator('script, [onerror]')).toHaveCount(0);
 });
 
 // These catch losing the selected quote on focus, failed-send data loss, and broken thread navigation.
@@ -1131,4 +1183,89 @@ test('resolved annotations disappear, preserve overlapping open threads, and ret
   await expect(marks).toHaveText('world');
   await page.reload();
   await expect(marks).toHaveText('world');
+});
+
+test('text sizes adjust each pane independently and persist across sessions', async ({ page, context }) => {
+  const doc = await f.register('sizes.md', '# Reading sizes\n\nSelected text with `code`.');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document')).toContainText('Selected text');
+  await select(page, 'Selected text');
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('Explain **this**');
+  await page.getByRole('button', { name: 'Send comment', exact: true }).click();
+  await expect(page.getByLabel('Comment', { exact: true })).toHaveCount(0);
+  await answer('A **readable reply** with `code`.');
+  await expect(page.locator('.message.agent strong')).toBeVisible();
+  await page.evaluate(() => document.fonts.ready);
+  const headingHeight = (await page.locator('#document h1').boundingBox())!.height;
+  const replyHeight = (await page.locator('.message.agent strong').boundingBox())!.height;
+  const toolbarHeight = (await page.locator('.topbar').boundingBox())!.height;
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const documentSize = page.getByRole('slider', { name: 'Document text size' });
+  const conversationSize = page.getByRole('slider', { name: 'Conversation text size' });
+  await expect(documentSize).toHaveValue('100');
+  await documentSize.fill('150');
+  expect((await page.locator('#document h1').boundingBox())!.height / headingHeight).toBeCloseTo(1.5, 1);
+  expect((await page.locator('.message.agent strong').boundingBox())!.height).toBeCloseTo(replyHeight, 1);
+  await conversationSize.fill('125');
+  expect((await page.locator('.message.agent strong').boundingBox())!.height / replyHeight).toBeCloseTo(1.25, 1);
+  await expect(page.getByLabel('Message', { exact: true })).toHaveCSS('font-size', '15px');
+  expect((await page.locator('.topbar').boundingBox())!.height).toBe(toolbarHeight);
+  await conversationSize.press('Escape');
+  await expect(documentSize).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Settings', exact: true })).toBeFocused();
+  await page.locator('#document mark').first().click();
+  await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', (await lastRequest()).threadId);
+  await page.reload();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(documentSize).toHaveValue('150');
+  await expect(conversationSize).toHaveValue('125');
+  const second = await fixture({ after: fn => cleanup.push(fn) });
+  const secondDoc = await second.register();
+  await page.goto(`${second.url}/?document=${secondDoc.id}`);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(documentSize).toHaveValue('150');
+  await expect(conversationSize).toHaveValue('125');
+  await page.getByRole('button', { name: 'Reset text sizes' }).click();
+  await expect(documentSize).toHaveValue('100');
+  await expect(conversationSize).toHaveValue('100');
+  await context.addCookies([
+    { name: 'sidecar-document-text-size', value: '9999', url: second.url },
+    { name: 'sidecar-conversation-text-size', value: 'not-a-number', url: second.url },
+  ]);
+  await page.reload();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(documentSize).toHaveValue('100');
+  await expect(conversationSize).toHaveValue('100');
+});
+
+test('Back discards empty conversations but retains drafts and in-flight messages', async ({ page }) => {
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
+  const firstId = await page.locator('#threads').getAttribute('data-active-thread');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await expect(page.getByLabel('Thread status')).toBeVisible();
+  await expect.poll(async () => (await state()).threads[firstId!]).toBeUndefined();
+  await page.getByRole('button', { name: 'New conversation' }).click();
+  await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
+  const draftId = await page.locator('#threads').getAttribute('data-active-thread');
+  await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await page.locator(`[data-thread-id="${draftId}"]`).click();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/api/questions', async route => { await gate; await route.continue(); }, { times: 1 });
+  try {
+    await page.getByRole('button', { name: 'Send message', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled();
+    await page.getByRole('button', { name: 'Threads', exact: true }).click();
+    await expect(page.locator(`[data-thread-id="${draftId}"]`)).toBeVisible();
+    release();
+    await expect.poll(async () => (await state()).threads[draftId!].messages.length).toBe(1);
+    await page.reload();
+    await expect(page.locator(`[data-thread-id="${draftId}"]`)).toBeVisible();
+    expect((await state()).threads[firstId!]).toBeUndefined();
+  } finally { release(); }
 });

@@ -9,7 +9,7 @@ import { notifyCodex } from './agent.ts';
 import { observeCodex, readCodexActivity } from './codex-stream.ts';
 import { ReplyStream, isStreamEvent } from './stream.ts';
 import { readDocument } from './documents.ts';
-import { claim, createThread, nameThread, DomainError, get, isObject, isQuote, openStore, ownerKey, registerDocument, reply, resolveThread, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput } from './store.ts';
+import { claim, createThread, discardEmptyThread, nameThread, DomainError, get, isObject, isQuote, openStore, ownerKey, registerDocument, reply, resolveThread, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput } from './store.ts';
 
 const rendererRequire = createRequire(import.meta.resolve('@plannotator/ui/components/BlockRenderer'));
 const rendererFonts = {
@@ -292,6 +292,11 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         const input = { id: text(body, 'id'), documentId: text(body, 'documentId') };
         const thread = await store.update(state => createThread(state, input));
         changed(); json(response, thread); return;
+      }
+      const emptyThread = path.match(/^\/api\/threads\/([^/]+)$/);
+      if (method === 'DELETE' && emptyThread?.[1]) {
+        const isDeleted = await store.update(state => discardEmptyThread(state, emptyThread[1]));
+        changed(); json(response, { isDeleted }); return;
       }
       const threadTitle = path.match(/^\/agent\/threads\/([^/]+)\/title$/);
       if (method === 'POST' && threadTitle?.[1]) {

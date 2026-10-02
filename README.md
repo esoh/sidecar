@@ -96,13 +96,15 @@ The document sits beside a conversation sidebar. The top-right panel button hide
 
 Each document starts with an **Unnamed** general conversation. The original agent names a thread once its question/history has enough context, using `name-thread THREAD_ID --owner KEY --title "Short name"`. Vague openings stay unnamed until a later message. Names are stable once assigned. This instruction is shared by Codex and Claude; it does not create another model session.
 
-Your messages use compact right-aligned bubbles; agent replies use the full width without bubbles or author labels. A small Queued or Working… placeholder appears below a pending message in the response area and disappears when that request’s reply starts arriving, including streamed replies. Other unanswered messages keep their own status.
+Your messages use compact right-aligned bubbles; agent replies use the full width without bubbles or author labels. Both render rich Markdown using the document renderer, including replies while they stream. Heading links in a message stay within that message. A small Queued or Working… placeholder appears below a pending message in the response area and disappears when that request’s reply starts arriving, including streamed replies. Other unanswered messages keep their own status.
 
-Drafts and conversation scroll positions survive switching threads while the page stays open. Background replies do not change the selected conversation. The quote above an annotated conversation shows at most two lines; hover for the full quote or click to find its passage. Removed or ambiguous passages keep the quote and history, labeled **Passage changed**.
+Back discards a conversation with no messages or unsent draft. Threads with messages, drafts, or a submission in progress are kept. Drafts and conversation scroll positions survive switching threads while the page stays open. Background replies do not change the selected conversation. The quote above an annotated conversation shows at most two lines; hover for the full quote or click to find its passage. Removed or ambiguous passages keep the quote and history, labeled **Passage changed**.
 
 Click the pencil beside the document name to edit it inline. Enter or clicking away saves, Escape cancels. Failed saves preserve the draft. The browser title follows the saved name. Browser drafts are not persisted across a page reload.
 
 The browser UI uses React, `@plannotator/ui` (pinned to 0.47.0), and `@plannotator/web-highlighter`. Document components, typography, colors, and spacing come from Plannotator; its Inter, Geist Mono, and KaTeX fonts are served locally. The compact comment popover follows Plannotator’s styling. Attribution is in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The local server bundles the UI on page load with esbuild, so no separate frontend server or build command is required.
+
+The Settings gear beside the panel toggle has separate **Document** and **Conversation** text-size sliders (80–150%). Changes apply immediately; conversation sizing also adjusts the message composer. Reset restores both to 100%. Preferences are saved in this browser across new Sidecar sessions and ports.
 
 ## Rich Markdown
 
