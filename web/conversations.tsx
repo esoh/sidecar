@@ -733,6 +733,7 @@ export function ConversationSidebar({
             disabled={isLeaving}
             onSent={() => {
               if (previousId.current === active.id) {
+                setFilter('unresolved');
                 atBottom.current = true;
                 if (messages.current) messages.current.scrollTop = messages.current.scrollHeight;
               }

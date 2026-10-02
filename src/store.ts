@@ -128,6 +128,7 @@ export function submit(state: State, input: SubmitInput): RequestRecord {
   const request: RequestRecord = { id: randomUUID(), documentId: input.documentId, threadId: thread.id, text: input.text, clientMessageId: input.clientMessageId, submission: signature, status: 'queued', createdAt: Date.now() };
   if (thread.quote) request.quote = structuredClone(thread.quote);
   state.requests[request.id] = request;
+  thread.isResolved = false;
   thread.messages.push({ id: randomUUID(), role: 'user', text: input.text, requestId: request.id, createdAt: request.createdAt });
   return request;
 }
