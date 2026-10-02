@@ -97,5 +97,5 @@
 - Full Playwright suite: 52 tests passed. After attachment style refinement, six relevant browser cases passed again; final SVG sizing was inspected in Chrome.
 - Actual previous-release store code rejected v2 state and left its saved bytes unchanged.
 - A fresh whole-branch reviewer reported no findings. Chrome visual inspection confirmed Plannotator badges, rounded cards, per-message links and original-document viewing with the conversation visible.
-- Live Claude persisted interim and final messages around a scratch file edit. The original Codex conversation's native probe is accepted and queued; its actual reply remains the release gate. Do not fabricate a response from scratch metadata.
+- Live Claude and the original Codex conversation each persisted interim and final messages around an authorized scratch file edit. Codex request `1523b66a-4595-48d0-ad44-a4c1afe5ab83` completed with exactly two agent messages; only amber→cobalt changed. Its original queued event arrived after yielding; the same-request retry is a possible duplicate and must not rerun the edit.
 - User already authorized PR creation, merge after verification, local app/plugin upgrade, and coordination of wG:p74's upgrade. These release actions remain pending.
