@@ -639,7 +639,21 @@ test('one header status follows native activity across documents without repeati
   const status = page.getByRole('status', { name: 'Agent status', exact: true });
   const signal = (event: string) => f.agent('/agent/lifecycle', { ownerKey: `claude-${f.owner.sessionId}`, event });
   await expect(status).toHaveText('Claude · Unknown');
+  const dot = status.locator('.agent-dot');
+  const indicator = status.locator('.agent-indicator');
+  await indicator.hover();
+  await expect(page.getByText('Status: Unknown', { exact: true })).toBeVisible();
+  await expect(page.getByText('Status: Unknown', { exact: true })).toHaveText('Status: Unknown');
+  await page.mouse.move(0, 0);
+  await expect(page.getByText('Status: Unknown', { exact: true })).toBeHidden();
+  await indicator.focus();
+  await expect(page.getByText('Status: Unknown', { exact: true })).toBeVisible();
+  await indicator.press('Escape');
+  await expect(page.getByText('Status: Unknown', { exact: true })).toBeHidden();
+  await indicator.press('Tab');
+  await expect(dot).toHaveAttribute('data-activity', 'unknown');
   await signal('agent-busy'); await expect(status).toHaveText('Claude · Busy');
+  await expect(dot).toHaveAttribute('data-activity', 'busy');
   const message = page.getByLabel('Message', { exact: true });
   await message.fill('First question'); await message.press('Enter'); await expect(message).toHaveValue('');
   const first = await lastRequest();
@@ -649,6 +663,8 @@ test('one header status follows native activity across documents without repeati
   await f.agent(`/agent/requests/${first.id}/claim`, {});
   await expect(status).toHaveText('Claude · Busy · 1 queued');
   await signal('compaction-started'); await expect(status).toHaveText('Claude · Compacting · 1 queued');
+  await expect(dot).toHaveAttribute('data-activity', 'compacting');
+  await expect(dot).not.toHaveCSS('box-shadow', 'none');
   await signal('compaction-completed'); await expect(status).toHaveText('Claude · Busy · 1 queued');
   await page.getByLabel('Documents', { exact: true }).selectOption(other.id);
   await expect(status).toHaveText('Claude · Busy · 1 queued');
@@ -656,8 +672,11 @@ test('one header status follows native activity across documents without repeati
   await answer('Second answer');
   await expect(status).toHaveText('Claude · Busy');
   await signal('agent-idle'); await expect(status).toHaveText('Claude · Idle');
+  await expect(dot).toHaveAttribute('data-activity', 'idle');
   await signal('agent-waiting'); await expect(status).toHaveText('Claude · Waiting for input');
+  await expect(dot).toHaveAttribute('data-activity', 'waiting');
   await signal('agent-disconnected'); await expect(status).toHaveText('Claude · Disconnected');
+  await expect(dot).toHaveAttribute('data-activity', 'disconnected');
 });
 
 test('thread previews show unread dots and active-request spinners independently', async ({ page }) => {
@@ -900,4 +919,121 @@ test('renderer fonts, spacing, images and highlighted code survive reload and fi
   await select(page, 'Ready');
   await page.getByRole('button', { name: 'Comment', exact: true }).click();
   await expect(page.getByTestId('selection-preview')).toHaveText('Ready');
+});
+
+test('sidebar toggle preserves drafts and saved annotations reopen their conversation', async ({ page }) => {
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const sidebar = page.getByRole('complementary', { name: 'Conversations' });
+  await expect(sidebar).toBeVisible();
+  await expect(page.locator('#document')).toContainText('world');
+  await select(page, 'world');
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('What does this mean?');
+  await page.getByLabel('Comment', { exact: true }).press('Enter');
+  await expect(page.getByRole('log')).toContainText('What does this mean?');
+  const message = page.getByLabel('Message', { exact: true });
+  await message.fill('Keep my follow-up draft');
+  const before = await page.locator('.canvas').boundingBox();
+  await page.getByRole('button', { name: 'Hide conversations', exact: true }).click();
+  await expect(sidebar).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Show conversations', exact: true })).toHaveAttribute('aria-expanded', 'false');
+  expect((await page.locator('.canvas').boundingBox())!.width).toBeGreaterThan(before!.width);
+  await answer('Reply while the pane is hidden');
+  const request = await lastRequest();
+  expect(await page.evaluate(id => localStorage.getItem(`sidecar-read-reply:${id}`), request.threadId)).toBeNull();
+  await page.locator('#document mark').click();
+  await expect(sidebar).toBeVisible();
+  await expect(message).toHaveValue('Keep my follow-up draft');
+  await expect(page.getByRole('log')).toContainText('Reply while the pane is hidden');
+  await page.getByRole('button', { name: 'Hide conversations', exact: true }).click();
+  await page.getByRole('button', { name: 'Show conversations', exact: true }).click();
+  await expect(message).toHaveValue('Keep my follow-up draft');
+});
+
+test('Plannotator resize handle saves width and restores it after collapse', async ({ page }) => {
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const panel = page.getByRole('complementary', { name: 'Conversations' });
+  await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
+  await page.getByLabel('Message', { exact: true }).fill('Keep draft while resizing');
+  await select(page, 'world');
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('Keep the comment beside this passage');
+  const before = (await panel.boundingBox())!;
+  await page.mouse.move(before.x + 3, before.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(before.x - 117, before.y + 100, { steps: 12 });
+  await expect.poll(async () => (await panel.boundingBox())!.width).toBe(before.width + 120);
+  await page.mouse.up();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep draft while resizing');
+  await expect(page.getByLabel('Comment', { exact: true })).toHaveValue('Keep the comment beside this passage');
+  await expect.poll(async () => {
+    // Position follows the text range; the painted mark also has padding.
+    const quote = await page.locator('#document mark[data-pending]').evaluate(mark => {
+      const range = document.createRange();
+      range.selectNodeContents(mark);
+      return range.getBoundingClientRect().toJSON();
+    });
+    const popup = (await page.getByRole('dialog', { name: 'Comment on selection' }).boundingBox())!;
+    return Math.abs(popup.y - quote.y - quote.height - 8);
+  }).toBeLessThan(2);
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  const resized = (await panel.boundingBox())!;
+  await page.getByRole('button', { name: 'Hide conversations', exact: true }).click();
+  await page.getByRole('button', { name: 'Show conversations', exact: true }).click();
+  await expect.poll(async () => (await panel.boundingBox())!.width).toBe(resized.width);
+  await page.reload();
+  await expect.poll(async () => (await panel.boundingBox())!.width).toBe(resized.width);
+  const restored = (await panel.boundingBox())!;
+  await page.mouse.move(restored.x + 3, restored.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(restored.x + restored.width - 60, restored.y + 100, { steps: 15 });
+  await expect(panel).toBeHidden();
+  await page.mouse.up();
+  await page.getByRole('button', { name: 'Show conversations', exact: true }).click();
+  await expect.poll(async () => (await panel.boundingBox())!.width).toBe(restored.width);
+  await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).click();
+  await expect(panel).toBeHidden();
+  await page.getByRole('button', { name: 'Show conversations', exact: true }).click();
+  const reopened = (await panel.boundingBox())!;
+  await page.mouse.click(reopened.x + 3, reopened.y + 100);
+  await expect(panel).toBeHidden();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Show conversations', exact: true }).click();
+  await expect(page.locator('.sidebar-resize')).toBeHidden();
+  expect((await panel.boundingBox())!.width).toBeLessThanOrEqual(390);
+});
+
+
+test('hidden streaming replies preserve a reader’s scroll position', async ({ page }) => {
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const message = page.getByLabel('Message', { exact: true });
+  await message.fill('Long answer please'); await message.press('Enter');
+  await expect(message).toHaveValue('');
+  await answer('A detailed explanation.\n'.repeat(100));
+  const log = page.locator('.messages');
+  await expect(log).toContainText('A detailed explanation.');
+  await message.fill('Continue'); await message.press('Enter');
+  await expect(message).toHaveValue('');
+  const request = await lastRequest();
+  await f.agent(`/agent/requests/${request.id}/claim`, {});
+  const markers = await (await f.agent('/agent/streams', {
+    requestId: request.id, documentId: doc.id, threadId: request.threadId,
+  })).json();
+  const emit = (index: number, delta: string) => f.agent('/agent/stream-events', {
+    ownerKey: `claude-${f.owner.sessionId}`, messageId: 'message', turnId: 'turn', index, delta, final: false,
+  });
+  await log.evaluate(el => { el.scrollTop = 230; el.dispatchEvent(new Event('scroll')); });
+  const position = await log.evaluate(el => el.scrollTop);
+  expect(position).toBe(230);
+  await page.getByRole('button', { name: 'Hide conversations', exact: true }).click();
+  await emit(0, markers.prefix + 'First chunk');
+  await expect(log).toContainText('First chunk');
+  await page.getByRole('button', { name: 'Show conversations', exact: true }).click();
+  await expect.poll(() => log.evaluate(el => el.scrollTop)).toBe(position);
+  await emit(1, ' and second chunk');
+  await expect(log).toContainText('First chunk and second chunk');
+  await expect.poll(() => log.evaluate(el => el.scrollTop)).toBe(position);
 });

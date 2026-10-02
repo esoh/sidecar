@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Tooltip } from '@plannotator/ui/components/Tooltip';
 import type { Quote, RequestRecord, Thread } from '../src/store.ts';
 import { api, errorText, type ViewerState } from './api.ts';
 
@@ -14,6 +15,7 @@ const paths = {
   plus: 'M12 5v14M5 12h14',
   close: 'm6 6 12 12M6 18 18 6',
   logo: 'M4 4h16v16H4zM15 4v16',
+  panel: 'M14 3v18M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z',
 };
 export function Icon({ name }: { name: keyof typeof paths }) {
   return (
@@ -274,22 +276,23 @@ export function AgentStatus({ state, connected }: { state: ViewerState | null; c
   };
   const activity = state?.activity ?? 'unknown';
   const label = !connected ? 'Reconnecting…' : state?.connectionError ? 'Connection error' : labels[activity];
+  const indicator = !connected ? 'reconnecting' : state?.connectionError ? 'error' : activity;
   const queued = Object.values(state?.requests ?? {}).filter((request) => request.status === 'queued').length;
   return (
-    <span
-      className="agent-status"
-      role="status"
-      aria-label="Agent status"
-      title={
-        state?.connectionError ??
-        'Last reported activity of the original agent. Unknown when native status is unavailable.'
-      }
-    >
-      {connected && !state?.connectionError && (activity === 'busy' || activity === 'compacting') && (
-        <span className="status-spinner" aria-hidden="true" />
-      )}
+    <span className="agent-status" role="status" aria-label="Agent status">
+      <Tooltip
+        content={`Status: ${label}${state?.connectionError ? ` — ${state.connectionError}` : ''}`}
+        side="bottom"
+        align="end"
+        wide={!!state?.connectionError}
+      >
+        <span className="agent-indicator" tabIndex={0} aria-label={`Status: ${label}`}>
+          <span className="agent-dot" data-activity={indicator} aria-hidden="true" />
+        </span>
+      </Tooltip>
       <span>
-        {state ? (state.owner.agent === 'codex' ? 'Codex' : 'Claude') : 'Agent'} · {label}
+        {state ? (state.owner.agent === 'codex' ? 'Codex' : 'Claude') : 'Agent'}
+        <span className="sr-only"> · {label}</span>
         {queued ? ` · ${queued} queued` : ''}
       </span>
     </span>
@@ -320,7 +323,6 @@ export function ConversationSidebar({
   passageChanged,
   showPassage,
   isShown,
-  onHide,
 }: {
   documentId: string;
   threads: Thread[];
@@ -332,7 +334,6 @@ export function ConversationSidebar({
   passageChanged: (quote: Quote) => boolean;
   showPassage: (quote: Quote) => void;
   isShown: boolean;
-  onHide: () => void;
 }) {
   const [filter, setFilter] = useState('unresolved'),
     [error, setError] = useState(''),
@@ -401,6 +402,7 @@ export function ConversationSidebar({
     .sort((a, b) => activity(b) - activity(a));
   const text = active && stream?.threadId === active.id ? stream.text : '';
   useLayoutEffect(() => {
+    if (!isShown) return;
     const node = messages.current;
     if (active && node) {
       if (previousId.current !== active.id) {
@@ -410,7 +412,7 @@ export function ConversationSidebar({
       atBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 24;
     } else if (previousId.current) filterInput.current?.focus({ preventScroll: true });
     previousId.current = active?.id ?? null;
-  }, [active?.id, active?.messages.length, text]);
+  }, [active?.id, active?.messages.length, text, isShown]);
   async function newConversation() {
     if (createBusy.current || !documentId) return;
     createBusy.current = true;
@@ -441,7 +443,7 @@ export function ConversationSidebar({
       : [],
   );
   return (
-    <aside className={`sidebar${isShown ? '' : ' mobile-hidden'}`} aria-label="Conversations">
+    <aside className="sidebar" id="conversation-sidebar" hidden={!isShown} aria-label="Conversations">
       <div className="sidebar-header">
         {active ? (
           <div className="thread-header">
@@ -499,9 +501,6 @@ export function ConversationSidebar({
             </button>
           </div>
         )}
-        <button className="close-mobile" aria-label="Hide conversations" onClick={onHide}>
-          <Icon name="close" />
-        </button>
       </div>
       {error && (
         <p className="sidebar-error" role="alert">
