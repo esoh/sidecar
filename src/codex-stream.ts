@@ -6,11 +6,12 @@ import type { StreamEvent } from './stream.ts';
 
 const defaultSocketPath = () => join(process.env.CODEX_HOME ?? homedir() + '/.codex', 'app-server-control/app-server-control.sock');
 
-export async function observeCodex(threadId: string, onEvent: (event: StreamEvent) => void, onFailure: (message: string) => void, socketPath = defaultSocketPath()): Promise<() => void> {
+export async function observeCodex(threadId: string, onEvent: (event: StreamEvent) => void, onFailure: (message: string) => void, socketPath = defaultSocketPath(), prefix?: string): Promise<() => void> {
   const socket = new WebSocket(`ws+unix://${socketPath}:/`, { maxPayload: 2 * 1024 * 1024, handshakeTimeout: 5000 });
   let stopped = false, ready = false, nextId = 0;
   const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
-  let message: { id: string; turnId: string; index: number; text: string } | undefined;
+  let message: { id: string; turnId: string; index: number; text: string; ignored?: boolean } | undefined;
+  let replyTurnId: string | undefined;
   function stop() { stopped = true; socket.terminate(); for (const call of pending.values()) { clearTimeout(call.timer); call.reject(new Error('Codex observer closed')); } pending.clear(); }
   function failed() { if (!stopped) { if (ready) onFailure('Codex stream disconnected. Send a complete reply to recover.'); stop(); } }
   socket.on('error', failed); socket.on('close', failed);
@@ -28,15 +29,22 @@ export async function observeCodex(threadId: string, onEvent: (event: StreamEven
       if (!isObject(p) || p.threadId !== threadId || typeof p.turnId !== 'string') return;
       if (value.method === 'item/agentMessage/delta' && typeof p.itemId === 'string' && typeof p.delta === 'string') {
         if (!message || message.id !== p.itemId) message = { id: p.itemId, turnId: p.turnId, index: 0, text: '' };
+        if (message.ignored) return;
         message.text += p.delta;
+        if (prefix && !message.text.startsWith(prefix)) {
+          if (!prefix.startsWith(message.text)) { message.ignored = true; message.text = ''; }
+          return;
+        }
+        replyTurnId = p.turnId;
         if (message.text.length > 256 * 1024) { onFailure('Codex message exceeds the streaming limit.'); stop(); return; }
-        onEvent({ messageId: message.id, turnId: message.turnId, index: message.index++, delta: p.delta, final: false });
+        onEvent({ messageId: message.id, turnId: message.turnId, index: message.index, delta: message.index++ === 0 ? message.text : p.delta, final: false });
       } else if (value.method === 'item/completed' && isObject(p.item) && p.item.type === 'agentMessage' && typeof p.item.id === 'string' && typeof p.item.text === 'string') {
         if (message?.id !== p.item.id) return;
+        if (message.ignored || !message.index) { message = undefined; return; }
         if (message.text !== p.item.text) { onFailure('Codex stream was incomplete. Send a complete reply to recover.'); return; }
         onEvent({ messageId: message.id, turnId: message.turnId, index: message.index, delta: '', final: true });
         message = undefined;
-      } else if (value.method === 'turn/completed') onFailure('Agent turn ended before the reply was finalized.');
+      } else if (value.method === 'turn/completed' && replyTurnId === p.turnId) onFailure('Agent turn ended before the reply was finalized.');
     } catch { failed(); }
   });
   function request(method: string, params: unknown): Promise<unknown> {

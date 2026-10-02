@@ -53,9 +53,9 @@ export async function appStatus(key: string, directory = ownerDirectory(key)): P
     return { ownerKey: key, state: 'stopped', error: error instanceof Error ? error.message : 'Unavailable' };
   }
 }
-export async function notifyCodex(owner: Owner, requestId: string, signal?: AbortSignal): Promise<void> {
+export async function notifyCodex(owner: Owner, notification: Record<string, unknown>, signal?: AbortSignal): Promise<void> {
   if (owner.agent !== 'codex') throw new Error('Codex owner required');
-  const message = JSON.stringify({ type: 'sidecar.request', ownerKey: ownerKey(owner), requestId });
+  const message = JSON.stringify(notification);
   await exec('codex', ['queue', '--thread', owner.sessionId, '--message', message], { shell: false, timeout: 15000, signal, maxBuffer: 65536 });
 }
 export async function watchClaude(key: string, signal: AbortSignal): Promise<void> {
@@ -72,7 +72,12 @@ export async function watchClaude(key: string, signal: AbortSignal): Promise<voi
         let newline;
         while ((newline = buffer.indexOf('\n')) !== -1) {
           const line = buffer.slice(0, newline).trim(); buffer = buffer.slice(newline + 1);
-          if (line) process.stdout.write(line + '\n');
+          if (line) {
+            const event: unknown = JSON.parse(line);
+            if (!isObject(event) || event.type !== 'sidecar.request' || event.ownerKey !== key || typeof event.requestId !== 'string') throw new Error('Invalid Sidecar notification');
+            const prepared = await agentCall(key, `/agent/requests/${encodeURIComponent(event.requestId)}/prepare`, {});
+            if (!prepared.claimStatus || prepared.claimStatus === 'claimed') process.stdout.write(JSON.stringify(prepared) + '\n');
+          }
         }
       }
     } catch (error) {

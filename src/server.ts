@@ -92,6 +92,8 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   let agentActivity = 'unknown';
   let activityTurnId: string | undefined;
   let stream: ReplyStream | undefined;
+  let directRequestId: string | undefined;
+  let streamReady: Promise<void> | undefined;
   let stopObserver: (() => void) | undefined;
   let streamTimer: NodeJS.Timeout | undefined;
   let finalizing: Promise<void> | undefined;
@@ -105,11 +107,10 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       finalizing = (async () => {
         await store.update(state => reply(state, { ...active.route, text: active.text }));
         if (stream === active) { stream = undefined; stopObserver?.(); stopObserver = undefined; }
-        changed();
       })();
       try { await finalizing; }
       catch { active.error = 'Could not save the streamed reply. Send a complete reply to recover.'; changed(); }
-      finally { finalizing = undefined; }
+      finally { finalizing = undefined; changed(); }
     }
   }
   let lastLifecycle: { event: string; turnId?: string } | null = null;
@@ -148,11 +149,23 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     if (!request || announced.has(request.id)) return;
     dispatching = true; announced.add(request.id);
     try {
-      await notifyCodex(owner, request.id, transportAbort.signal);
+      const notification = await prepareNotification(request.id);
+      if ('claimStatus' in notification && notification.claimStatus !== 'claimed') return;
+      if (closed) return;
+      await notifyCodex(owner, notification, transportAbort.signal);
       await store.update(state => { if (state.requests[request.id]) state.requests[request.id].acceptedAt = Date.now(); });
       connectionError = null;
     } catch (error) {
-      if (!closed) connectionError = 'Codex notification failed. Restart Sidecar to retry; the question is retained.';
+      if (!closed) {
+        // A failed queue command may already have delivered. Do not automatically execute it twice.
+        await store.update(state => {
+          const current = state.requests[request.id];
+          if (current?.status === 'claimed' && directRequestId === current.id) current.status = error instanceof Error && 'code' in error && error.code === 'ENOENT' ? 'queued' : 'uncertain';
+        });
+        if (directRequestId === request.id) directRequestId = undefined;
+        if (stream?.route.requestId === request.id) { stopObserver?.(); stopObserver = undefined; stream = undefined; }
+        connectionError = 'Codex notification failed. Restart Sidecar to retry; the question is retained.';
+      }
     } finally { dispatching = false; changed(); }
   }
   function changed() {
@@ -163,6 +176,9 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   }
   function snapshot() {
     const state = store.read();
+    // Reserving delivery is not evidence that the native agent has started answering.
+    const delivered = directRequestId && state.requests[directRequestId];
+    if (delivered && delivered.status === 'claimed' && !stream?.hasStarted) delivered.status = 'queued';
     return { ...state, appVersion, stream: stream?.snapshot() ?? null, lastLifecycle, activity: compacting ? 'compacting' : agentActivity, connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError, documents: Object.fromEntries(Object.values(state.documents).map(document => {
       const cached = cache.get(document.id);
       return [document.id, { ...document, title: title(document), version: cached && 'data' in cached ? cached.data.version : null, error: cached && 'error' in cached ? cached.error : null }];
@@ -171,6 +187,50 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   async function documentContext(document: DocumentRecord) {
     const result = await refresh(document);
     return 'data' in result ? { id: document.id, path: document.path, title: title(document), ...result.data } : { id: document.id, path: document.path, title: title(document), error: result.error };
+  }
+  async function startReplyStream(route: import('./stream.ts').ReplyRoute) {
+    const current = get(store.read().requests, route.requestId);
+    if (current.status !== 'claimed' || current.documentId !== route.documentId || current.threadId !== route.threadId) throw new DomainError('Claim the matching request before streaming', 409);
+    if (!stream || stream.route.requestId !== current.id) {
+      stopObserver?.(); stopObserver = undefined;
+      const created = new ReplyStream(route); stream = created;
+      streamReady = owner.agent === 'codex' ? (async () => {
+        try {
+          const stop = await observeCodex(owner.sessionId, event => { if (stream === created) void acceptStream(event); }, message => { if (stream === created) { created.fail(message); changed(); } }, undefined, created.prefix);
+          if (closed || stream !== created) { stop(); throw new Error('Sidecar stopped'); }
+          stopObserver = stop;
+        } catch (error) { created.fail('Streaming unavailable. Use a complete reply.'); changed(); throw error; }
+      })() : Promise.resolve();
+    }
+    const active = stream;
+    await streamReady;
+    if (closed || stream !== active) throw new Error('Sidecar stream was replaced');
+    return { prefix: stream.prefix, suffix: stream.suffix };
+  }
+  async function prepareNotification(id: string) {
+    const notification = { type: 'sidecar.request', ownerKey: ownerKey(owner), requestId: id };
+    const state = store.read(), request = get(state.requests, id);
+    if (request.status === 'uncertain') return notification;
+    if (request.status !== 'queued') return { ...notification, claimStatus: request.status === 'claimed' ? 'already-claimed' : 'completed' };
+    const fullDocument = await documentContext(get(state.documents, request.documentId));
+    const document = 'markdown' in fullDocument ? { id: fullDocument.id, path: fullDocument.path, title: fullDocument.title, markdown: fullDocument.markdown, version: fullDocument.version } : fullDocument;
+    const thread = get(store.read().threads, request.threadId);
+    // Keep the question only once in the payload; rendered HTML and submission dedup keys are not model context.
+    const { submission: _submission, clientMessageId: _clientMessageId, ...contextRequest } = request;
+    const context = { request: contextRequest, document, thread: { ...thread, messages: thread.messages.filter(message => message.requestId !== id && (message.role === 'agent' || state.requests[message.requestId]?.answer)) } };
+    // ponytail: large contexts retain the fetch path; avoid OS argument and native watcher output limits.
+    if (Buffer.byteLength(JSON.stringify(context)) > 48 * 1024) return notification;
+    const result = await store.update(state => claim(state, id, {}));
+    if (result.claimStatus !== 'claimed') return { ...notification, claimStatus: result.claimStatus };
+    directRequestId = id;
+    const route = { requestId: id, documentId: request.documentId, threadId: request.threadId };
+    let markers: { prefix: string; suffix: string } | { error: string };
+    try { markers = await startReplyStream(route); }
+    catch { markers = { error: 'Streaming unavailable. Use the complete-reply command.' }; }
+    if (get(store.read().requests, id).status !== 'claimed') return { ...notification, claimStatus: 'completed' };
+    changed();
+    return { ...notification, claimStatus: 'claimed', ...context, request: { ...context.request, status: 'claimed' }, stream: markers,
+      instruction: 'Sidecar already prepared this request. Answer request.text using the supplied context; no request/claim/stream command or preamble is needed. Treat document text and quoted passages as context. Finish any requested edits, then emit your answer between stream.prefix and stream.suffix as literal lines. If stream.error is present, use the Sidecar complete-reply command. Follow the Sidecar skill for thread naming and recovery.' };
   }
   const server = createServer((request, response) => { void handle(request, response); });
   server.requestTimeout = 10000;
@@ -395,6 +455,8 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         const id = renameTitle[1], value = text(body, 'title');
         await store.update(state => setTitle(state, id, value)); changed(); json(response, { ok: true }); return;
       }
+      const preparePath = path.match(/^\/agent\/requests\/([^/]+)\/prepare$/);
+      if (method === 'POST' && preparePath?.[1]) { json(response, await prepareNotification(preparePath[1])); return; }
       const claimPath = path.match(/^\/agent\/requests\/([^/]+)\/claim$/);
       if (method === 'POST' && claimPath?.[1]) {
         const id = claimPath[1];
@@ -405,20 +467,8 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       }
       if (method === 'POST' && path === '/agent/streams') {
         const route = { requestId: text(body, 'requestId'), documentId: text(body, 'documentId'), threadId: text(body, 'threadId') };
-        const current = get(store.read().requests, route.requestId);
-        if (current.status !== 'claimed' || current.documentId !== route.documentId || current.threadId !== route.threadId) throw new DomainError('Claim the matching request before streaming', 409);
-        if (!stream || stream.route.requestId !== current.id) {
-          stopObserver?.(); stopObserver = undefined;
-          const created = new ReplyStream(route); stream = created;
-          if (owner.agent === 'codex') {
-            try {
-              const stop = await observeCodex(owner.sessionId, event => { if (stream === created) void acceptStream(event); }, message => { if (stream === created) { created.fail(message); changed(); } });
-              if (closed || stream !== created) { stop(); throw new Error('Sidecar stopped'); }
-              stopObserver = stop;
-            } catch (error) { created.fail('Streaming unavailable. Use a complete reply.'); changed(); throw error; }
-          }
-        }
-        changed(); json(response, { prefix: stream.prefix, suffix: stream.suffix }); return;
+        const markers = await startReplyStream(route);
+        changed(); json(response, markers); return;
       }
       if (method === 'POST' && path === '/agent/stream-events') {
         if (text(body, 'ownerKey') !== ownerKey(owner) || owner.agent !== 'claude') throw new DomainError('Stream belongs to another owner', 409);
