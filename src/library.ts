@@ -2,7 +2,7 @@ import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { appStatus, parseOwner, readRuntime } from './agent.ts';
 import { readDocument } from './documents.ts';
-import { DomainError, get, isState, ownerKey, type Owner } from './store.ts';
+import { DomainError, get, readSavedState, ownerKey, type Owner } from './store.ts';
 
 export type LibraryDocument = { id: string; title: string; path: string; updatedAt: number; lastOpenedAt: number | null; threadCount: number };
 export type LibrarySession = { owner: Owner; ownerKey: string; url: string | null; documents: LibraryDocument[] };
@@ -10,8 +10,8 @@ export type LibraryState = { sessions: LibrarySession[]; unavailable: number };
 
 export async function readLibrarySession(root: string, key: string) {
   const owner = parseOwner(key);
-  const state: unknown = JSON.parse(await readFile(join(root, ownerKey(owner), 'state.json'), 'utf8'));
-  if (!isState(state) || ownerKey(state.owner) !== ownerKey(owner)) throw new DomainError('Saved Sidecar session is unavailable', 404);
+  const state = readSavedState(JSON.parse(await readFile(join(root, ownerKey(owner), 'state.json'), 'utf8')));
+  if (ownerKey(state.owner) !== ownerKey(owner)) throw new DomainError('Saved Sidecar session is unavailable', 404);
   return state;
 }
 export async function libraryDocument(root: string, key: string, id: string) {

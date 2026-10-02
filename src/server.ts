@@ -222,7 +222,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     const thread = get(state.threads, request.threadId);
     const questions = thread.messages.filter(message => message.role === 'user');
     const previous = questions[questions.findIndex(message => message.requestId === id) - 1];
-    const quote = thread.quote && { exact: thread.quote.exact, ...(thread.quote.sentence ? { sentence: thread.quote.sentence } : {}) };
+    const quote = request.quote && { exact: request.quote.exact, ...(request.quote.sentence ? { sentence: request.quote.sentence } : {}) };
     const context = { documentId: request.documentId, thread: { id: thread.id, lastRequestId: previous?.requestId ?? null, ...(thread.title ? { title: thread.title } : {}) }, text: request.text, ...(quote ? { quote } : {}) };
     // ponytail: large contexts retain the fetch path; avoid OS argument and native watcher output limits.
     if (Buffer.byteLength(JSON.stringify(context)) > 48 * 1024) return notification;

@@ -122,3 +122,7 @@ Codex receives native `codex queue` notifications. The viewer shows Working afte
 `stop --owner KEY` ends that app and watcher, preserving documents and threads. Browser close alone does not stop it. Never stop the agent conversation.
 
 Codex activity is sampled read-only from its existing local daemon while a viewer is connected. Claude's native skill hooks report main-session activity, including ordinary terminal work, after this skill is invoked; subagent events are ignored. Unknown means no reliable activity signal is available. Claude user interrupts do not fire Stop; status corrects on the next native activity/idle notification. The repository's hook examples support explicit project configuration and Codex compaction; do not change user settings automatically. `hook --agent codex|claude` reads native JSON on stdin and forwards only to an already-running matching owner. Missing completion signals cannot prove cancellation. See README for scoped configuration.
+
+### Message selections
+
+A selection belongs to one user input, not the entire thread. Use the current request's optional quote only when relevant to its question. Earlier inputs may refer to different passages; read the thread on demand when its context is missing. An input without a quote does not inherit the preceding selection. Saved message quotes include their original document version for disambiguation and historical viewing.

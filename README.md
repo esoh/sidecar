@@ -161,3 +161,5 @@ Schemas checked against the official [Codex hooks reference](https://learn.chatg
 For browser checks, install the test browser once with `pnpm exec playwright install chromium`, then run `pnpm exec playwright test`.
 
 The Settings menu includes **Highlight intensity** (20–100%) to dim selection and saved-passage backgrounds independently of text brightness. The preference is saved across documents and app ports; Reset restores the original intensity.
+
+Selections are attached to individual user messages. A conversation can discuss several passages, with one optional selection per input. Saved state upgrades to version 2 on the owning app's next startup, retaining an exclusive `state.v1.backup.json` before publication. Browsing another owner's documents reads older state without modifying it. Older app versions reject version-2 state; restoring the backup is only a rollback to the pre-upgrade history.

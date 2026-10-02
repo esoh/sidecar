@@ -136,7 +136,7 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   assert.equal(JSON.stringify(selected).split(exact).length - 1, 1, 'include a complete selected sentence only once');
   await post('/agent/replies', { requestId: passage.id, documentId: doc.id, threadId: passage.threadId, text: 'That was the previous retry limit.' });
   const partialQuote = { ...quote, exact: 'three', start: 27, end: 32, sentence: exact };
-  const partial = await (await post('/api/questions', { documentId: doc.id, text: 'What does this mean?', quote: partialQuote, clientMessageId: 'partial' })).json();
+  const partial = await (await post('/api/questions', { documentId: doc.id, threadId: passage.threadId, text: 'What does this mean?', quote: partialQuote, clientMessageId: 'partial' })).json();
   const excerpt = await eventCount(5);
   assert.equal(excerpt.requestId, partial.id);
   assert.deepEqual(excerpt.quote, { exact: 'three', sentence: exact });
@@ -146,5 +146,13 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   assert.equal(full.document.markdown, revised);
   assert.equal(full.document.version, createHash('sha256').update(revised).digest('hex'));
   assert.deepEqual(full.request.quote, partialQuote, 'full original anchors remain available for disambiguation');
-  assert.equal(full.thread.id, partial.threadId);
+  assert.equal(full.thread.id, passage.threadId);
+  assert.deepEqual(full.thread.messages.filter((m: any) => m.role === 'user').map((m: any) => m.quote?.exact), [exact, 'three']);
+  await post('/agent/replies', { requestId: partial.id, documentId: doc.id, threadId: partial.threadId, text: 'It means the old limit.' });
+  const general = await (await post('/api/questions', { documentId: doc.id, threadId: passage.threadId, text: 'What else?', clientMessageId: 'general-followup' })).json();
+  const unselected = await eventCount(6);
+  assert.equal(unselected.requestId, general.id);
+  assert.equal(unselected.quote, undefined, 'an unselected follow-up must not inherit a previous message selection');
+  const latest = await state();
+  assert.deepEqual(latest.threads[passage.threadId].messages.filter((m: any) => m.role === 'user').map((m: any) => m.quote?.exact), [exact, 'three', undefined]);
 });
