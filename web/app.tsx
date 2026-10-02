@@ -15,6 +15,7 @@ import {
 import { locateQuote, quoteRange, selectionText, excludedSelection } from './selection.ts';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
 import { TextSettings } from './TextSettings.tsx';
+import { OriginalDocument } from './OriginalDocument.tsx';
 import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
 import { ResizeHandle } from '@plannotator/ui/components/ResizeHandle';
 import { onCodeHighlightSwap } from '@plannotator/ui/utils/codeHighlight';
@@ -97,6 +98,9 @@ function App() {
   const current = state?.documents[documentId];
   const threads = Object.values(state?.threads ?? {}).filter((thread) => thread.documentId === documentId);
   const [activeThreadId, setActiveThreadId] = useState<string | null | undefined>(undefined);
+  const [originalThreadId, setOriginalThreadId] = useState<string | null>(null);
+  const originalThread =
+    originalThreadId === activeThreadId ? threads.find((thread) => thread.id === originalThreadId) : undefined;
   const [isSidebarShown, setSidebarShown] = useState(() => innerWidth > 850);
   const panelResize = useResizablePanel({
     storageKey: 'sidecar-panel-width',
@@ -110,6 +114,7 @@ function App() {
   }, [panelResize.width]);
   const openThread = useCallback(
     (id: string | null) => {
+      setOriginalThreadId(null);
       setActiveThreadId(id);
       setSidebarShown(true);
       if (id) requestAnimationFrame(() => document.getElementById('conversation-back')?.focus({ preventScroll: true }));
@@ -282,6 +287,7 @@ function App() {
     for (const mark of painter.getDoms()) {
       const ids = [painter.getIdByDom(mark), ...painter.getExtraIdByDom(mark)];
       mark.toggleAttribute('data-pending', ids.includes('selection'));
+      mark.toggleAttribute('data-active', !!activeThreadId && ids.includes(activeThreadId));
       mark.removeAttribute('tabindex');
       mark.removeAttribute('role');
       mark.removeAttribute('title');
@@ -292,7 +298,7 @@ function App() {
         mark.title = 'Open passage thread';
       }
     }
-  }, [content.version, anchors, selection, documentError, highlightRevision, documentText]);
+  }, [content.version, anchors, selection, documentError, highlightRevision, documentText, activeThreadId]);
 
   useEffect(() => {
     const outside = (event: MouseEvent) => {
@@ -517,7 +523,16 @@ function App() {
       <div className={`layout${isSidebarShown ? '' : ' sidebar-collapsed'}`}>
         <main className="canvas">
           <div className="reading-width">
-            {(documentError || !current) && (
+            {originalThread?.quote && (
+              <OriginalDocument
+                key={originalThread.id}
+                documentId={documentId}
+                threadId={originalThread.id}
+                quote={originalThread.quote}
+                onReturn={() => setOriginalThreadId(null)}
+              />
+            )}
+            {!originalThread && (documentError || !current) && (
               <p data-testid="document-error" role="alert">
                 {documentError || 'Open a document from your agent.'}
               </p>
@@ -525,6 +540,7 @@ function App() {
             <article
               className="document-card w-full bg-card rounded-xl p-5 md:p-8 lg:p-10 xl:p-12 shadow-xl border border-border/50"
               id="document"
+              hidden={!!originalThread}
               ref={article}
               tabIndex={-1}
               aria-label="Document"
@@ -579,14 +595,30 @@ function App() {
           stream={state?.stream ?? null}
           passageChanged={passageChanged}
           isShown={isSidebarShown}
-          showPassage={(quote) => {
-            const root = article.current,
-              range = root && quoteRange(root, quote);
-            if (!range) return;
-            const node = range.startContainer.parentElement;
-            node?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          showOriginal={(threadId) => {
+            clearSelection();
+            window.getSelection()?.removeAllRanges();
+            setOriginalThreadId(threadId);
             if (innerWidth <= 850) setSidebarShown(false);
-            (node?.closest('mark') ?? root)?.focus({ preventScroll: true });
+          }}
+          showPassage={(quote) => {
+            setOriginalThreadId(null);
+            requestAnimationFrame(() => {
+              const root = article.current,
+                range = root && quoteRange(root, quote);
+              if (!range) return;
+              const node = range.startContainer.parentElement;
+              node?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+              if (innerWidth <= 850) setSidebarShown(false);
+              (node?.closest('mark') ?? root)?.focus({ preventScroll: true });
+              if (activeThreadId && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+                for (const mark of highlighter.current?.getDoms(activeThreadId) ?? [])
+                  mark.animate(
+                    [{ boxShadow: '0 0 0 5px oklch(0.75 0.18 280 / 0.6)' }, { boxShadow: '0 0 0 0 transparent' }],
+                    { duration: 700 },
+                  );
+              }
+            });
           }}
         />
       </div>

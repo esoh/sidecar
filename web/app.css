@@ -383,8 +383,11 @@ body {
   margin-left: auto;
   flex-shrink: 0;
 }
-.quote .changed {
-  display: block;
+.quote .passage-context {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
   margin-top: 7px;
   font-size: 10px;
 }
@@ -1076,7 +1079,7 @@ pre code.pn-code[data-keep-layout] {
   cursor: pointer;
 }
 /* Scale the renderer together, including code and math, without resizing app controls. */
-#document > .plannotator-content {
+.document-card > .plannotator-content {
   zoom: var(--sidecar-document-scale, 1);
 }
 .message .plannotator-content {
@@ -1084,4 +1087,46 @@ pre code.pn-code[data-keep-layout] {
 }
 .sidebar .composer textarea {
   font-size: calc(12px * var(--sidecar-conversation-scale, 1));
+}
+
+.annotation-highlight[data-active]:not([data-pending]) {
+  background: oklch(0.75 0.18 280 / 0.3);
+  border-bottom-color: var(--primary);
+  outline: 1px solid var(--primary);
+  outline-offset: 1px;
+}
+.quote .original-link {
+  width: auto;
+  padding: 0;
+  color: var(--primary);
+}
+.original-banner {
+  position: sticky;
+  top: -1px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--primary);
+  border-radius: 7px;
+  background: var(--card);
+  font-size: 12px;
+}
+.original-banner button {
+  font: inherit;
+  color: var(--primary);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  padding: 3px;
+}
+.original-banner button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+}
+.original-document .annotation-highlight {
+  cursor: text;
 }

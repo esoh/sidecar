@@ -1269,3 +1269,79 @@ test('Back discards empty conversations but retains drafts and in-flight message
     expect((await state()).threads[firstId!]).toBeUndefined();
   } finally { release(); }
 });
+
+test('changed passages open the saved document while preserving the conversation and latest source', async ({ page }) => {
+  const doc = await f.register('original.md', '# Original heading\n\nBefore the change.\n\n```typescript\nconst original = 1;\n```');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document')).toContainText('const original = 1;');
+  await select(page, 'const original = 1;');
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('Explain the original');
+  await page.getByRole('button', { name: 'Send comment', exact: true }).click();
+  await expect(page.getByLabel('Comment', { exact: true })).toHaveCount(0);
+  await page.getByLabel('Message', { exact: true }).fill('Keep my draft');
+  await writeFile(join(f.directory, 'original.md'), '# Revised heading\n\nA replacement.');
+  await expect(page.locator('#threads').getByText('Passage changed', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'View original document' }).click();
+  const original = page.getByRole('region', { name: 'Original document', exact: true });
+  await expect(original.getByRole('heading', { name: 'Original heading' })).toBeVisible();
+  await expect.poll(() => original.locator('mark[data-active]').allTextContents().then(parts => parts.join(''))).toBe('const original = 1;');
+  await expect(page.locator('#document')).toBeHidden();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep my draft');
+  await expect(original.getByRole('button', { name: 'Comment', exact: true })).toHaveCount(0);
+  await answer('The **original** sets the value to one.');
+  await expect(page.locator('.message.agent strong')).toHaveText('original');
+  await expect(original.getByRole('heading', { name: 'Original heading' })).toBeVisible();
+  await writeFile(join(f.directory, 'original.md'), '# Latest heading\n\nAnother replacement.');
+  await expect(page.locator('#document h1')).toHaveText('Latest heading');
+  await page.getByRole('button', { name: 'Return to current' }).click();
+  await expect(page.locator('#document h1')).toBeVisible();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep my draft');
+  await page.reload();
+  await page.getByRole('button', { name: 'View original document' }).click();
+  await expect(original.getByRole('heading', { name: 'Original heading' })).toBeVisible();
+  await page.getByRole('button', { name: 'Return to current' }).click();
+  const request = await lastRequest();
+  await unlink(join(f.directory, 'versions', doc.id, `${request.quote.version}.md`));
+  await page.getByRole('button', { name: 'View original document' }).click();
+  await expect(original.getByRole('alert')).toContainText('This version was not saved');
+  await page.getByRole('button', { name: 'Return to current' }).click();
+  await expect(page.locator('#document h1')).toHaveText('Latest heading');
+  // An older installation can have persisted threads with no archived Markdown.
+  await page.reload();
+  await expect(page.locator('#threads').getByText('Passage changed', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'View original document' })).toHaveCount(0);
+  await expect(page.getByRole('log')).toContainText('sets the value to one');
+  await expect(page.locator('#document h1')).toBeVisible();
+});
+
+test('the active thread has a distinct passage highlight, including overlapping annotations', async ({ page }) => {
+  const doc = await f.register('active.md', '# Highlight context\n\nAlpha bravo charlie delta.');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document')).toContainText('Alpha bravo');
+  async function annotate(text: string) {
+    await select(page, text);
+    await page.getByRole('button', { name: 'Comment', exact: true }).click();
+    await page.getByLabel('Comment', { exact: true }).fill(`Explain ${text}`);
+    await page.getByRole('button', { name: 'Send comment', exact: true }).click();
+    await expect(page.getByLabel('Comment', { exact: true })).toHaveCount(0);
+    return lastRequest();
+  }
+  const first = await annotate('Alpha bravo');
+  const second = await annotate('bravo charlie');
+  const activeText = () => page.locator('#document mark[data-active]').allTextContents().then(parts => parts.join(''));
+  await expect.poll(activeText).toBe('bravo charlie');
+  const activeColor = await page.locator('#document mark[data-active]').first().evaluate(node => getComputedStyle(node).backgroundColor);
+  const otherColor = await page.locator('#document mark:not([data-active])').first().evaluate(node => getComputedStyle(node).backgroundColor);
+  expect(activeColor).not.toBe(otherColor);
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await expect(page.locator('#document mark[data-active]')).toHaveCount(0);
+  await page.locator(`[data-thread-id="${first.threadId}"]`).click();
+  await expect.poll(activeText).toBe('Alpha bravo');
+  await page.getByRole('button', { name: 'Show passage: Alpha bravo', exact: true }).click();
+  await expect(page.locator('#document mark[data-active]').first()).toBeFocused();
+  await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', first.threadId);
+  await page.getByRole('button', { name: 'Resolve thread', exact: true }).click();
+  await page.locator(`[data-thread-id="${second.threadId}"]`).click();
+  await expect.poll(activeText).toBe('bravo charlie');
+});
