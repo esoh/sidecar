@@ -14,6 +14,7 @@ import {
 } from './conversations.tsx';
 import { locateQuote, quoteRange, selectionText, excludedSelection } from './selection.ts';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
+import { TextSettings } from './TextSettings.tsx';
 import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
 import { ResizeHandle } from '@plannotator/ui/components/ResizeHandle';
 import { onCodeHighlightSwap } from '@plannotator/ui/utils/codeHighlight';
@@ -496,6 +497,7 @@ function App() {
           </select>
         )}
         <AgentStatus state={state} connected={connected} />
+        <TextSettings />
         <button
           className="sidebar-toggle"
           aria-label={isSidebarShown ? 'Hide conversations' : 'Show conversations'}

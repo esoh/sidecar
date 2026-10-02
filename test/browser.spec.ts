@@ -1183,3 +1183,56 @@ test('resolved annotations disappear, preserve overlapping open threads, and ret
   await page.reload();
   await expect(marks).toHaveText('world');
 });
+
+test('text sizes adjust each pane independently and persist across sessions', async ({ page, context }) => {
+  const doc = await f.register('sizes.md', '# Reading sizes\n\nSelected text with `code`.');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document')).toContainText('Selected text');
+  await select(page, 'Selected text');
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('Explain **this**');
+  await page.getByRole('button', { name: 'Send comment', exact: true }).click();
+  await answer('A **readable reply** with `code`.');
+  await expect(page.locator('.message.agent strong')).toBeVisible();
+  await page.evaluate(() => document.fonts.ready);
+  const headingHeight = (await page.locator('#document h1').boundingBox())!.height;
+  const replyHeight = (await page.locator('.message.agent strong').boundingBox())!.height;
+  const toolbarHeight = (await page.locator('.topbar').boundingBox())!.height;
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const documentSize = page.getByRole('slider', { name: 'Document text size' });
+  const conversationSize = page.getByRole('slider', { name: 'Conversation text size' });
+  await expect(documentSize).toHaveValue('100');
+  await documentSize.fill('150');
+  expect((await page.locator('#document h1').boundingBox())!.height / headingHeight).toBeCloseTo(1.5, 1);
+  expect((await page.locator('.message.agent strong').boundingBox())!.height).toBeCloseTo(replyHeight, 1);
+  await conversationSize.fill('125');
+  expect((await page.locator('.message.agent strong').boundingBox())!.height / replyHeight).toBeCloseTo(1.25, 1);
+  await expect(page.getByLabel('Message', { exact: true })).toHaveCSS('font-size', '15px');
+  expect((await page.locator('.topbar').boundingBox())!.height).toBe(toolbarHeight);
+  await conversationSize.press('Escape');
+  await expect(documentSize).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Settings', exact: true })).toBeFocused();
+  await page.locator('#document mark').first().click();
+  await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', (await lastRequest()).threadId);
+  await page.reload();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(documentSize).toHaveValue('150');
+  await expect(conversationSize).toHaveValue('125');
+  const second = await fixture({ after: fn => cleanup.push(fn) });
+  const secondDoc = await second.register();
+  await page.goto(`${second.url}/?document=${secondDoc.id}`);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(documentSize).toHaveValue('150');
+  await expect(conversationSize).toHaveValue('125');
+  await page.getByRole('button', { name: 'Reset text sizes' }).click();
+  await expect(documentSize).toHaveValue('100');
+  await expect(conversationSize).toHaveValue('100');
+  await context.addCookies([
+    { name: 'sidecar-document-text-size', value: '9999', url: second.url },
+    { name: 'sidecar-conversation-text-size', value: 'not-a-number', url: second.url },
+  ]);
+  await page.reload();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(documentSize).toHaveValue('100');
+  await expect(conversationSize).toHaveValue('100');
+});
