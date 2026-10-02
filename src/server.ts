@@ -9,6 +9,7 @@ import { notifyCodex } from './agent.ts';
 import { observeCodex, readCodexActivity } from './codex-stream.ts';
 import { ReplyStream, isStreamEvent } from './stream.ts';
 import { readDocument } from './documents.ts';
+import { readAppVersion } from './version.ts';
 import { claim, createThread, discardEmptyThread, nameThread, DomainError, get, isObject, isQuote, openStore, ownerKey, registerDocument, reply, resolveThread, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput } from './store.ts';
 
 const rendererRequire = createRequire(import.meta.resolve('@plannotator/ui/components/BlockRenderer'));
@@ -62,6 +63,7 @@ function json(response: ServerResponse, value: unknown, status = 200): void {
   response.end(JSON.stringify(value));
 }
 export async function startServer({ owner, directory, port = 0, pollMs = 1000 }: ServerOptions) {
+  const appVersion = await readAppVersion();
   const store = await openStore(directory, owner);
   directory = await realpath(directory);
   const tokenPath = join(directory, 'agent-token');
@@ -158,7 +160,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   }
   function snapshot() {
     const state = store.read();
-    return { ...state, stream: stream?.snapshot() ?? null, lastLifecycle, activity: compacting ? 'compacting' : agentActivity, connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError, documents: Object.fromEntries(Object.values(state.documents).map(document => {
+    return { ...state, appVersion, stream: stream?.snapshot() ?? null, lastLifecycle, activity: compacting ? 'compacting' : agentActivity, connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError, documents: Object.fromEntries(Object.values(state.documents).map(document => {
       const cached = cache.get(document.id);
       return [document.id, { ...document, title: title(document), version: cached && 'data' in cached ? cached.data.version : null, error: cached && 'error' in cached ? cached.error : null }];
     })) };

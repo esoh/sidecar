@@ -1130,3 +1130,11 @@ pre code.pn-code[data-keep-layout] {
 .original-document .annotation-highlight {
   cursor: text;
 }
+
+.settings-version {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  color: var(--subtle);
+  font-size: 11px;
+}

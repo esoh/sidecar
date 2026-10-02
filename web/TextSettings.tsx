@@ -9,7 +9,7 @@ function readSize(target: string) {
   return Number.isInteger(value) && value >= 80 && value <= 150 && value % 5 === 0 ? value : 100;
 }
 
-export function TextSettings() {
+export function TextSettings({ version }: { version?: string }) {
   const [sizes, setSizes] = useState(() => ({ document: readSize('document'), conversation: readSize('conversation') }));
   useLayoutEffect(() => {
     for (const target of targets) {
@@ -51,6 +51,7 @@ export function TextSettings() {
             />
           </label>
         ))}
+        {version && <div className="settings-version">{version}</div>}
       </PopoverContent>
     </Popover>
   );

@@ -503,7 +503,7 @@ function App() {
           </select>
         )}
         <AgentStatus state={state} connected={connected} />
-        <TextSettings />
+        <TextSettings version={state?.appVersion} />
         <button
           className="sidebar-toggle"
           aria-label={isSidebarShown ? 'Hide conversations' : 'Show conversations'}
