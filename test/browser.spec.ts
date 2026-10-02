@@ -180,7 +180,7 @@ test('a delayed title save preserves newer unsaved typing', async ({ page }) => 
 });
 
 
-test('partial replies update live without losing a follow-up draft or rendering HTML', async ({ page }) => {
+test('partial replies render Markdown live without losing a follow-up draft or executing HTML', async ({ page }) => {
   const doc = await f.register();
   await page.goto(`${f.url}/?document=${doc.id}`);
   await page.getByLabel('Message', { exact: true }).fill('Stream the answer');
@@ -192,9 +192,10 @@ test('partial replies update live without losing a follow-up draft or rendering 
   const markers = await (await f.agent('/agent/streams', route)).json();
   const emit = (index: number, delta: string, final = false) => f.agent('/agent/stream-events', { ownerKey: `claude-${f.owner.sessionId}`, messageId: 'message', turnId: 'turn', index, delta, final });
   await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
-  await emit(0, markers.prefix + 'First <img src=x onerror=alert(1)>');
+  await emit(0, markers.prefix + '**First** <img src=x onerror=alert(1)>');
   await expect(page.locator('#threads').getByText('First <img src=x onerror=alert(1)>', { exact: true })).toBeVisible();
   await expect(page.locator('#threads img')).toHaveCount(0);
+  await expect(page.locator('#threads .message.agent strong')).toHaveText('First');
   expect((await state()).requests[request.id].status).toBe('claimed');
   await page.getByRole('button', { name: 'Resolve thread', exact: true }).click();
   await expect(page.getByLabel('Thread status')).toHaveValue('unresolved');
@@ -213,6 +214,56 @@ test('partial replies update live without losing a follow-up draft or rendering 
   await expect(page.locator('#threads').getByText('First <img src=x onerror=alert(1)> second.', { exact: true })).toHaveCount(1);
   await expect(page.locator('#threads').getByText('Agent is responding.')).toHaveCount(0);
   expect((await state()).threads[request.threadId].isResolved).toBe(true);
+});
+
+
+test('conversation Markdown renders both roles, keeps heading links local and sanitizes HTML', async ({ page }) => {
+  const doc = await f.register('markdown.md', '# Shared heading\n\nDocument stays here.');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByLabel('Message', { exact: true }).fill('Please explain **bold** and `code`.');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await answer(`# Shared heading
+
+[Jump to reply heading](#shared-heading)
+
+A **bold answer** with \`inline code\`.
+
+- First item
+- Second item
+
+| Name | Result |
+| --- | --- |
+| Parser | Ready |
+
+\`\`\`typescript
+const answer = 42;
+\`\`\`
+
+<details><summary>Details</summary><p>Safe content.</p><img src="x" onerror="window.__sidecarReplyScriptRan=true"></details>
+
+<script>window.__sidecarReplyScriptRan=true</script>
+`);
+  const reply = page.locator('.message.agent');
+  await expect(page.locator('.message.user strong')).toHaveText('bold');
+  await expect(page.locator('.message.user code')).toHaveText('code');
+  await expect(reply.locator('strong')).toHaveText('bold answer');
+  await expect(reply.locator('code.language-typescript')).toContainText('const answer = 42;');
+  await expect(reply.locator('table')).toContainText('Parser');
+  await expect(reply).toContainText('Second item');
+  await expect(reply.locator('script, [onerror]')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).__sidecarReplyScriptRan)).toBeUndefined();
+  const id = await reply.getByRole('heading', { name: 'Shared heading' }).getAttribute('id');
+  expect(id).toBe(`message-${(await lastRequest()).id}-agent-shared-heading`);
+  await page.evaluate(() => {
+    (window as any).__lastScrollTarget = '';
+    Element.prototype.scrollIntoView = function () { (window as any).__lastScrollTarget = this.id; };
+  });
+  await reply.getByRole('link', { name: 'Jump to reply heading' }).click();
+  expect(await page.evaluate(() => (window as any).__lastScrollTarget)).toBe(id);
+  await expect(page.locator('#document h1')).toHaveAttribute('id', 'shared-heading');
+  await page.reload();
+  await expect(reply.locator('strong')).toHaveText('bold answer');
+  await expect(reply.locator('script, [onerror]')).toHaveCount(0);
 });
 
 // These catch losing the selected quote on focus, failed-send data loss, and broken thread navigation.

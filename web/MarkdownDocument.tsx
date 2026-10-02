@@ -21,9 +21,11 @@ setImageSrcResolver((path, documentId) =>
 export const MarkdownDocument = memo(function MarkdownDocument({
   markdown,
   documentId,
+  anchorPrefix = '',
 }: {
   markdown: string;
   documentId: string;
+  anchorPrefix?: string;
 }) {
   const blocks = useMemo(
     () =>
@@ -51,7 +53,20 @@ export const MarkdownDocument = memo(function MarkdownDocument({
         block={block}
         orderedIndex={orderedIndex}
         imageBaseDir={documentId}
-        headingAnchorId={headings.get(block.id)}
+        headingAnchorId={headings.has(block.id) ? anchorPrefix + headings.get(block.id) : undefined}
+        onNavigateAnchor={
+          anchorPrefix
+            ? (hash) => {
+                try {
+                  document
+                    .getElementById(anchorPrefix + decodeURIComponent(hash.slice(1)))
+                    ?.scrollIntoView({ block: 'nearest' });
+                } catch {
+                  /* Ignore malformed anchor escapes. */
+                }
+              }
+            : undefined
+        }
         onImageClick={(src, alt) => setImage({ src, alt })}
       />
     );

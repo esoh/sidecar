@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Tooltip } from '@plannotator/ui/components/Tooltip';
 import type { Quote, RequestRecord, Thread } from '../src/store.ts';
 import { api, errorText, type ViewerState } from './api.ts';
+import { MarkdownDocument } from './MarkdownDocument.tsx';
 
 const paths = {
   back: 'M19 12H5m6-6-6 6 6 6',
@@ -564,7 +565,11 @@ export function ConversationSidebar({
               return (
                 <div className={`message ${message.role}`} key={message.id}>
                   <div className="message-bubble">
-                    <p>{message.text}</p>
+                    <MarkdownDocument
+                      markdown={message.text}
+                      documentId={documentId}
+                      anchorPrefix={`message-${message.requestId}-${message.role}-`}
+                    />
                   </div>
                   {!hasStreamedReply && (status === 'queued' || status === 'claimed') && (
                     <div className="message-status" role="status">
@@ -576,7 +581,11 @@ export function ConversationSidebar({
             })}
             {text && (
               <div className="message agent">
-                <p>{text}</p>
+                <MarkdownDocument
+                  markdown={text}
+                  documentId={documentId}
+                  anchorPrefix={`message-${stream?.requestId}-agent-`}
+                />
               </div>
             )}
             {!!problems.size && (

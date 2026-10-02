@@ -96,7 +96,7 @@ The document sits beside a conversation sidebar. The top-right panel button hide
 
 Each document starts with an **Unnamed** general conversation. The original agent names a thread once its question/history has enough context, using `name-thread THREAD_ID --owner KEY --title "Short name"`. Vague openings stay unnamed until a later message. Names are stable once assigned. This instruction is shared by Codex and Claude; it does not create another model session.
 
-Your messages use compact right-aligned bubbles; agent replies use the full width without bubbles or author labels. A small Queued or Working… placeholder appears below a pending message in the response area and disappears when that request’s reply starts arriving, including streamed replies. Other unanswered messages keep their own status.
+Your messages use compact right-aligned bubbles; agent replies use the full width without bubbles or author labels. Both render rich Markdown using the document renderer, including replies while they stream. Heading links in a message stay within that message. A small Queued or Working… placeholder appears below a pending message in the response area and disappears when that request’s reply starts arriving, including streamed replies. Other unanswered messages keep their own status.
 
 Drafts and conversation scroll positions survive switching threads while the page stays open. Background replies do not change the selected conversation. The quote above an annotated conversation shows at most two lines; hover for the full quote or click to find its passage. Removed or ambiguous passages keep the quote and history, labeled **Passage changed**.
 
