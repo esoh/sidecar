@@ -1,6 +1,7 @@
 import type { DocumentRecord, State } from '../src/store.ts';
 
 export type ViewerState = Omit<State, 'documents'> & {
+  appVersion: string;
   documents: Record<string, DocumentRecord & { title: string; version: string | null; error: string | null }>;
   activity: 'unknown' | 'busy' | 'idle' | 'waiting' | 'disconnected' | 'compacting';
   connectionError: string | null;

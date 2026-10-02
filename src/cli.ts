@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { agentCall, appStatus, ownerDirectory, parseOwner, readRuntime, selectOwner, watchClaude } from './agent.ts';
 import { isObject, isOwner, ownerKey } from './store.ts';
 import { startServer } from './server.ts';
+import { readAppVersion } from './version.ts';
 const cliPath = fileURLToPath(import.meta.url);
 const tsx = import.meta.resolve('tsx');
 async function stdin(): Promise<string> {
@@ -115,9 +116,7 @@ export async function forwardHook(agent: string | undefined, payload: unknown): 
 async function main() {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: { help: { type: 'boolean', short: 'h' }, version: { type: 'boolean' }, agent: { type: 'string' }, session: { type: 'string' }, owner: { type: 'string' }, file: { type: 'string' }, title: { type: 'string' }, document: { type: 'string' }, thread: { type: 'string' }, stdin: { type: 'boolean' }, resume: { type: 'boolean' }, error: { type: 'boolean' }, 'no-browser': { type: 'boolean' }, stream: { type: 'boolean' } } });
   if (values.version) {
-    const { version } = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
-    const revision = await readFile(new URL('../.sidecar-revision', import.meta.url), 'utf8').catch(() => '');
-    process.stdout.write(`Sidecar ${version}${revision ? ` (${revision.trim().slice(0, 12)})` : ''}\n`);
+    process.stdout.write(`${await readAppVersion()}\n`);
     return;
   }
   if (values.help || !positionals.length) {

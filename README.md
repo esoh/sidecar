@@ -106,7 +106,7 @@ Click the pencil beside the document name to edit it inline. Enter or clicking a
 
 The browser UI uses React, `@plannotator/ui` (pinned to 0.47.0), and `@plannotator/web-highlighter`. Document components, typography, colors, and spacing come from Plannotator; its Inter, Geist Mono, and KaTeX fonts are served locally. The compact comment popover follows Plannotator’s styling. Attribution is in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The local server bundles the UI on page load with esbuild, so no separate frontend server or build command is required.
 
-The Settings gear beside the panel toggle has separate **Document** and **Conversation** text-size sliders (80–150%). Changes apply immediately; conversation sizing also adjusts the message composer. Reset restores both to 100%. Preferences are saved in this browser across new Sidecar sessions and ports.
+The Settings gear beside the panel toggle has separate **Document** and **Conversation** text-size sliders (80–150%). Changes apply immediately; conversation sizing also adjusts the message composer. Reset restores both to 100%. Preferences are saved in this browser across new Sidecar sessions and ports. The Settings footer shows the running app’s version and, for installed builds, its Git revision (matching `sidecar --version` from that release).
 
 ## Rich Markdown
 

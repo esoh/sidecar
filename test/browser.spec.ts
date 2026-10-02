@@ -1201,6 +1201,7 @@ test('text sizes adjust each pane independently and persist across sessions', as
   const replyHeight = (await page.locator('.message.agent strong').boundingBox())!.height;
   const toolbarHeight = (await page.locator('.topbar').boundingBox())!.height;
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.locator('.settings-version')).toHaveText((await state()).appVersion);
   const documentSize = page.getByRole('slider', { name: 'Document text size' });
   const conversationSize = page.getByRole('slider', { name: 'Conversation text size' });
   await expect(documentSize).toHaveValue('100');
