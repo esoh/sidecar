@@ -1345,3 +1345,98 @@ test('the active thread has a distinct passage highlight, including overlapping 
   await page.locator(`[data-thread-id="${second.threadId}"]`).click();
   await expect.poll(activeText).toBe('bravo charlie');
 });
+
+test('thread drafts debounce browser writes and survive reloads, thread switches and reopened pages', async ({ page }) => {
+  await page.addInitScript(() => {
+    const setItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function(key, value) {
+      if (key.startsWith('sidecar-draft:')) document.documentElement.dataset.draftWrites = String(Number(document.documentElement.dataset.draftWrites ?? 0) + 1);
+      return setItem.call(this, key, value);
+    };
+  });
+  const doc = await f.register();
+  const url = `${f.url}/?document=${doc.id}`;
+  await page.goto(url);
+  const message = page.getByLabel('Message', { exact: true });
+  await expect(message).toBeVisible();
+  const first = await page.locator('#threads').getAttribute('data-active-thread');
+  const draft = 'An unsent question that should survive reloading.';
+  await message.pressSequentially(draft);
+  await expect.poll(() => page.evaluate(() => Number(document.documentElement.dataset.draftWrites ?? 0))).toBeGreaterThan(0);
+  expect(await page.evaluate(() => Number(document.documentElement.dataset.draftWrites))).toBeLessThan(draft.length / 2);
+  await page.reload();
+  await expect(message).toHaveValue(draft);
+  await message.fill('Latest characters before reload');
+  await page.reload();
+  await expect(message).toHaveValue('Latest characters before reload');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await expect(page.locator(`[data-thread-id="${first}"]`)).toBeVisible();
+  await page.getByRole('button', { name: 'New conversation' }).click();
+  await message.fill('A different thread draft');
+  const second = await page.locator('#threads').getAttribute('data-active-thread');
+  await page.goto('about:blank');
+  await page.goto(url);
+  await expect(message).toHaveValue('A different thread draft');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await page.locator(`[data-thread-id="${first}"]`).click();
+  await expect(message).toHaveValue('Latest characters before reload');
+  await message.fill('');
+  await page.reload();
+  await expect(message).toHaveValue('');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await expect.poll(async () => (await state()).threads[first!]).toBeUndefined();
+  await page.locator(`[data-thread-id="${second}"]`).click();
+  await expect(message).toHaveValue('A different thread draft');
+  expect(Object.keys((await state()).requests)).toHaveLength(0);
+});
+
+test('saved drafts retain retry IDs after a lost response and clear only after success', async ({ page }) => {
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const message = page.getByLabel('Message', { exact: true });
+  await message.fill('Send this exactly once');
+  await page.route('**/api/questions', async route => {
+    await route.fetch();
+    await route.fulfill({ status: 503, json: { error: 'Response lost' } });
+  }, { times: 1 });
+  await message.press('Enter');
+  await expect(page.getByRole('alert')).toHaveText('Response lost');
+  const original = await lastRequest();
+  await page.reload();
+  await expect(message).toHaveValue('Send this exactly once');
+  await message.press('Enter');
+  await expect(message).toHaveValue('');
+  expect(Object.keys((await state()).requests)).toEqual([original.id]);
+  await page.reload();
+  await expect(message).toHaveValue('');
+  await select(page, 'Hello world.');
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('A passage question');
+  await page.getByRole('button', { name: 'Send comment', exact: true }).click();
+  await expect(page.getByLabel('Comment', { exact: true })).toHaveCount(0);
+  await message.fill('Unsent annotated-thread follow-up');
+  await page.reload();
+  await expect(message).toHaveValue('Unsent annotated-thread follow-up');
+});
+
+test('unavailable browser draft storage preserves typing and does not block a successful send', async ({ page }) => {
+  await page.addInitScript(() => {
+    const setItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function(key, value) {
+      if (key.startsWith('sidecar-draft:')) throw new DOMException('Storage full', 'QuotaExceededError');
+      return setItem.call(this, key, value);
+    };
+  });
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const message = page.getByLabel('Message', { exact: true });
+  await message.fill('My question is still usable');
+  await expect(page.getByRole('alert')).toHaveText('Draft could not be saved in this browser. Keep this tab open.');
+  await expect(message).toHaveValue('My question is still usable');
+  await message.press('Enter');
+  await expect(message).toHaveValue('');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await page.reload();
+  await expect(message).toHaveValue('');
+  expect(Object.keys((await state()).requests)).toHaveLength(1);
+});
