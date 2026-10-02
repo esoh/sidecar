@@ -177,7 +177,8 @@ for (const agent of ['claude', 'codex'] as const) test(`large-context fallback r
   const duplicate = await run();
   assert.equal(duplicate.claimStatus, 'already-claimed');
   assert.equal(duplicate.thread.title, 'Understanding the context');
-  assert.equal(duplicate.stream, undefined);
+  if (agent === 'claude') assert.deepEqual(duplicate.stream, claimed.stream);
+  else assert.ok(duplicate.stream.error);
   const route = { requestId: request.id, documentId: doc.id, threadId: request.threadId };
   if (agent === 'claude') await post('/agent/stream-events', { ownerKey: key, messageId: 'answer', turnId: 'turn', index: 0, delta: claimed.stream.prefix + 'Answer' + claimed.stream.suffix, final: true });
   else await post('/agent/replies', { ...route, text: 'Answer' });

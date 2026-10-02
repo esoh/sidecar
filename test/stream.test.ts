@@ -102,3 +102,16 @@ test('progress updates stream and persist once without completing or blocking th
   await f.reopen();
   assert.deepEqual((await snapshot()).threads[request.threadId].messages, state.threads[request.threadId].messages);
 });
+
+test('a truncated native event can recover the existing markers without resetting progress', async t => {
+  const { f, request, markers, emit, snapshot } = await setup(t);
+  await emit(0, markers.progress.prefix + 'Checking the file.' + markers.progress.suffix, true, 'progress');
+  const recovered = await (await f.agent(`/agent/requests/${request.id}/claim`, {})).json();
+  assert.equal(recovered.claimStatus, 'already-claimed');
+  assert.deepEqual(recovered.stream, markers);
+  assert.equal((await snapshot()).threads[request.threadId].messages.at(-1).text, 'Checking the file.');
+  await emit(0, recovered.stream.prefix + 'Done.' + recovered.stream.suffix, true, 'final');
+  assert.equal((await snapshot()).requests[request.id].status, 'completed');
+  const completed = await (await f.agent(`/agent/requests/${request.id}/claim`, {})).json();
+  assert.equal(completed.stream, undefined, 'completed requests must not offer a new reply stream');
+});

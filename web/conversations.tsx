@@ -11,6 +11,7 @@ import type { QuestionDraft, QuestionDrafts } from './useQuestionDrafts.ts';
 
 const paths = {
   chevron: 'm6 9 6 6 6-6',
+  arrowUpRight: 'M7 17 17 7M7 7h10v10',
   back: 'M19 12H5m6-6-6 6 6 6',
   send: 'M12 19V5m-6 6 6-6 6 6',
   pencil: 'm16 3 5 5L8 21H3v-5L16 3ZM14 5l5 5',
@@ -151,8 +152,8 @@ export function QuestionForm({
       )}
       {!floating && quote && (
         <div className="draft-selection">
-          <span className="selection-badge"><Icon name="annotation" />Selection</span>
-          <span className="quote-excerpt" title={quote.exact}>{quote.exact}</span>
+          <span className="selection-badge text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary">selection</span>
+          <span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={quote.exact}>{quote.exact}</span>
           <button type="button" className="cancel-button" aria-label="Remove selection" onClick={onRemoveSelection}><Icon name="close" /></button>
         </div>
       )}
@@ -708,6 +709,7 @@ export function ConversationSidebar({
   );
 }
 
+// Selection badge and excerpt adapted from Plannotator DocumentQAPair (MIT).
 function MessageSelection({ documentId, message, quote, isChanged, showPassage, showOriginal }: {
   documentId: string; message: Message; quote: Quote; isChanged: boolean; showPassage: () => void; showOriginal: () => void;
 }) {
@@ -719,9 +721,9 @@ function MessageSelection({ documentId, message, quote, isChanged, showPassage, 
     return () => { stopped = true; };
   }, [path]);
   return <div className="message-selection quote" data-selection-message={message.id}>
-    <span className="selection-badge"><Icon name="annotation" />Selection</span>
-    {isChanged ? <span className="quote-excerpt" title={quote.exact}>{quote.exact}</span> :
-      <button aria-label={`Show passage: ${quote.exact}`} onClick={showPassage}><span className="quote-excerpt" title={quote.exact}>{quote.exact}</span><span aria-hidden="true">↗</span></button>}
-    {isChanged && <div className="passage-context"><span className="changed">Passage changed</span>{path && available === path && <button className="original-link" onClick={showOriginal}>View original document <span aria-hidden="true">↗</span></button>}</div>}
+    <span className="selection-badge text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary">selection</span>
+    {isChanged ? <span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={quote.exact}>{quote.exact}</span> :
+      <button aria-label={`Show passage: ${quote.exact}`} onClick={showPassage}><span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={quote.exact}>{quote.exact}</span><span className="passage-arrow"><Icon name="arrowUpRight" /></span></button>}
+    {isChanged && <div className="passage-context"><span className="changed">Passage changed</span>{path && available === path && <button className="original-link" onClick={showOriginal}>View original document <span className="passage-arrow"><Icon name="arrowUpRight" /></span></button>}</div>}
   </div>;
 }

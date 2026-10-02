@@ -235,7 +235,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     catch { markers = { error: 'Streaming unavailable. Use the complete-reply command.' }; }
     if (get(store.read().requests, id).status !== 'claimed') return { ...notification, claimStatus: 'completed' };
     changed();
-    return { ...notification, ...context, stream: markers,
+    return { ...notification, stream: markers, ...context,
       instruction: 'Follow the Sidecar skill.' };
   }
   const server = createServer((request, response) => { void handle(request, response); });
@@ -486,7 +486,11 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         const result = await store.update(state => claim(state, id, { resume: body.resume === undefined ? false : boolean(body, 'resume') }));
         const state = store.read();
         const document = await documentContext(get(state.documents, result.request.documentId));
-        changed(); json(response, { ...result, document, thread: get(state.threads, result.request.threadId) }); return;
+        // Recover a prepared event truncated by a native monitor; never replace its stream.
+        const markers = result.claimStatus === 'already-claimed' && stream?.route.requestId === id
+          ? stream.error ? { error: stream.error } : { prefix: stream.prefix, suffix: stream.suffix, progress: stream.progress }
+          : undefined;
+        changed(); json(response, { ...result, ...(markers ? { stream: markers } : {}), document, thread: get(state.threads, result.request.threadId) }); return;
       }
       if (method === 'POST' && path === '/agent/streams') {
         const route = { requestId: text(body, 'requestId'), documentId: text(body, 'documentId'), threadId: text(body, 'threadId') };

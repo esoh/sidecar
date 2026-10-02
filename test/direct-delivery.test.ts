@@ -120,6 +120,7 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   assert.equal(third.thread.lastRequestId, next.id, 'use the preceding request, never a later queued request');
   const history = await (await post(`/agent/requests/${later.id}/claim`, {})).json();
   assert.equal(history.claimStatus, 'already-claimed');
+  assert.deepEqual(history.stream, third.stream, 'context recovery retains the same progress and final markers');
   assert.equal(history.thread.messages.filter((m: any) => m.role === 'agent').length, 3);
   await post('/agent/replies', { requestId: later.id, documentId: doc.id, threadId: req.threadId, text: 'Then it stops retrying.' });
   const exact = 'The widget retries three times.';

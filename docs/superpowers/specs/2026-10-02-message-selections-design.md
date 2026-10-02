@@ -1,6 +1,6 @@
 # Selections belong to messages
 
-Proposed on 2026-10-02, after Sidecar PR 17 (`fba8bf5`) was merged and installed. This design covers the next feature; it has not been implemented.
+Proposed on 2026-10-02, after Sidecar PR 17 (`fba8bf5`) was merged and installed. As built on 2026-10-02 in the combined progress-updates branch: the behavior below is implemented. Native compatibility and release checks are recorded in the implementation plan.
 
 ## Agreed behavior
 
@@ -59,3 +59,11 @@ Verify migration preserves legacy first-message anchors, snapshot references, ac
 Exercise both native delivery adapters with selected follow-ups and unselected follow-ups. Browser checks must cover automatic attachment, replacement/removal, clicking away clearing both the highlight and pending attachment while preserving typed text, composer interaction retaining the attachment, normal Comment creating a new thread, draft and retry preservation, two different passages in one thread, overlapping highlights, navigation to the exact message, per-message changed-passage history, missing snapshots, resolve/reopen, and search across selections. Verify the UI in Chrome against the open Plannotator reference.
 
 This feature does not add multiple selections to one message, HTML input support, a new agent transport, per-thread agents, snapshot pruning, or changes to the already merged brightness/header controls.
+
+## As built notes — 2026-10-02
+
+The selection badge markup and excerpt typography are copied from Plannotator's `DocumentQAPair`; the user requested a subtle rounded attachment background and a consistently sized SVG link arrow during visual review. Excerpts retain Sidecar's two-line limit.
+
+Backend and browser changes were committed as two coupled chunks because removing thread-level selection ownership changes all consumers. There is no temporary dual-ownership API. The shared draft hook preserves existing text-only drafts and the 100 ms debounce.
+
+The combined branch also records marked interim replies as ordinary agent messages, shows Working on successful native handoff, and adds highlight intensity. A live Claude check exposed monitor truncation; the existing request command now returns the existing active stream markers for recovery without restarting progress. Ordinary duplicate notifications still do not authorize replay.

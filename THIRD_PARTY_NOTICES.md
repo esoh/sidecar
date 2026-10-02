@@ -39,6 +39,11 @@ Repository and branch badges directly reuse `DocBadges` from `@plannotator/ui`
 0.47.0. The Copy file button in `web/DocumentHeader.tsx` follows its `Viewer.tsx`
 markup and styling, under the MIT license below.
 
+Selection badge markup and excerpt typography in `web/conversations.tsx` are
+adapted from `DocumentQAPair` in `@plannotator/ui` 0.47.0
+`components/ai/DocumentAIChatPanel.tsx`, with Sidecar's two-line excerpt limit
+and requested rounded attachment background.
+
 Inter and Geist Mono are served from Plannotator's Fontsource dependencies;
 the fonts use the SIL Open Font License 1.1 distributed with those packages.
 KaTeX and its fonts retain the licenses included in the KaTeX dependency.
