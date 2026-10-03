@@ -8,10 +8,11 @@ import { basename, join, dirname, relative, isAbsolute, extname } from 'node:pat
 import { notifyCodex } from './agent.ts';
 import { observeCodex, readCodexActivity } from './codex-stream.ts';
 import { ReplyStream, isStreamEvent } from './stream.ts';
+import { parseReply } from './reply-metadata.ts';
 import { readDocument } from './documents.ts';
 import { readAppVersion } from './version.ts';
 import { libraryDocument, listLibrary, recordDocumentOpen } from './library.ts';
-import { claim, createThread, closeDocument, discardEmptyThread, nameThread, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput } from './store.ts';
+import { claim, createThread, closeDocument, discardEmptyThread, nameThread, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, setSelectionVisibility, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput, type ReplyInput } from './store.ts';
 
 const rendererRequire = createRequire(import.meta.resolve('@plannotator/ui/components/BlockRenderer'));
 const rendererFonts = {
@@ -97,6 +98,25 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   let stopObserver: (() => void) | undefined;
   let streamTimer: NodeJS.Timeout | undefined;
   let finalizing: Promise<void> | undefined;
+  async function saveVersion(documentId: string, data: DocumentData) {
+    const versions = join(directory, 'versions', documentId);
+    await mkdir(versions, { recursive: true, mode: 0o700 });
+    const temporary = join(versions, `${randomUUID()}.tmp`);
+    try {
+      await writeFile(temporary, data.markdown, { flag: 'wx', mode: 0o600 });
+      await rename(temporary, join(versions, `${data.version}.md`));
+    } finally { await unlink(temporary).catch(() => {}); }
+  }
+  async function saveReply(input: ReplyInput) {
+    const state = store.read(), request = get(state.requests, input.requestId);
+    if (request.documentId !== input.documentId || request.threadId !== input.threadId) throw new DomainError('Reply routing does not match the request', 409);
+    if (!request.answer && input.metadata?.highlights?.length) {
+      const data = await readDocument(get(state.documents, input.documentId).path);
+      await saveVersion(input.documentId, data);
+      input.selectionVersion = data.version;
+    }
+    await store.update(state => reply(state, input));
+  }
   function streamChanged() { if (!closed && !streamTimer) streamTimer = setTimeout(() => { streamTimer = undefined; changed(); }, 50); }
   async function acceptStream(event: import('./stream.ts').StreamEvent) {
     const active = stream;
@@ -111,7 +131,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     streamChanged();
     if (active.done && !finalizing) {
       finalizing = (async () => {
-        await store.update(state => reply(state, { ...active.route, text: active.text }));
+        await saveReply({ ...active.route, text: active.text, metadata: active.metadata });
         if (stream === active) { stream = undefined; stopObserver?.(); stopObserver = undefined; }
       })();
       try { await finalizing; }
@@ -363,13 +383,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
           if ('error' in result) { json(response, { error: result.error }, result.status); return; }
           // Keep each version actually shown to a reader, including unsent passage drafts.
           // ponytail: retain viewed Markdown versions; add pruning if snapshot storage grows large.
-          const versions = join(directory, 'versions', document.id);
-          await mkdir(versions, { recursive: true, mode: 0o700 });
-          const temporary = join(versions, `${randomUUID()}.tmp`);
-          try {
-            await writeFile(temporary, result.data.markdown, { flag: 'wx', mode: 0o600 });
-            await rename(temporary, join(versions, `${result.data.version}.md`));
-          } finally { await unlink(temporary).catch(() => {}); }
+          await saveVersion(document.id, result.data);
           json(response, { ...document, ...result.data, title: title(document) });
         })() };
         documentReads.add(reading);
@@ -467,6 +481,12 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         const id = resolution[1], isResolved = boolean(body, 'isResolved');
         await store.update(state => resolveThread(state, id, isResolved)); changed(); json(response, { ok: true }); return;
       }
+      const visibility = path.match(/^\/api\/threads\/([^/]+)\/selections(?:\/([^/]+))?$/);
+      if (method === 'POST' && visibility) {
+        const isVisible = boolean(body, 'isVisible');
+        await store.update(state => setSelectionVisibility(state, visibility[1], isVisible, visibility[2]));
+        changed(); json(response, { ok: true }); return;
+      }
       const renameTitle = path.match(/^\/api\/documents\/([^/]+)\/title$/);
       if (method === 'PATCH' && renameTitle?.[1]) {
         const id = renameTitle[1], value = text(body, 'title');
@@ -503,12 +523,14 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         await acceptStream(body); json(response, { ok: true }); return;
       }
       if (method === 'POST' && path === '/agent/replies') {
-        const input = { requestId: text(body, 'requestId'), documentId: text(body, 'documentId'), threadId: text(body, 'threadId'), text: '', isError: body.isError === undefined ? false : boolean(body, 'isError') };
+        const input: ReplyInput = { requestId: text(body, 'requestId'), documentId: text(body, 'documentId'), threadId: text(body, 'threadId'), text: '', isError: body.isError === undefined ? false : boolean(body, 'isError') };
         if (body.stream === true) {
           const previous = get(store.read().requests, input.requestId).answer;
           input.text = previous?.text ?? (stream ? stream.finish(input) : (() => { throw new DomainError('No completed stream; send a complete reply', 409); })());
-        } else input.text = text(body, 'text');
-        await store.update(state => reply(state, input));
+          if (previous) input.isError = previous.isError;
+          else input.metadata = stream?.metadata;
+        } else Object.assign(input, parseReply(text(body, 'text')));
+        await saveReply(input);
         if (stream?.route.requestId === input.requestId) { stream = undefined; stopObserver?.(); stopObserver = undefined; }
         changed(); json(response, { ok: true }); return;
       }

@@ -23,11 +23,13 @@ export const MarkdownDocument = memo(function MarkdownDocument({
   documentId,
   anchorPrefix = '',
   libraryOwner,
+  onSelectionLink,
 }: {
   markdown: string;
   documentId: string;
   anchorPrefix?: string;
   libraryOwner?: string;
+  onSelectionLink?: (slug: string) => boolean;
 }) {
   const blocks = useMemo(
     () =>
@@ -60,6 +62,7 @@ export const MarkdownDocument = memo(function MarkdownDocument({
           anchorPrefix
             ? (hash) => {
                 try {
+                  if (onSelectionLink?.(decodeURIComponent(hash.slice(1)))) return;
                   document
                     .getElementById(anchorPrefix + decodeURIComponent(hash.slice(1)))
                     ?.scrollIntoView({ block: 'nearest' });

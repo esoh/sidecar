@@ -1226,8 +1226,12 @@ pre code.pn-code[data-keep-layout] {
 }
 .selection-badge { display: inline-block; width: fit-content; }
 .message-selection { margin: 0 0 8px auto; max-width: 90%; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: oklch(0.3 0.015 260 / 0.35); }
-.message-selection > .selection-badge { margin-bottom: 6px; }
-.message[data-active] .message-selection .quote-excerpt { border-color: oklch(0.75 0.18 280); }
+.selection-heading { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.selection-heading .selection-visibility { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 4px; border-radius: 4px; color: var(--subtle); }
+.selection-visibility:hover { background: var(--line); }
+.selection-visibility[aria-pressed="false"] { opacity: 0.6; }
+.message-selection[data-active] .quote-excerpt { border-color: oklch(0.75 0.18 280); }
+.message.agent .message-selection { margin-left: 0; max-width: 100%; }
 .draft-selection .cancel-button { width: 24px; height: 24px; padding: 4px; }
 
 .passage-arrow { display: inline-flex; align-items: center; flex-shrink: 0; margin-left: auto; }

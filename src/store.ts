@@ -1,24 +1,26 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename, unlink } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 
 import { isQuote, type Quote } from './quote.ts';
+import type { ReplyMetadata } from './reply-metadata.ts';
 
 export type Owner = { agent: 'codex' | 'claude'; sessionId: string };
 export { isQuote, type Quote } from './quote.ts';
 export type RepoInfo = { display: string; branch?: string };
 export type DocumentRecord = { id: string; path: string; generated: boolean; providedTitle?: string; userTitle?: string; repoInfo?: RepoInfo };
-export type Message = { id: string; role: 'user' | 'agent'; text: string; requestId: string; createdAt: number; quote?: Quote };
+export type MessageSelection = { id: string; slug: string; quote: Quote; isVisible: boolean; label?: string };
+export type Message = { id: string; role: 'user' | 'agent'; text: string; requestId: string; createdAt: number; selections?: MessageSelection[] };
 export type Thread = { id: string; documentId: string; title?: string; createdAt?: number; isResolved: boolean; messages: Message[] };
 export type RequestRecord = {
   id: string; documentId: string; threadId: string; text: string; clientMessageId: string;
   quote?: Quote; status: 'queued' | 'claimed' | 'completed' | 'failed' | 'uncertain'; createdAt: number;
   submission: string; answer?: { text: string; isError: boolean }; acceptedAt?: number;
 };
-export type State = { version: 2; owner: Owner; documents: Record<string, DocumentRecord>; threads: Record<string, Thread>; requests: Record<string, RequestRecord> };
+export type State = { version: 3; owner: Owner; documents: Record<string, DocumentRecord>; threads: Record<string, Thread>; requests: Record<string, RequestRecord> };
 export type Store = { read(): State; update<T>(change: (draft: State) => T): Promise<T> };
 export type SubmitInput = { documentId: string; threadId?: string; text: string; quote?: Quote; clientMessageId: string };
-export type ReplyInput = { requestId: string; documentId: string; threadId: string; text: string; isError?: boolean };
+export type ReplyInput = { requestId: string; documentId: string; threadId: string; text: string; isError?: boolean; metadata?: ReplyMetadata; selectionVersion?: string };
 export type ClaimResult = { claimStatus: 'claimed' | 'already-claimed' | 'completed' | 'uncertain'; request: RequestRecord };
 
 export class DomainError extends Error {
@@ -44,9 +46,14 @@ function isDocument(v: unknown): v is DocumentRecord {
   return isObject(v) && string(v.id) && string(v.path) && isAbsolute(v.path) && typeof v.generated === 'boolean' && optionalString(v.providedTitle) && optionalString(v.userTitle) && (v.repoInfo === undefined || isRepoInfo(v.repoInfo));
 }
 function isMessage(v: unknown): v is Message {
-  return isObject(v) && string(v.id) && (v.role === 'user' || v.role === 'agent') && string(v.text) && string(v.requestId) && number(v.createdAt) && (v.quote === undefined || (v.role === 'user' && isQuote(v.quote)));
+  return isMessageFields(v) && !('quote' in v) && (v.selections === undefined || (Array.isArray(v.selections) && v.selections.length <= (v.role === 'user' ? 1 : 20) && v.selections.every(s => isObject(s) && string(s.id) && string(s.slug) && /^selection-[1-9][0-9]*$/.test(s.slug) && isQuote(s.quote) && typeof s.isVisible === 'boolean' && optionalString(s.label)) && new Set(v.selections.map(s => s.id)).size === v.selections.length && new Set(v.selections.map(s => s.slug)).size === v.selections.length));
 }
-type LegacyThread = Thread & { scope: 'passage' | 'document'; quote?: Quote };
+function isMessageFields(v: unknown): v is Record<string, unknown> & { id: string } {
+  return isObject(v) && string(v.id) && (v.role === 'user' || v.role === 'agent') && string(v.text) && string(v.requestId) && number(v.createdAt);
+}
+type OldMessage = Omit<Message, 'selections'> & { quote?: Quote };
+type OldThread = Omit<Thread, 'messages'> & { messages: OldMessage[] };
+type LegacyThread = OldThread & { scope: 'passage' | 'document'; quote?: Quote };
 function isThreadFields(v: unknown): v is Thread {
   return isObject(v) && string(v.id) && string(v.documentId) && optionalString(v.title) && (v.createdAt === undefined || number(v.createdAt)) && typeof v.isResolved === 'boolean' && Array.isArray(v.messages) && v.messages.every(isMessage);
 }
@@ -54,7 +61,10 @@ function isThread(v: unknown): v is Thread {
   return isThreadFields(v) && !('scope' in v) && !('quote' in v);
 }
 function isLegacyThread(v: unknown): v is LegacyThread {
-  return isThreadFields(v) && 'scope' in v && (v.scope === 'passage' || v.scope === 'document') && ((v.scope === 'passage' && 'quote' in v && isQuote(v.quote)) || (v.scope === 'document' && !('quote' in v))) && v.messages.every(message => message.quote === undefined);
+  return isOldThread(v) && 'scope' in v && (v.scope === 'passage' || v.scope === 'document') && ((v.scope === 'passage' && 'quote' in v && isQuote(v.quote)) || (v.scope === 'document' && !('quote' in v))) && v.messages.every(message => message.quote === undefined);
+}
+function isOldThread(v: unknown): v is OldThread {
+  return isObject(v) && string(v.id) && string(v.documentId) && optionalString(v.title) && (v.createdAt === undefined || number(v.createdAt)) && typeof v.isResolved === 'boolean' && Array.isArray(v.messages) && v.messages.every(m => isMessageFields(m) && !('selections' in m) && (m.quote === undefined || (m.role === 'user' && isQuote(m.quote))));
 }
 function isRequest(v: unknown): v is RequestRecord {
   return isObject(v) && string(v.id) && string(v.documentId) && string(v.threadId) && string(v.text) && string(v.clientMessageId) && string(v.submission) && number(v.createdAt) && string(v.status) && ['queued','claimed','completed','failed','uncertain'].includes(v.status) && (v.quote === undefined || isQuote(v.quote)) && (v.acceptedAt === undefined || number(v.acceptedAt)) && (v.answer === undefined || (isObject(v.answer) && string(v.answer.text) && typeof v.answer.isError === 'boolean'));
@@ -63,14 +73,13 @@ function records<T extends {id: string}>(v: unknown, check: (v: unknown) => v is
   return isObject(v) && Object.entries(v).every(([key, item]) => check(item) && key === item.id && /^[0-9a-f-]{36}$/i.test(key));
 }
 export function isState(v: unknown): v is State {
-  return isObject(v) && v.version === 2 && isOwner(v.owner) && records(v.documents, isDocument) && records(v.threads, isThread) && records(v.requests, isRequest);
+  return isObject(v) && v.version === 3 && isOwner(v.owner) && records(v.documents, isDocument) && records(v.threads, isThread) && records(v.requests, isRequest);
 }
 type LegacyState = Omit<State, 'version' | 'threads'> & { version: 1; threads: Record<string, LegacyThread> };
 function isLegacyState(v: unknown): v is LegacyState {
   return isObject(v) && v.version === 1 && isOwner(v.owner) && records(v.documents, isDocument) && records(v.threads, isLegacyThread) && records(v.requests, isRequest);
 }
 export function readSavedState(value: unknown): State {
-  if (!isLegacyState(value) && !isState(value)) throw new Error('Malformed Sidecar state; the existing file was preserved');
   let state: State;
   if (isLegacyState(value)) {
     const threads: Record<string, Thread> = {};
@@ -81,21 +90,32 @@ export function readSavedState(value: unknown): State {
         if (!first) throw new Error('Legacy selection has no user message; the existing file was preserved');
         first.quote = quote;
       }
-      threads[thread.id] = plain;
+      threads[thread.id] = migrateSelections(plain);
     }
-    state = { version: 2, owner: structuredClone(value.owner), documents: structuredClone(value.documents), requests: structuredClone(value.requests), threads };
+    state = { version: 3, owner: structuredClone(value.owner), documents: structuredClone(value.documents), requests: structuredClone(value.requests), threads };
+  } else if (isObject(value) && value.version === 2 && isOwner(value.owner) && records(value.documents, isDocument) && records(value.threads, isOldThread) && records(value.requests, isRequest)) {
+    state = { version: 3, owner: structuredClone(value.owner), documents: structuredClone(value.documents), requests: structuredClone(value.requests), threads: Object.fromEntries(Object.entries(value.threads).map(([id, thread]) => [id, migrateSelections(thread)])) };
   } else if (isState(value)) state = structuredClone(value);
-  else throw new Error('Malformed Sidecar state');
+  else throw new Error('Malformed Sidecar state; the existing file was preserved');
+  const selectionIds = new Set<string>();
   for (const thread of Object.values(state.threads)) {
     get(state.documents, thread.documentId);
     for (const message of thread.messages) {
       if (get(state.requests, message.requestId).threadId !== thread.id) throw new Error('Malformed message routing');
+      for (const selection of message.selections ?? []) {
+        if (selectionIds.has(selection.id)) throw new Error('Duplicate selection ID');
+        selectionIds.add(selection.id);
+      }
     }
   }
   for (const request of Object.values(state.requests)) {
     if (get(state.threads, request.threadId).documentId !== request.documentId) throw new Error('Malformed request routing');
   }
   return state;
+}
+function migrateSelections(thread: OldThread): Thread {
+  const copy = structuredClone(thread);
+  return { ...copy, messages: copy.messages.map(({ quote, ...message }) => ({ ...message, ...(quote ? { selections: [{ id: message.id, slug: 'selection-1', quote, isVisible: !thread.isResolved }] } : {}) })) };
 }
 export function get<T>(items: Record<string,T>, id: string): T {
   if (!Object.hasOwn(items, id)) throw new DomainError('Not found', 404);
@@ -105,7 +125,7 @@ export function get<T>(items: Record<string,T>, id: string): T {
 }
 export function createState(owner: Owner): State {
   ownerKey(owner);
-  return { version: 2, owner: structuredClone(owner), documents: {}, threads: {}, requests: {} };
+  return { version: 3, owner: structuredClone(owner), documents: {}, threads: {}, requests: {} };
 }
 export function registerDocument(state: State, input: {path: string; title?: string; generated: boolean; repoInfo?: RepoInfo}): DocumentRecord {
   if (!isAbsolute(input.path)) throw new DomainError('Document path must be absolute');
@@ -182,7 +202,8 @@ export function submit(state: State, input: SubmitInput): RequestRecord {
   if (input.quote) request.quote = structuredClone(input.quote);
   state.requests[request.id] = request;
   thread.isResolved = false;
-  thread.messages.push({ id: randomUUID(), role: 'user', text: input.text, requestId: request.id, createdAt: request.createdAt, ...(input.quote ? { quote: structuredClone(input.quote) } : {}) });
+  const id = randomUUID();
+  thread.messages.push({ id, role: 'user', text: input.text, requestId: request.id, createdAt: request.createdAt, ...(input.quote ? { selections: [{ id, slug: 'selection-1', quote: structuredClone(input.quote), isVisible: true }] } : {}) });
   return request;
 }
 export function claim(state: State, requestId: string, options: {resume?: boolean}): ClaimResult {
@@ -212,7 +233,7 @@ export function reply(state: State, input: ReplyInput): void {
   const request = get(state.requests, input.requestId);
   if (request.documentId !== input.documentId || request.threadId !== input.threadId) throw new DomainError('Reply routing does not match the request', 409);
   if (!input.text.trim()) throw new DomainError('Reply text is required');
-  const answer = { text: input.text, isError: input.isError === true };
+  const answer = { text: input.text, isError: input.isError === true || input.metadata?.isError === true };
   if (request.answer) {
     if (request.answer.text !== answer.text || request.answer.isError !== answer.isError) throw new DomainError('A different reply already exists', 409);
     return;
@@ -220,10 +241,22 @@ export function reply(state: State, input: ReplyInput): void {
   if (request.status !== 'claimed') throw new DomainError('Claim the request before replying', 409);
   request.answer = answer;
   request.status = answer.isError ? 'failed' : 'completed';
-  get(state.threads, request.threadId).messages.push({ id: randomUUID(), role: 'agent', text: answer.text, requestId: request.id, createdAt: Date.now() });
+  const thread = get(state.threads, request.threadId), id = randomUUID();
+  if (!thread.title && input.metadata?.threadTitle) nameThread(state, thread.id, input.metadata.threadTitle);
+  const selections = input.metadata?.highlights?.map((h, index): MessageSelection => {
+    if (!input.selectionVersion) throw new DomainError('Document version required for highlights');
+    return { id: index ? `${id}-${index + 1}` : id, slug: `selection-${index + 1}`, isVisible: !thread.isResolved, ...(h.label ? { label: h.label.trim() } : {}), quote: { exact: h.exact, prefix: h.prefix ?? '', suffix: h.suffix ?? '', start: 0, end: h.exact.length, version: input.selectionVersion } };
+  });
+  thread.messages.push({ id, role: 'agent', text: answer.text, requestId: request.id, createdAt: Date.now(), ...(selections?.length ? { selections } : {}) });
 }
 export function resolveThread(state: State, threadId: string, isResolved: boolean): void {
   get(state.threads, threadId).isResolved = isResolved;
+  if (isResolved) setSelectionVisibility(state, threadId, false);
+}
+export function setSelectionVisibility(state: State, threadId: string, isVisible: boolean, selectionId?: string): void {
+  const selections = get(state.threads, threadId).messages.flatMap(message => message.selections ?? []);
+  if (selectionId && !selections.some(selection => selection.id === selectionId)) throw new DomainError('Selection not found', 404);
+  for (const selection of selections) if (!selectionId || selection.id === selectionId) selection.isVisible = isVisible;
 }
 export function setTitle(state: State, documentId: string, title: string): void {
   const document = get(state.documents, documentId);
@@ -242,13 +275,21 @@ export async function openStore(directory: string, owner: Owner): Promise<Store>
     const value: unknown = JSON.parse(raw);
     const parsed = readSavedState(value);
     if (ownerKey(parsed.owner) !== ownerKey(owner)) throw new Error('State belongs to another owner');
-    if (isObject(value) && value.version === 1) {
-      const backup = join(directory, 'state.v1.backup.json');
+    if (isObject(value) && (value.version === 1 || value.version === 2)) {
+      const backup = join(directory, `state.v${value.version}.backup.json`);
       try { await writeFile(backup, raw, { flag: 'wx', mode: 0o600 }); }
       catch (error) {
         if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
-        const saved: unknown = JSON.parse(await readFile(backup, 'utf8'));
-        if (!isObject(saved) || saved.version !== 1 || ownerKey(readSavedState(saved).owner) !== ownerKey(owner)) throw new Error('Invalid migration backup; the existing state was preserved');
+        const savedRaw = await readFile(backup, 'utf8'), saved: unknown = JSON.parse(savedRaw);
+        if (!isObject(saved) || saved.version !== value.version || ownerKey(readSavedState(saved).owner) !== ownerKey(owner)) throw new Error('Invalid migration backup; the existing state was preserved');
+        if (savedRaw !== raw) {
+          const exactBackup = join(directory, `state.v${value.version}.${createHash('sha256').update(raw).digest('hex')}.backup.json`);
+          try { await writeFile(exactBackup, raw, { flag: 'wx', mode: 0o600 }); }
+          catch (error) {
+            if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
+            if (await readFile(exactBackup, 'utf8') !== raw) throw new Error('Migration backup differs; the existing state was preserved');
+          }
+        }
       }
     }
     for (const request of Object.values(parsed.requests)) if (request.status === 'claimed') request.status = 'uncertain';

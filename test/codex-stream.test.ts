@@ -9,7 +9,7 @@ import { observeCodex } from '../src/codex-stream.ts';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { startServer } from '../src/server.ts';
-import type { ReplyRoute, StreamEvent } from '../src/stream.ts';
+import { ReplyStream, type ReplyRoute, type StreamEvent } from '../src/stream.ts';
 
 for (const loaded of [true, false]) test(`Codex observer ${loaded ? 'streams only its original loaded thread' : 'refuses to load a replacement session'}`, async t => {
   const root = await mkdtemp(join(tmpdir(), 'sidecar-ws-'));
@@ -137,4 +137,37 @@ test('Codex activity reads native runtime state without loading, resuming, or se
   id = 'other'; assert.equal(await readCodexActivity('original', abort.signal, path), 'unknown');
   abort.abort(); assert.equal(await readCodexActivity('original', abort.signal, path), 'unknown');
   assert.ok(methods.every(method => ['initialize', 'initialized', 'thread/read'].includes(method)));
+});
+
+
+test('Codex captures a complete retry after the interrupted turn ends', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'sidecar-retry-'));
+  const path = join(root, 'native.sock'), http = createServer(), ws = new WebSocketServer({ server: http });
+  await new Promise<void>(resolve => http.listen(path, resolve));
+  t.after(async () => { for (const client of ws.clients) client.terminate(); ws.close(); await new Promise<void>(resolve => http.close(() => resolve())); await rm(root, { recursive: true, force: true }); });
+  let send: (value: unknown) => void = () => { throw new Error('Not connected'); };
+  ws.on('connection', socket => {
+    send = value => socket.send(JSON.stringify(value));
+    socket.on('message', data => {
+      const m = JSON.parse(data.toString());
+      if (m.method === 'initialize') send({ id: m.id, result: {} });
+      if (m.method === 'thread/read' || m.method === 'thread/resume') send({ id: m.id, result: { thread: { id: 'original', status: { type: 'idle' } } } });
+    });
+  });
+  const reply = new ReplyStream({ requestId: 'request', documentId: 'document', threadId: 'thread' });
+  const stop = await observeCodex('original', event => { reply.accept(event); }, error => reply.fail(error), path, [reply.prefix, reply.progress.prefix]);
+  t.after(() => stop());
+  const delta = (turnId: string, itemId: string, text: string) => send({ method: 'item/agentMessage/delta', params: { threadId: 'original', turnId, itemId, delta: text } });
+  delta('interrupted', 'old-message', reply.prefix + 'Partial');
+  send({ method: 'turn/completed', params: { threadId: 'original', turnId: 'interrupted' } });
+  for (let i = 0; i < 100 && !reply.error; i++) await delay(5);
+  assert.match(reply.error ?? '', /turn ended/);
+  delta('retry', 'unrelated', 'Ordinary terminal text.');
+  const text = reply.prefix + 'Saved retry.' + reply.suffix;
+  delta('retry', 'new-message', text.slice(0, 8));
+  delta('retry', 'new-message', text.slice(8));
+  send({ method: 'item/completed', params: { threadId: 'original', turnId: 'retry', item: { id: 'new-message', type: 'agentMessage', text } } });
+  for (let i = 0; i < 100 && !reply.done; i++) await delay(5);
+  assert.equal(reply.finish(reply.route), 'Saved retry.');
+  assert.equal(reply.error, null);
 });

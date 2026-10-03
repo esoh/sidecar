@@ -72,7 +72,6 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   for (let i = 0; i < 100 && !(await state()).requests[req.id].acceptedAt; i++) await delay(10);
   assert.ok((await state()).requests[req.id].acceptedAt, 'record the successful native handoff');
   assert.equal((await state()).requests[req.id].status, 'claimed', 'successful handoff is shown as Working');
-  await post(`/agent/threads/${req.threadId}/title`, { title: 'Widget retry behavior' });
   const next = await (await post('/api/questions', { documentId: doc.id, threadId: req.threadId, text: 'Why?', clientMessageId: 'second' })).json();
   const later = await (await post('/api/questions', { documentId: doc.id, threadId: req.threadId, text: 'And after that?', clientMessageId: 'third' })).json();
   if (agent === 'codex') {
@@ -97,7 +96,7 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   assert.equal(working.requests[req.id].answer, undefined, 'progress must not complete the request');
   assert.equal(working.threads[req.threadId].messages.at(-1).text, 'I’ll check the retry setting.');
   assert.equal(working.requests[next.id].status, 'queued', 'progress must not release the next request');
-  const answer = event.stream.prefix + 'Three retries.' + event.stream.suffix;
+  const answer = event.stream.prefix + '[[sidecar-meta {"threadTitle":"Widget retry behavior","highlights":[{"exact":"The widget retries three times.","label":"Retry limit"}]}]]\nThree retries.' + event.stream.suffix;
   if (agent === 'codex') {
     for (const socket of sockets) {
       socket.send(JSON.stringify({ method: 'item/agentMessage/delta', params: { threadId: owner.sessionId, turnId: 'reply', itemId: 'answer', delta: answer } }));
@@ -112,6 +111,9 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   const saved = await state();
   assert.equal(saved.requests[req.id].status, 'completed');
   assert.equal(saved.threads[req.threadId].messages.filter((m: any) => m.role === 'agent').length, 2);
+  assert.equal(saved.threads[req.threadId].messages.at(-1).text, 'Three retries.');
+  assert.equal(saved.threads[req.threadId].messages.at(-1).selections[0].label, 'Retry limit');
+  assert.equal(saved.threads[req.threadId].messages.at(-1).selections[0].quote.version, version);
   assert.notEqual(event.stream.prefix, second.stream.prefix);
 
   await post('/agent/replies', { requestId: next.id, documentId: doc.id, threadId: req.threadId, text: 'Because the retry limit is three.' });
@@ -148,12 +150,12 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   assert.equal(full.document.version, createHash('sha256').update(revised).digest('hex'));
   assert.deepEqual(full.request.quote, partialQuote, 'full original anchors remain available for disambiguation');
   assert.equal(full.thread.id, passage.threadId);
-  assert.deepEqual(full.thread.messages.filter((m: any) => m.role === 'user').map((m: any) => m.quote?.exact), [exact, 'three']);
+  assert.deepEqual(full.thread.messages.filter((m: any) => m.role === 'user').map((m: any) => m.selections?.[0].quote.exact), [exact, 'three']);
   await post('/agent/replies', { requestId: partial.id, documentId: doc.id, threadId: partial.threadId, text: 'It means the old limit.' });
   const general = await (await post('/api/questions', { documentId: doc.id, threadId: passage.threadId, text: 'What else?', clientMessageId: 'general-followup' })).json();
   const unselected = await eventCount(6);
   assert.equal(unselected.requestId, general.id);
   assert.equal(unselected.quote, undefined, 'an unselected follow-up must not inherit a previous message selection');
   const latest = await state();
-  assert.deepEqual(latest.threads[passage.threadId].messages.filter((m: any) => m.role === 'user').map((m: any) => m.quote?.exact), [exact, 'three', undefined]);
+  assert.deepEqual(latest.threads[passage.threadId].messages.filter((m: any) => m.role === 'user').map((m: any) => m.selections?.[0].quote.exact), [exact, 'three', undefined]);
 });

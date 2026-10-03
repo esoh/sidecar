@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { DomainError, isObject } from './store.ts';
+import { parseReply, type ReplyMetadata } from './reply-metadata.ts';
 
 export type StreamEvent = { messageId: string; turnId: string; index: number; delta: string; final: boolean };
 export type ProgressReply = { messageId: string; text: string };
@@ -15,10 +16,10 @@ export class ReplyStream {
   readonly suffix: string;
   readonly progress: { prefix: string; suffix: string };
   text = '';
+  metadata: ReplyMetadata = {};
   error: string | null = null;
   done = false;
   private messages = new Map<string, { next: number; raw: string; pending: Map<number, StreamEvent>; ignored: boolean }>();
-  private bound: string | undefined;
   private started = false;
   private completedProgress = new Set<string>();
   private received = 0;
@@ -31,9 +32,9 @@ export class ReplyStream {
   get hasStarted() { return this.started; }
   fail(message: string) { if (!this.done) this.error = message; }
   accept(event: StreamEvent): ProgressReply | undefined {
-    if (this.done || this.error) return;
+    if (this.done) return;
     const key = `${event.turnId}/${event.messageId}`;
-    if ((this.bound && this.bound !== key) || this.completedProgress.has(key)) return;
+    if (this.completedProgress.has(key)) return;
     let candidate = this.messages.get(key);
     if (!candidate) {
       if (this.messages.size + this.completedProgress.size >= 64) { this.fail('Too many messages while waiting for a reply. Send a complete reply.'); return; }
@@ -57,18 +58,20 @@ export class ReplyStream {
         continue;
       }
       this.started = true;
-      if (!isProgress) this.bound = key;
       const suffix = isProgress ? this.progress.suffix : this.suffix;
       const isComplete = this.render(candidate.raw, next.final, prefix, suffix);
+      // A complete native retry can replace an interrupted message, using this request's exact markers.
+      if (isComplete) this.error = null;
       if (isComplete && isProgress) {
         const update = { messageId: key, text: this.text };
         this.completedProgress.add(key);
         this.messages.delete(key);
         this.text = '';
+        this.metadata = {};
         return update;
       }
       if (isComplete) this.done = true;
-      if (this.done || this.error) return;
+      if (this.done || next.final) return;
     }
   }
   private render(raw: string, final: boolean, prefix: string, suffix: string) {
@@ -80,6 +83,9 @@ export class ReplyStream {
       while (held > 0 && !body.endsWith(suffix.slice(0, held))) held--;
       this.text = body.slice(0, body.length - held);
     }
+    const parsed = parseReply(this.text);
+    this.text = parsed.text;
+    this.metadata = parsed.metadata;
     if (final) {
       if (end < 0 || body.slice(end + suffix.length).trim() !== '' || !this.text.trim()) this.fail('The streamed reply ended without a complete reply boundary. Send a complete reply to recover.');
       else return true;
