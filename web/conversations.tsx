@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem } from '@plannotator/ui/components/ui/dropdown-menu';
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuRadioGroup, DropdownMenuRadioItem } from '@plannotator/ui/components/ui/dropdown-menu';
 import { threadMatch } from './thread-search.ts';
 import { Tooltip } from '@plannotator/ui/components/Tooltip';
-import type { Message, Quote, RequestRecord, Thread } from '../src/store.ts';
+import type { MessageSelection as SavedSelection, Quote, RequestRecord, Thread } from '../src/store.ts';
 import { api, errorText, type ViewerState } from './api.ts';
 import { AgentSession } from './AgentSession.tsx';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
@@ -10,6 +10,9 @@ import { MarkdownDocument } from './MarkdownDocument.tsx';
 import type { QuestionDraft, QuestionDrafts } from './useQuestionDrafts.ts';
 
 const paths = {
+  more: 'M5 11v2M12 11v2M19 11v2',
+  eye: 'M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12ZM15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z',
+  eyeOff: 'm3 3 18 18M10 5a12 12 0 0 1 2 0c6.5 0 10 7 10 7a22 22 0 0 1-3 4M6 6a22 22 0 0 0-4 6s3.5 7 10 7a13 13 0 0 0 5-1M9 9a4 4 0 0 0 6 6',
   chevron: 'm6 9 6 6 6-6',
   arrowUpRight: 'M7 17 17 7M7 7h10v10',
   back: 'M19 12H5m6-6-6 6 6 6',
@@ -352,6 +355,7 @@ export function ConversationSidebar({
   drafts,
   onRemoveSelection,
   activeMessageId,
+  activeSelectionId,
   messageVisit,
   onMessageSent,
 }: {
@@ -363,12 +367,13 @@ export function ConversationSidebar({
   requests: RequestRecord[];
   stream: ViewerState['stream'];
   passageChanged: (quote: Quote) => boolean;
-  showPassage: (message: Message) => void;
+  showPassage: (selection: SavedSelection) => void;
   showOriginal: (messageId: string) => void;
   isShown: boolean;
   drafts: QuestionDrafts;
   onRemoveSelection: () => void;
   activeMessageId: string | null;
+  activeSelectionId: string | null;
   messageVisit: number;
   onMessageSent: (request: RequestRecord) => void;
 }) {
@@ -457,9 +462,10 @@ export function ConversationSidebar({
   }, [active?.id, active?.messages.length, text, isShown]);
   useLayoutEffect(() => {
     if (!isShown || !activeMessageId) return;
-    const node = Array.from(messages.current?.querySelectorAll<HTMLElement>('[data-message-id]') ?? []).find(node => node.dataset.messageId === activeMessageId);
+    const node = Array.from(messages.current?.querySelectorAll<HTMLElement>('[data-selection-id]') ?? []).find(node => node.dataset.selectionId === activeSelectionId)
+      ?? Array.from(messages.current?.querySelectorAll<HTMLElement>('[data-message-id]') ?? []).find(node => node.dataset.messageId === activeMessageId);
     node?.scrollIntoView({ block: 'nearest' });
-  }, [activeMessageId, active?.id, isShown, messageVisit]);
+  }, [activeSelectionId, activeMessageId, active?.id, isShown, messageVisit]);
   async function newConversation() {
     if (createBusy.current || !documentId) return;
     createBusy.current = true;
@@ -530,6 +536,19 @@ export function ConversationSidebar({
               <Icon name="back" />
             </button>
             <TitleForm key={active.id} id={active.id} title={active.title ?? 'Unnamed'} kind="thread" />
+            <DropdownMenu>
+              <DropdownMenuTrigger className="back-button" aria-label="Thread actions"><Icon name="more" /></DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="thread-filter-menu">
+                <DropdownMenuItem onClick={async () => {
+                  try { await api(`/api/threads/${active.id}/selections`, { isVisible: true }); setError(''); }
+                  catch (reason) { setError(errorText(reason)); }
+                }}>Show all selections</DropdownMenuItem>
+                <DropdownMenuItem onClick={async () => {
+                  try { await api(`/api/threads/${active.id}/selections`, { isVisible: false }); setError(''); }
+                  catch (reason) { setError(errorText(reason)); }
+                }}>Hide all selections</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
             <button
               className={`resolve-button${active.isResolved ? ' is-resolved' : ''}`}
               aria-label={active.isResolved ? 'Reopen thread' : 'Resolve thread'}
@@ -611,12 +630,19 @@ export function ConversationSidebar({
               const hasStreamedReply = stream?.requestId === message.requestId && !!stream.text;
               return (
                 <div className={`message ${message.role}`} key={message.id} data-message-id={message.id} data-active={message.id === activeMessageId || undefined}>
-                  {message.quote && <MessageSelection documentId={documentId} message={message} quote={message.quote} isChanged={passageChanged(message.quote)} showPassage={() => showPassage(message)} showOriginal={() => showOriginal(message.id)} />}
+                  {message.selections?.map(selection => <MessageSelection key={selection.id} documentId={documentId} messageId={message.id} threadId={active.id} selection={selection} isActive={selection.id === activeSelectionId} isChanged={passageChanged(selection.quote)} showPassage={() => showPassage(selection)} showOriginal={() => showOriginal(selection.id)} />)}
                   <div className="message-bubble">
                     <MarkdownDocument
                       markdown={message.text}
                       documentId={documentId}
                       anchorPrefix={`message-${message.id}-`}
+                      onSelectionLink={slug => {
+                        const selection = message.selections?.find(selection => selection.slug === slug);
+                        if (!selection) return false;
+                        if (passageChanged(selection.quote)) showOriginal(selection.id);
+                        else showPassage(selection);
+                        return true;
+                      }}
                     />
                   </div>
                   {isLatest && !hasStreamedReply && (status === 'queued' || status === 'claimed') && (
@@ -710,9 +736,11 @@ export function ConversationSidebar({
 }
 
 // Selection badge and excerpt adapted from Plannotator DocumentQAPair (MIT).
-function MessageSelection({ documentId, message, quote, isChanged, showPassage, showOriginal }: {
-  documentId: string; message: Message; quote: Quote; isChanged: boolean; showPassage: () => void; showOriginal: () => void;
+function MessageSelection({ documentId, threadId, messageId, selection, isActive, isChanged, showPassage, showOriginal }: {
+  documentId: string; threadId: string; messageId: string; selection: SavedSelection; isActive: boolean; isChanged: boolean; showPassage: () => void; showOriginal: () => void;
 }) {
+  const quote = selection.quote;
+  const [isSaving, setSaving] = useState(false), [error, setError] = useState('');
   const path = isChanged ? `/api/documents/${documentId}/versions/${encodeURIComponent(quote.version)}` : null;
   const [available, setAvailable] = useState<string | null>(null);
   useEffect(() => {
@@ -720,10 +748,19 @@ function MessageSelection({ documentId, message, quote, isChanged, showPassage, 
     if (path) void fetch(path, { method: 'HEAD' }).then(response => { if (!stopped && response.ok) setAvailable(path); }).catch(() => {});
     return () => { stopped = true; };
   }, [path]);
-  return <div className="message-selection quote" data-selection-message={message.id}>
-    <span className="selection-badge text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary">selection</span>
+  return <div className="message-selection quote" data-selection-message={messageId} data-selection-id={selection.id} data-active={isActive || undefined}>
+    <div className="selection-heading">
+      <span className="selection-badge text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary">{selection.label ?? 'selection'}</span>
+      <button className="selection-visibility" aria-label={selection.isVisible ? 'Hide selection' : 'Show selection'} title={selection.isVisible ? 'Hide selection' : 'Show selection'} aria-pressed={selection.isVisible} disabled={isSaving} onClick={async () => {
+        setSaving(true);
+        try { await api(`/api/threads/${threadId}/selections/${encodeURIComponent(selection.id)}`, { isVisible: !selection.isVisible }); setError(''); }
+        catch (reason) { setError(errorText(reason)); }
+        finally { setSaving(false); }
+      }}><Icon name={selection.isVisible ? 'eye' : 'eyeOff'} /></button>
+    </div>
     {isChanged ? <span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={quote.exact}>{quote.exact}</span> :
       <button aria-label={`Show passage: ${quote.exact}`} onClick={showPassage}><span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={quote.exact}>{quote.exact}</span><span className="passage-arrow"><Icon name="arrowUpRight" /></span></button>}
     {isChanged && <div className="passage-context"><span className="changed">Passage changed</span>{path && available === path && <button className="original-link" onClick={showOriginal}>View original document <span className="passage-arrow"><Icon name="arrowUpRight" /></span></button>}</div>}
+    {error && <p role="alert">{error}</p>}
   </div>;
 }

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rename, rm, writeFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -175,13 +176,13 @@ test('one thread can hold selected and unselected inputs without inheriting an e
   const selectedInput = { ...input, threadId: first.threadId, quote: nextQuote, clientMessageId: 'selected' };
   const selected = submit(state, selectedInput);
   assert.equal(submit(state, selectedInput).id, selected.id);
-  assert.deepEqual(state.threads[first.threadId].messages.map(m => m.quote?.exact), ['hello', undefined, 'world']);
+  assert.deepEqual(state.threads[first.threadId].messages.map(m => m.selections?.[0].quote.exact), ['hello', undefined, 'world']);
   assert.equal(unselected.quote, undefined);
   assert.deepEqual(selected.quote, nextQuote);
   assert.equal('quote' in state.threads[first.threadId], false);
   assert.equal('scope' in state.threads[first.threadId], false);
   nextQuote.exact = 'other';
-  assert.equal(state.threads[first.threadId].messages[2].quote?.exact, 'world');
+  assert.equal(state.threads[first.threadId].messages[2].selections?.[0].quote.exact, 'world');
 });
 
 function legacySelectionState() {
@@ -212,9 +213,9 @@ test('v1 selections migrate once to the first user message with a byte-exact bac
   const old = legacySelectionState(), raw = JSON.stringify(old, null, 2) + '\n';
   await writeFile(join(directory, 'state.json'), raw);
   const result = (await openStore(directory, owner)).read();
-  assert.equal(result.version, 2);
+  assert.equal(result.version, 3);
   const previous = Object.values(old.threads)[0], thread = result.threads[previous.id];
-  assert.deepEqual(thread.messages[0].quote, previous.quote);
+  assert.deepEqual(thread.messages[0].selections, [{ id: 'first-message', slug: 'selection-1', quote: previous.quote, isVisible: false }]);
   assert.deepEqual(thread.messages.slice(1), previous.messages.slice(1));
   assert.equal('quote' in thread, false); assert.equal('scope' in thread, false);
   assert.equal(thread.title, previous.title); assert.equal(thread.isResolved, true);
@@ -242,5 +243,37 @@ test('ambiguous migration and failed publication preserve the original state', a
   assert.equal(await readFile(join(directory, 'state.json'), 'utf8'), raw);
   assert.equal(await readFile(join(directory, 'state.v1.backup.json'), 'utf8'), raw);
   await chmod(directory, 0o700);
-  assert.equal((await openStore(directory, owner)).read().version, 2);
+  assert.equal((await openStore(directory, owner)).read().version, 3);
+});
+
+test('v2 migration preserves each message selection, visibility, and version with an exact backup', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'sidecar-v2-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const old = legacySelectionState();
+  const v2 = JSON.parse(JSON.stringify(old)); v2.version = 2;
+  for (const thread of Object.values<any>(v2.threads)) {
+    thread.messages[0].quote = thread.quote;
+    delete thread.quote; delete thread.scope;
+  }
+  const raw = JSON.stringify(v2, null, 2) + '\n';
+  await writeFile(join(directory, 'state.json'), raw);
+  const migrated = (await openStore(directory, owner)).read();
+  const thread = Object.values(migrated.threads)[0];
+  assert.equal(thread.messages[0].selections?.[0].isVisible, false);
+  assert.deepEqual(thread.messages[0].selections?.[0].quote, Object.values(old.threads)[0].quote);
+  assert.deepEqual(migrated.requests, old.requests);
+  assert.equal(await readFile(join(directory, 'state.v2.backup.json'), 'utf8'), raw);
+  resolveThread(migrated, thread.id, false);
+  assert.equal(thread.messages[0].selections?.[0].isVisible, false);
+  v2.threads[thread.id].isResolved = false;
+  const { readSavedState } = await import('../src/store.ts');
+  assert.equal(readSavedState(v2).threads[thread.id].messages[0].selections?.[0].isVisible, true);
+  assert.deepEqual((await openStore(directory, owner)).read().threads[thread.id].messages, thread.messages);
+  // A rollback can leave an older backup while the old app accepts more edits.
+  v2.threads[thread.id].title = 'Edited after rollback';
+  const newer = JSON.stringify(v2);
+  await writeFile(join(directory, 'state.json'), newer);
+  assert.equal((await openStore(directory, owner)).read().threads[thread.id].title, 'Edited after rollback');
+  assert.equal(await readFile(join(directory, 'state.v2.backup.json'), 'utf8'), raw);
+  assert.equal(await readFile(join(directory, `state.v2.${createHash('sha256').update(newer).digest('hex')}.backup.json`), 'utf8'), newer);
 });

@@ -120,8 +120,8 @@ function App() {
   const [sentRequestId, setSentRequestId] = useState<string | null>(null);
   const [messageVisit, setMessageVisit] = useState(0);
   const [originalMessageId, setOriginalMessageId] = useState<string | null>(null);
-  const selectedMessages = threads.flatMap(thread => thread.messages.filter(message => message.quote).map(message => ({ thread, message })));
-  const originalMessage = selectedMessages.find(({ thread, message }) => thread.id === activeThreadId && message.id === originalMessageId)?.message;
+  const selectedMessages = threads.flatMap(thread => thread.messages.flatMap(message => (message.selections ?? []).map(selection => ({ thread, message, selection }))));
+  const originalMessage = selectedMessages.find(({ thread, selection }) => thread.id === activeThreadId && selection.id === originalMessageId)?.selection;
   const [isSidebarShown, setSidebarShown] = useState(() => innerWidth > 850);
   const panelResize = useResizablePanel({
     storageKey: 'sidecar-panel-width',
@@ -181,15 +181,15 @@ function App() {
     if (!composing && isSidebarShown && activeThreadId) setSelection(pendingQuote);
   }, [activeThreadId, pendingQuote, composing, isSidebarShown]);
   useEffect(() => {
-    if (activeMessageId && selectedMessages.some(({ thread, message }) => thread.id === activeThreadId && message.id === activeMessageId)) return;
-    setActiveMessageId(selectedMessages.filter(({ thread }) => thread.id === activeThreadId).at(-1)?.message.id ?? null);
-  }, [activeThreadId, activeMessageId, selectedMessages.map(({ message }) => message.id).join(',')]);
+    if (activeMessageId && selectedMessages.some(({ thread, selection }) => thread.id === activeThreadId && selection.id === activeMessageId)) return;
+    setActiveMessageId(selectedMessages.filter(({ thread }) => thread.id === activeThreadId).at(-1)?.selection.id ?? null);
+  }, [activeThreadId, activeMessageId, selectedMessages.map(({ selection }) => selection.id).join(',')]);
   useEffect(() => {
     if (!sentRequestId) return;
     const thread = threads.find(thread => thread.messages.some(message => message.role === 'user' && message.requestId === sentRequestId));
     const message = thread?.messages.find(message => message.role === 'user' && message.requestId === sentRequestId);
     if (message) {
-      if (thread?.id === activeThreadId && message.quote) setActiveMessageId(message.id);
+      if (thread?.id === activeThreadId && message.selections?.[0]) setActiveMessageId(message.selections[0].id);
       setSentRequestId(null);
     }
   }, [sentRequestId, state, activeThreadId]);
@@ -311,7 +311,7 @@ function App() {
     [],
   );
   const anchors = JSON.stringify(
-    selectedMessages.filter(({ thread }) => !thread.isResolved).map(({ message }) => ({ id: message.id, quote: message.quote })),
+    selectedMessages.filter(({ selection }) => selection.isVisible).map(({ selection }) => ({ id: selection.id, quote: selection.quote })),
   );
   useLayoutEffect(() => {
     const root = article.current;
@@ -523,7 +523,7 @@ function App() {
     setChoices(null);
   }
   function openMessage(id: string) {
-    const selected = selectedMessages.find(({ message }) => message.id === id);
+    const selected = selectedMessages.find(({ selection }) => selection.id === id);
     if (!selected) return;
     openThread(selected.thread.id);
     setActiveMessageId(id);
@@ -535,7 +535,7 @@ function App() {
       painter = highlighter.current;
     if (!mark || !painter) return;
     const ids = [...new Set([painter.getIdByDom(mark), ...painter.getExtraIdByDom(mark)])].filter((id) =>
-      selectedMessages.some(({ message }) => message.id === id),
+      selectedMessages.some(({ selection }) => selection.id === id),
     );
     if (ids.length) setSidebarShown(true);
     if (ids.length === 1) {
@@ -712,7 +712,8 @@ function App() {
           isShown={isSidebarShown}
           drafts={drafts}
           onRemoveSelection={clearSelection}
-          activeMessageId={activeMessageId}
+          activeMessageId={selectedMessages.find(({ selection }) => selection.id === activeMessageId)?.message.id ?? null}
+          activeSelectionId={activeMessageId}
           messageVisit={messageVisit}
           onMessageSent={request => setSentRequestId(request.id)}
           showOriginal={(messageId) => {
@@ -722,10 +723,9 @@ function App() {
             setActiveMessageId(messageId);
             if (innerWidth <= 850) setSidebarShown(false);
           }}
-          showPassage={(message) => {
-            if (!message.quote) return;
-            const quote = message.quote;
-            setActiveMessageId(message.id);
+          showPassage={(selection) => {
+            const quote = selection.quote;
+            setActiveMessageId(selection.id);
             setOriginalMessageId(null);
             requestAnimationFrame(() => {
               const root = article.current,
@@ -736,7 +736,7 @@ function App() {
               if (innerWidth <= 850) setSidebarShown(false);
               (node?.closest('mark') ?? root)?.focus({ preventScroll: true });
               if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
-                for (const mark of highlighter.current?.getDoms(message.id) ?? [])
+                for (const mark of highlighter.current?.getDoms(selection.id) ?? [])
                   mark.animate(
                     [{ boxShadow: '0 0 0 5px oklch(0.75 0.18 280 / 0.6)' }, { boxShadow: '0 0 0 0 transparent' }],
                     { duration: 700 },
@@ -765,7 +765,7 @@ function App() {
                     openMessage(id);
                   }}
                 >
-                  {selectedMessages.find(({ message }) => message.id === id)?.message.text ?? 'Open message'}
+                  {(() => { const entry = selectedMessages.find(({ selection }) => selection.id === id); return entry?.selection.label ?? entry?.message.text ?? 'Open message'; })()}
                 </button>
               ))
             ) : (

@@ -111,7 +111,7 @@ for (const version of [1, 2]) test(`library normalizes saved v${version} without
   const bytes = JSON.stringify(saved, null, 2) + '\n';
   await writeFile(join(directory, 'state.json'), bytes);
   const normalized = await readLibrarySession(root, key);
-  assert.equal(normalized.version, 2);
+  assert.equal(normalized.version, 3);
   assert.equal(await readFile(join(directory, 'state.json'), 'utf8'), bytes);
   await assert.rejects(readFile(join(directory, 'state.v1.backup.json')), { code: 'ENOENT' });
 });

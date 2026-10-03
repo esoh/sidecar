@@ -41,6 +41,76 @@ async function select(page: Page, exact: string) {
   }, exact);
 }
 
+test('each agent selection has a persistent eye, stable reply link, and independent historical view', async ({ page }) => {
+  const doc = await f.register('highlights.md', '# Landmarks\n\nFirst **passage**. Second passage.');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByLabel('Message', { exact: true }).fill('Please identify both passages.');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByRole('log')).toContainText('Please identify both passages.');
+  await answer('[[sidecar-meta {"threadTitle":"Document landmarks","highlights":[{"exact":"First passage.","label":"First"},{"exact":"Second passage."}]}]]\nSee [first](#selection-1) and [second](#selection-2).');
+  const badges = page.locator('.message-selection');
+  await expect(badges).toHaveCount(2);
+  await expect(badges.first()).toContainText('First');
+  await expect.poll(() => page.locator('#document mark').allTextContents().then(t => t.join(''))).toBe('First passage.Second passage.');
+  await badges.first().getByRole('button', { name: 'Hide selection', exact: true }).click();
+  await expect(badges.first().getByRole('button', { name: 'Show selection', exact: true })).toBeVisible();
+  await expect(page.locator('#document mark')).toHaveText('Second passage.');
+  await page.getByRole('log').getByRole('link', { name: 'first', exact: true }).click();
+  await expect(badges.first()).toHaveAttribute('data-active', 'true');
+  await expect(page.locator('#document mark')).toHaveText('Second passage.');
+  await page.reload();
+  await expect(badges.first().getByRole('button', { name: 'Show selection', exact: true })).toBeVisible();
+  await expect(page.locator('#document mark')).toHaveText('Second passage.');
+  await page.getByRole('button', { name: 'Resolve thread', exact: true }).click();
+  await expect(page.locator('#document mark')).toHaveCount(0);
+  await page.getByLabel('Thread status').click(); await page.getByRole('menuitemradio', { name: 'Resolved', exact: true }).click();
+  await page.locator('[data-thread-id]').click();
+  await page.getByRole('button', { name: 'Reopen thread', exact: true }).click();
+  await expect(badges.getByRole('button', { name: 'Show selection', exact: true })).toHaveCount(2);
+  await expect(page.locator('#document mark')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Thread actions', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Show all selections', exact: true }).click();
+  await expect(badges.getByRole('button', { name: 'Hide selection', exact: true })).toHaveCount(2);
+  await page.getByRole('log').getByRole('link', { name: 'second', exact: true }).click();
+  await expect(badges.last()).toHaveAttribute('data-active', 'true');
+  await expect(page.locator('#document mark[data-active]')).toHaveText('Second passage.');
+  await page.getByRole('button', { name: 'Thread actions', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Hide all selections', exact: true }).click();
+  await expect(page.locator('#document mark')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Resolve thread', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Thread actions', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Show all selections', exact: true }).click();
+  await expect(badges.getByRole('button', { name: 'Hide selection', exact: true })).toHaveCount(2);
+  await badges.last().getByRole('button', { name: 'Hide selection', exact: true }).click();
+  await writeFile(join(f.directory, 'highlights.md'), '# Landmarks\n\nFirst **passage**. Replacement passage.');
+  await expect(badges.last()).toContainText('Passage changed');
+  await badges.last().getByRole('button', { name: 'View original document' }).click();
+  await expect(page.getByRole('region', { name: 'Original document', exact: true }).locator('mark')).toHaveText('Second passage.');
+  await badges.last().getByRole('button', { name: 'Show selection', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Original document', exact: true }).locator('mark')).toHaveText('Second passage.');
+  await page.getByRole('button', { name: 'Return to current' }).click();
+  await expect(page.locator('#document')).toContainText('Replacement passage.');
+  await expect(page.locator('#document mark').filter({ hasText: 'Second' })).toHaveCount(0);
+});
+
+test('clicking a later agent highlight scrolls its own selection card into view', async ({ page }) => {
+  const highlights = Array.from({ length: 20 }, (_, i) => ({ exact: `Passage ${i + 1}.` }));
+  const doc = await f.register('many-highlights.md', '# Many highlights\n\n' + highlights.map(h => h.exact).join(' '));
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByLabel('Message', { exact: true }).fill('Highlight these passages.');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByRole('log')).toContainText('Highlight these passages.');
+  await answer(`[[sidecar-meta ${JSON.stringify({ highlights })}]]\nDone.`);
+  const target = page.locator('.message-selection').last();
+  await expect(page.locator('.message-selection')).toHaveCount(20);
+  await page.locator('#document mark').filter({ hasText: /^Passage 20\.$/ }).click();
+  await expect(target).toHaveAttribute('data-active', 'true');
+  await expect.poll(async () => {
+    const card = await target.boundingBox(), log = await page.getByRole('log').boundingBox();
+    return !!card && !!log && card.y >= log.y && card.y + card.height <= log.y + log.height + 1;
+  }).toBe(true);
+});
+
 test('general questions, follow-ups, late replies and independent document titles', async ({ page }) => {
   const a = await f.register(), b = await f.register('b.md', '# Other\n\nSecond document.');
   await page.goto(`${f.url}/?document=${a.id}`);
@@ -155,7 +225,7 @@ test('file refresh preserves the captured passage in an unsent question', async 
   const request = await lastRequest();
   expect(request.quote.exact).toBe('Target passage.');
   expect(request.quote.sentence).toBeUndefined();
-  expect((await state()).threads[request.threadId].messages[0].quote).toEqual(request.quote);
+  expect((await state()).threads[request.threadId].messages[0].selections[0].quote).toEqual(request.quote);
 });
 
 
@@ -1157,7 +1227,7 @@ test('hidden streaming replies preserve a reader’s scroll position', async ({ 
   await expect.poll(() => log.evaluate(el => el.scrollTop)).toBe(position);
 });
 
-test('resolved annotations disappear, preserve overlapping open threads, and reopen when a new message is sent', async ({ page }) => {
+test('resolved annotations disappear, preserve overlapping open threads, and stay hidden when a new message is sent', async ({ page }) => {
   const doc = await f.register();
   await page.goto(`${f.url}/?document=${doc.id}`);
   await expect(page.locator('#document')).toContainText('world');
@@ -1195,12 +1265,12 @@ test('resolved annotations disappear, preserve overlapping open threads, and reo
   await expect(page.getByRole('button', { name: 'Resolve thread', exact: true })).toBeVisible();
   await expect(page.getByRole('log')).toContainText('Another passage question');
   expect((await lastRequest()).threadId).toBe(first.threadId);
-  await expect(marks).toHaveText('world');
+  await expect(marks).toHaveCount(0);
   await page.getByRole('button', { name: 'Threads', exact: true }).click();
   await expect(page.getByLabel('Thread status')).toHaveText('Unresolved');
   await expect(page.locator(`[data-thread-id="${first.threadId}"]`)).toBeVisible();
   await page.reload();
-  await expect(marks).toHaveText('world');
+  await expect(marks).toHaveCount(0);
 });
 
 test('text sizes adjust each pane independently and persist across sessions', async ({ page, context }) => {
@@ -1800,7 +1870,7 @@ test('selection draft survives thread switches and reload, then each message own
   await select(page, 'Second passage.');
   await message.fill('Second question'); await message.press('Enter');
   await expect(page.locator('.message-selection')).toHaveCount(2);
-  expect((await state()).threads[id!].messages.filter((m: any) => m.role === 'user').map((m: any) => m.quote?.exact)).toEqual(['First passage.', undefined, 'Second passage.']);
+  expect((await state()).threads[id!].messages.filter((m: any) => m.role === 'user').map((m: any) => m.selections?.[0].quote.exact)).toEqual(['First passage.', undefined, 'Second passage.']);
   await expect.poll(() => page.locator('#document mark[data-active]').allTextContents().then(t => t.join(''))).toBe('Second passage.');
   await page.getByRole('button', { name: 'Show passage: First passage.', exact: true }).click();
   await expect.poll(() => page.locator('#document mark[data-active]').allTextContents().then(t => t.join(''))).toBe('First passage.');

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { fixture } from './support.ts';
+import { writeFile } from 'node:fs/promises';
 
 async function setup(t: Parameters<typeof fixture>[0]) {
   const f = await fixture(t);
@@ -15,6 +16,60 @@ async function setup(t: Parameters<typeof fixture>[0]) {
   const snapshot = async () => (await f.view('/api/state')).json();
   return { f, request, route, markers, emit, snapshot };
 }
+
+test('reply metadata is hidden while streaming, then titles and multiple selections save with the answer', async t => {
+  const { f, request, route, markers, emit, snapshot } = await setup(t);
+  const metadata = JSON.stringify({ threadTitle: 'Find the greeting', highlights: [{ exact: 'First heading', label: 'Heading' }, { exact: 'Hello world.' }] });
+  await emit(0, markers.prefix + '[[sidecar-me');
+  assert.equal((await snapshot()).stream.text, '');
+  await emit(1, 'ta ' + metadata + ']]\nSee [the heading](#selection-1) and [greeting](#selection-2).');
+  assert.equal((await snapshot()).stream.text, 'See [the heading](#selection-1) and [greeting](#selection-2).');
+  assert.equal((await snapshot()).threads[request.threadId].title, undefined);
+  await emit(2, markers.suffix, true);
+  const state = await snapshot(), thread = state.threads[request.threadId], answer = thread.messages.at(-1);
+  assert.equal(thread.title, 'Find the greeting');
+  assert.equal(answer.text.includes('sidecar-meta'), false);
+  assert.deepEqual(answer.selections.map((s: any) => [s.slug, s.quote.exact, s.label, s.isVisible]), [['selection-1', 'First heading', 'Heading', true], ['selection-2', 'Hello world.', undefined, true]]);
+  const saved = await (await f.view(`/api/documents/${route.documentId}/versions/${answer.selections[0].quote.version}`)).json();
+  assert.equal(saved.markdown, '# First heading\n\nHello **world**.\n');
+  assert.equal((await f.view(`/api/threads/${thread.id}/selections/${answer.selections[0].id}`, { isVisible: false })).status, 200);
+  assert.equal((await snapshot()).threads[thread.id].messages.at(-1).selections[1].isVisible, true);
+  await f.view(`/api/threads/${thread.id}/resolution`, { isResolved: true });
+  await f.view(`/api/threads/${thread.id}/resolution`, { isResolved: false });
+  assert.ok((await snapshot()).threads[thread.id].messages.at(-1).selections.every((s: any) => !s.isVisible));
+  await f.view(`/api/threads/${thread.id}/selections`, { isVisible: true });
+  await f.reopen();
+  assert.ok((await snapshot()).threads[thread.id].messages.at(-1).selections.every((s: any) => s.isVisible));
+  assert.equal((await snapshot()).threads[thread.id].messages.length, 2);
+});
+
+test('metadata respects assigned titles, reports failure without a reply command, and isolates interrupted retries', async t => {
+  const { f, request, markers, emit, snapshot } = await setup(t);
+  await f.view(`/api/threads/${request.threadId}/title`, { title: 'My title' }, 'PATCH');
+  await emit(0, markers.prefix + '[[sidecar-meta {"threadTitle":"Wrong","highlights":[{"exact":"Hello"}]}]]\nInterrupted', true);
+  await emit(0, markers.prefix + '[[sidecar-meta {"threadTitle":"Also wrong","isError":true}]]\nCould not finish.' + markers.suffix, true, 'retry');
+  const state = await snapshot();
+  assert.equal(state.threads[request.threadId].title, 'My title');
+  assert.equal(state.requests[request.id].status, 'failed');
+  assert.deepEqual(state.requests[request.id].answer, { text: 'Could not finish.', isError: true });
+  assert.equal(state.threads[request.threadId].messages.at(-1).selections, undefined);
+});
+
+test('invalid metadata cannot strand the answer or change a thread, and reply fallback supports the same header', async t => {
+  const { f, request, route, markers, emit, snapshot } = await setup(t);
+  await emit(0, markers.prefix + '[[sidecar-meta {bad json}]]\nPlain answer.' + markers.suffix, true);
+  assert.equal((await snapshot()).requests[request.id].answer.text, 'Plain answer.');
+  const next = await (await f.view('/api/questions', { documentId: route.documentId, threadId: route.threadId, text: 'Where is it?', clientMessageId: 'fallback' })).json();
+  await f.agent(`/agent/requests/${next.id}/claim`, {});
+  await f.view(`/api/threads/${route.threadId}/resolution`, { isResolved: true });
+  const body = { ...route, requestId: next.id, text: '[[sidecar-meta {"threadTitle":"Find greeting","highlights":[{"exact":"Hello"}]}]]\nHere.' };
+  assert.equal((await f.agent('/agent/replies', body)).status, 200);
+  const before = await snapshot();
+  assert.equal(before.threads[route.threadId].messages.at(-1).selections[0].isVisible, false);
+  await writeFile(before.documents[route.documentId].path, '# Changed\n');
+  assert.equal((await f.agent('/agent/replies', body)).status, 200);
+  assert.deepEqual((await snapshot()).threads[route.threadId], before.threads[route.threadId]);
+});
 
 test('streamed text stays routed, incomplete, and escaped until native completion', async t => {
   const { f, request, route, markers, emit, snapshot } = await setup(t);
@@ -114,4 +169,29 @@ test('a truncated native event can recover the existing markers without resettin
   assert.equal((await snapshot()).requests[request.id].status, 'completed');
   const completed = await (await f.agent(`/agent/requests/${request.id}/claim`, {})).json();
   assert.equal(completed.stream, undefined, 'completed requests must not offer a new reply stream');
+});
+
+for (const finalized of [false, true]) test(`a complete retry replaces an interrupted ${finalized ? 'completed' : 'unfinished'} native message`, async t => {
+  const { f, request, route, markers, emit, snapshot } = await setup(t);
+  await emit(0, markers.progress.prefix + 'Checking.' + markers.progress.suffix, true, 'progress');
+  await emit(0, markers.prefix + 'Interrupted', finalized);
+  const next = await (await f.view('/api/questions', { documentId: route.documentId, text: 'Next', clientMessageId: 'next' })).json();
+  assert.equal((await snapshot()).requests[next.id].status, 'queued');
+  await emit(0, 'An unrelated reply.', true, 'unrelated');
+  await emit(0, '[[sidecar:wrong]]\nWrong request\n[[/sidecar:wrong]]', true, 'wrong');
+  assert.equal((await snapshot()).requests[request.id].status, 'claimed');
+  await emit(2, ' retry.' + markers.suffix, true, 'retry');
+  await emit(0, markers.prefix.slice(0, 8), false, 'retry');
+  assert.equal((await snapshot()).requests[request.id].status, 'claimed');
+  await emit(1, markers.prefix.slice(8) + 'Complete', false, 'retry');
+  let state = await snapshot();
+  assert.equal(state.requests[request.id].status, 'completed');
+  assert.equal(state.requests[request.id].answer.text, 'Complete retry.');
+  assert.deepEqual(state.threads[request.threadId].messages.map((m: any) => m.text), ['Explain', 'Checking.', 'Complete retry.']);
+  await emit(1, ' late.' + markers.suffix, true);
+  assert.equal((await snapshot()).threads[request.threadId].messages.length, 3);
+  assert.equal((await (await f.agent(`/agent/requests/${next.id}/claim`, {})).json()).claimStatus, 'claimed');
+  await f.reopen();
+  state = await snapshot();
+  assert.equal(state.requests[request.id].answer.text, 'Complete retry.');
 });
