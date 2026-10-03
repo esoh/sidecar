@@ -5,6 +5,21 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fixture } from './support.ts';
 
+test('message pins validate routing and survive restart without altering message contents', async t => {
+  const f = await fixture(t), doc = await f.register();
+  const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'Remember this', clientMessageId: 'pin' })).json();
+  const before = (await (await f.view('/api/state')).json()).threads[request.threadId].messages[0];
+  const path = `/api/threads/${request.threadId}/messages/${before.id}/pin`;
+  assert.equal((await f.view(path, { isPinned: 'yes' })).status, 400);
+  assert.equal((await f.view(path, { isPinned: true, pinStyle: { symbol: '<script>', color: 'red' } })).status, 400);
+  assert.equal((await f.view(`/api/threads/${request.threadId}/messages/missing/pin`, { isPinned: true })).status, 404);
+  assert.equal((await f.view(path, { isPinned: true, pinStyle: { symbol: 'A', color: 'violet' } })).status, 200);
+  await f.reopen();
+  assert.deepEqual((await (await f.view('/api/state')).json()).threads[request.threadId].messages[0], { ...before, isPinned: true, pinStyle: { symbol: 'A', color: 'violet' } });
+  assert.equal((await f.view(path, { isPinned: false })).status, 200);
+  assert.equal((await (await f.view('/api/state')).json()).threads[request.threadId].messages[0].isPinned, false);
+});
+
 test('HTTP questions and replies retain routing, resolution, and history', async t => {
   const f = await fixture(t);
   const doc = await f.register();

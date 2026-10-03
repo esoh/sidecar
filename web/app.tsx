@@ -15,7 +15,8 @@ import { useQuestionDrafts, forgetDocument, type QuestionDraft, type QuestionDra
 import { locateQuote, quoteRange, selectionText, selectionSentence, excludedSelection } from './selection.ts';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
 import { DocumentLibrary } from './DocumentLibrary.tsx';
-import { TextSettings } from './TextSettings.tsx';
+import { SettingsProvider, TextSettings } from './TextSettings.tsx';
+import { PinnedWindows } from './PinnedWindows.tsx';
 import { DocumentHeader } from './DocumentHeader.tsx';
 import { OriginalDocument } from './OriginalDocument.tsx';
 import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
@@ -91,6 +92,7 @@ function App() {
     [composing, setComposing] = useState(false);
   const [choices, setChoices] = useState<{ ids: string[]; rect: DOMRect } | null>(null);
   const article = useRef<HTMLElement>(null),
+    workspace = useRef<HTMLDivElement>(null),
     composer = useRef<HTMLElement>(null),
     toolbar = useRef<HTMLDivElement>(null);
   const painted = useRef(new Map<string, string>());
@@ -119,6 +121,8 @@ function App() {
   const [activeMessageId, setActiveMessageId] = useState<string | null>(null);
   const [sentRequestId, setSentRequestId] = useState<string | null>(null);
   const [messageVisit, setMessageVisit] = useState(0);
+  const [openPins, setOpenPins] = useState<string[]>([]);
+  const [messageJump, setMessageJump] = useState<{ id: string; sequence: number } | null>(null);
   const [originalMessageId, setOriginalMessageId] = useState<string | null>(null);
   const selectedMessages = threads.flatMap(thread => thread.messages.flatMap(message => (message.selections ?? []).map(selection => ({ thread, message, selection }))));
   const originalMessage = selectedMessages.find(({ thread, selection }) => thread.id === activeThreadId && selection.id === originalMessageId)?.selection;
@@ -135,6 +139,7 @@ function App() {
   }, [panelResize.width]);
   const openThread = useCallback(
     (id: string | null) => {
+      const focusBeforeOpen = document.activeElement;
       setOriginalMessageId(null);
       drafts.flush();
       setSelection(id ? drafts.get(id)?.quote : undefined);
@@ -143,7 +148,9 @@ function App() {
       setActiveThreadId(id);
       setActiveMessageId(null);
       setSidebarShown(true);
-      if (id) requestAnimationFrame(() => document.getElementById('conversation-back')?.focus({ preventScroll: true }));
+      if (id) requestAnimationFrame(() => {
+        if (document.activeElement === focusBeforeOpen) document.getElementById('conversation-back')?.focus({ preventScroll: true });
+      });
       try {
         sessionStorage.setItem(`sidecar-thread:${documentId}`, id ?? 'list');
       } catch {
@@ -549,6 +556,37 @@ function App() {
     return ids.length > 0;
   }
   const passageChanged = (quote: Quote) => !!documentError || !locateQuote(documentText, quote);
+  const selectionActions = {
+    activeSelectionId: activeMessageId,
+    passageChanged,
+    showOriginal: (selectionId: string) => {
+      const entry = selectedMessages.find(({ selection }) => selection.id === selectionId);
+      if (entry) setActiveThreadId(entry.thread.id);
+      clearSelection();
+      window.getSelection()?.removeAllRanges();
+      setOriginalMessageId(selectionId);
+      setActiveMessageId(selectionId);
+      if (innerWidth <= 850) setSidebarShown(false);
+    },
+    showPassage: (selection: import('../src/store.ts').MessageSelection) => {
+      const entry = selectedMessages.find(item => item.selection.id === selection.id);
+      if (entry) setActiveThreadId(entry.thread.id);
+      setActiveMessageId(selection.id);
+      setOriginalMessageId(null);
+      requestAnimationFrame(() => {
+        const root = article.current, range = root && quoteRange(root, selection.quote);
+        if (!range) return;
+        const node = range.startContainer.parentElement;
+        node?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        if (innerWidth <= 850) setSidebarShown(false);
+        (node?.closest('mark') ?? root)?.focus({ preventScroll: true });
+        if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
+          for (const mark of highlighter.current?.getDoms(selection.id) ?? [])
+            mark.animate([{ boxShadow: '0 0 0 5px oklch(0.75 0.18 280 / 0.6)' }, { boxShadow: '0 0 0 0 transparent' }], { duration: 700 });
+        }
+      });
+    },
+  };
   const cancel = () => {
     if (!sendingComment.current) {
       clearSelection();
@@ -635,6 +673,7 @@ function App() {
         </p>
       )}
       <div className={`layout${isSidebarShown ? '' : ' sidebar-collapsed'}`}>
+        <div className="document-workspace" ref={workspace}>
         <main className="canvas">
           <div className="reading-width">
             {originalMessage?.quote && (
@@ -684,6 +723,13 @@ function App() {
             </article>
           </div>
         </main>
+        <PinnedWindows key={documentId} workspace={workspace} threads={threads} documentId={documentId} openRequests={openPins} onOpened={ids => setOpenPins(previous => previous.filter(id => !ids.includes(id)))} {...selectionActions} onGoToMessage={id => {
+          const thread = threads.find(thread => thread.messages.some(message => message.id === id));
+          if (!thread) return;
+          openThread(thread.id);
+          setMessageJump(previous => ({ id, sequence: (previous?.sequence ?? 0) + 1 }));
+        }} />
+        </div>
         {isSidebarShown && (
           <ResizeHandle
             {...panelResize.handleProps}
@@ -708,42 +754,15 @@ function App() {
           }
           requests={Object.values(state?.requests ?? {})}
           stream={state?.stream ?? null}
-          passageChanged={passageChanged}
+          {...selectionActions}
           isShown={isSidebarShown}
           drafts={drafts}
           onRemoveSelection={clearSelection}
           activeMessageId={selectedMessages.find(({ selection }) => selection.id === activeMessageId)?.message.id ?? null}
-          activeSelectionId={activeMessageId}
           messageVisit={messageVisit}
           onMessageSent={request => setSentRequestId(request.id)}
-          showOriginal={(messageId) => {
-            clearSelection();
-            window.getSelection()?.removeAllRanges();
-            setOriginalMessageId(messageId);
-            setActiveMessageId(messageId);
-            if (innerWidth <= 850) setSidebarShown(false);
-          }}
-          showPassage={(selection) => {
-            const quote = selection.quote;
-            setActiveMessageId(selection.id);
-            setOriginalMessageId(null);
-            requestAnimationFrame(() => {
-              const root = article.current,
-                range = root && quoteRange(root, quote);
-              if (!range) return;
-              const node = range.startContainer.parentElement;
-              node?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-              if (innerWidth <= 850) setSidebarShown(false);
-              (node?.closest('mark') ?? root)?.focus({ preventScroll: true });
-              if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
-                for (const mark of highlighter.current?.getDoms(selection.id) ?? [])
-                  mark.animate(
-                    [{ boxShadow: '0 0 0 5px oklch(0.75 0.18 280 / 0.6)' }, { boxShadow: '0 0 0 0 transparent' }],
-                    { duration: 700 },
-                  );
-              }
-            });
-          }}
+          onOpenPin={id => setOpenPins(previous => [...previous.filter(value => value !== id), id])}
+          messageJump={messageJump}
         />
       </div>
       {((selection && !composing) || choices) &&
@@ -814,4 +833,4 @@ function App() {
   );
 }
 const root = document.getElementById('root');
-if (root) createRoot(root).render(new URLSearchParams(location.search).has('library') ? <DocumentLibrary /> : <App />);
+if (root) createRoot(root).render(<SettingsProvider>{new URLSearchParams(location.search).has('library') ? <DocumentLibrary /> : <App />}</SettingsProvider>);
