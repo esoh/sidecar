@@ -12,7 +12,8 @@ import { parseReply } from './reply-metadata.ts';
 import { readDocument } from './documents.ts';
 import { readAppVersion } from './version.ts';
 import { libraryDocument, listLibrary, recordDocumentOpen } from './library.ts';
-import { claim, createThread, closeDocument, discardEmptyThread, nameThread, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, setSelectionVisibility, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput, type ReplyInput } from './store.ts';
+import { claim, createThread, closeDocument, discardEmptyThread, nameThread, pinMessage, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, setSelectionVisibility, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput, type ReplyInput } from './store.ts';
+import { isPinStyle } from './pin-style.ts';
 
 const rendererRequire = createRequire(import.meta.resolve('@plannotator/ui/components/BlockRenderer'));
 const rendererFonts = {
@@ -485,6 +486,14 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       if (method === 'POST' && visibility) {
         const isVisible = boolean(body, 'isVisible');
         await store.update(state => setSelectionVisibility(state, visibility[1], isVisible, visibility[2]));
+        changed(); json(response, { ok: true }); return;
+      }
+      const pin = path.match(/^\/api\/threads\/([^/]+)\/messages\/([^/]+)\/pin$/);
+      if (method === 'POST' && pin) {
+        const isPinned = boolean(body, 'isPinned');
+        const style = body.pinStyle;
+        if (style !== undefined && !isPinStyle(style)) throw new DomainError('Invalid pin style');
+        await store.update(state => pinMessage(state, pin[1], pin[2], isPinned, style));
         changed(); json(response, { ok: true }); return;
       }
       const renameTitle = path.match(/^\/api\/documents\/([^/]+)\/title$/);

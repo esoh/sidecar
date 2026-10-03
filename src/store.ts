@@ -4,13 +4,14 @@ import { isAbsolute, join, resolve } from 'node:path';
 
 import { isQuote, type Quote } from './quote.ts';
 import type { ReplyMetadata } from './reply-metadata.ts';
+import { isPinStyle, type PinStyle } from './pin-style.ts';
 
 export type Owner = { agent: 'codex' | 'claude'; sessionId: string };
 export { isQuote, type Quote } from './quote.ts';
 export type RepoInfo = { display: string; branch?: string };
 export type DocumentRecord = { id: string; path: string; generated: boolean; providedTitle?: string; userTitle?: string; repoInfo?: RepoInfo };
 export type MessageSelection = { id: string; slug: string; quote: Quote; isVisible: boolean; label?: string };
-export type Message = { id: string; role: 'user' | 'agent'; text: string; requestId: string; createdAt: number; selections?: MessageSelection[] };
+export type Message = { id: string; role: 'user' | 'agent'; text: string; requestId: string; createdAt: number; selections?: MessageSelection[]; isPinned?: boolean; pinStyle?: PinStyle };
 export type Thread = { id: string; documentId: string; title?: string; createdAt?: number; isResolved: boolean; messages: Message[] };
 export type RequestRecord = {
   id: string; documentId: string; threadId: string; text: string; clientMessageId: string;
@@ -49,7 +50,7 @@ function isMessage(v: unknown): v is Message {
   return isMessageFields(v) && !('quote' in v) && (v.selections === undefined || (Array.isArray(v.selections) && v.selections.length <= (v.role === 'user' ? 1 : 20) && v.selections.every(s => isObject(s) && string(s.id) && string(s.slug) && /^selection-[1-9][0-9]*$/.test(s.slug) && isQuote(s.quote) && typeof s.isVisible === 'boolean' && optionalString(s.label)) && new Set(v.selections.map(s => s.id)).size === v.selections.length && new Set(v.selections.map(s => s.slug)).size === v.selections.length));
 }
 function isMessageFields(v: unknown): v is Record<string, unknown> & { id: string } {
-  return isObject(v) && string(v.id) && (v.role === 'user' || v.role === 'agent') && string(v.text) && string(v.requestId) && number(v.createdAt);
+  return isObject(v) && string(v.id) && (v.role === 'user' || v.role === 'agent') && string(v.text) && string(v.requestId) && number(v.createdAt) && (v.isPinned === undefined || typeof v.isPinned === 'boolean') && (v.pinStyle === undefined || isPinStyle(v.pinStyle));
 }
 type OldMessage = Omit<Message, 'selections'> & { quote?: Quote };
 type OldThread = Omit<Thread, 'messages'> & { messages: OldMessage[] };
@@ -252,6 +253,13 @@ export function reply(state: State, input: ReplyInput): void {
 export function resolveThread(state: State, threadId: string, isResolved: boolean): void {
   get(state.threads, threadId).isResolved = isResolved;
   if (isResolved) setSelectionVisibility(state, threadId, false);
+}
+export function pinMessage(state: State, threadId: string, messageId: string, isPinned: boolean, pinStyle?: PinStyle): void {
+  if (pinStyle !== undefined && !isPinStyle(pinStyle)) throw new DomainError('Invalid pin style');
+  const message = get(state.threads, threadId).messages.find(message => message.id === messageId);
+  if (!message) throw new DomainError('Message not found', 404);
+  message.isPinned = isPinned;
+  if (pinStyle) message.pinStyle = { symbol: pinStyle.symbol, color: pinStyle.color };
 }
 export function setSelectionVisibility(state: State, threadId: string, isVisible: boolean, selectionId?: string): void {
   const selections = get(state.threads, threadId).messages.flatMap(message => message.selections ?? []);

@@ -2,14 +2,29 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuRadioGroup, DropdownMenuRadioItem } from '@plannotator/ui/components/ui/dropdown-menu';
 import { threadMatch } from './thread-search.ts';
 import { Tooltip } from '@plannotator/ui/components/Tooltip';
-import type { MessageSelection as SavedSelection, Quote, RequestRecord, Thread } from '../src/store.ts';
+import { Popover, PopoverContent, PopoverTrigger } from '@plannotator/ui/components/Popover';
+import type { Message, MessageSelection as SavedSelection, Quote, RequestRecord, Thread } from '../src/store.ts';
 import { api, errorText, type ViewerState } from './api.ts';
 import { AgentSession } from './AgentSession.tsx';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
+import { copyMessage, messagePreview } from './message-copy.ts';
+import { useMessageSettings } from './TextSettings.tsx';
+import { isPinIcon, pinColors, pinIcons, type PinStyle } from '../src/pin-style.ts';
 
 import type { QuestionDraft, QuestionDrafts } from './useQuestionDrafts.ts';
 
 const paths = {
+  minimize: 'M5 18h14',
+  star: 'm12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9L12 3Z',
+  bookmark: 'M6 3h12v18l-6-4-6 4V3Z',
+  flag: 'M5 21V3m0 1h14l-3 5 3 5H5',
+  bulb: 'M9 18h6m-6 3h6M8 14a6 6 0 1 1 8 0c-1 1-1 2-1 2H9s0-1-1-2Z',
+  code: 'm8 6-6 6 6 6m8-12 6 6-6 6M14 3l-4 18',
+  tag: 'M3 3h8l10 10-8 8L3 11V3Zm4 4h.01',
+  target: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM17 12a5 5 0 1 1-10 0 5 5 0 0 1 10 0ZM12 12h.01',
+  pin: 'm16 3 5 5-5 2-2 5-2 2-5-5 2-2 5-2 2-5ZM8 16l-5 5',
+  copy: 'M9 9h12v12H9zM15 6V3H3v12h3',
+  dock: 'M3 3h18v18H3zM3 15h18',
   more: 'M5 11v2M12 11v2M19 11v2',
   eye: 'M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12ZM15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z',
   eyeOff: 'm3 3 18 18M10 5a12 12 0 0 1 2 0c6.5 0 10 7 10 7a22 22 0 0 1-3 4M6 6a22 22 0 0 0-4 6s3.5 7 10 7a13 13 0 0 0 5-1M9 9a4 4 0 0 0 6 6',
@@ -358,6 +373,8 @@ export function ConversationSidebar({
   activeSelectionId,
   messageVisit,
   onMessageSent,
+  onOpenPin,
+  messageJump,
 }: {
   documentId: string;
   threads: Thread[];
@@ -376,6 +393,8 @@ export function ConversationSidebar({
   activeSelectionId: string | null;
   messageVisit: number;
   onMessageSent: (request: RequestRecord) => void;
+  onOpenPin: (messageId: string) => void;
+  messageJump: { id: string; sequence: number } | null;
 }) {
   const [filter, setFilter] = useState('unresolved'),
     [search, setSearch] = useState(''),
@@ -412,6 +431,7 @@ export function ConversationSidebar({
     filterInput = useRef<HTMLButtonElement>(null);
   const previousId = useRef<string | null>(null),
     atBottom = useRef(true);
+  const handledJump = useRef<number | null>(null);
   const active = threads.find((thread) => thread.id === activeId);
   const requestStatuses = new Map(requests.map((request) => [request.id, request.status]));
   const latestMessages = new Map(active?.messages.map(message => [message.requestId, message.id]));
@@ -466,6 +486,17 @@ export function ConversationSidebar({
       ?? Array.from(messages.current?.querySelectorAll<HTMLElement>('[data-message-id]') ?? []).find(node => node.dataset.messageId === activeMessageId);
     node?.scrollIntoView({ block: 'nearest' });
   }, [activeSelectionId, activeMessageId, active?.id, isShown, messageVisit]);
+  useLayoutEffect(() => {
+    if (!isShown || !messageJump || handledJump.current === messageJump.sequence) return;
+    const node = Array.from(messages.current?.querySelectorAll<HTMLElement>('[data-message-id]') ?? []).find(node => node.dataset.messageId === messageJump.id);
+    if (!node) return;
+    const frame = requestAnimationFrame(() => {
+      handledJump.current = messageJump.sequence;
+      node.scrollIntoView({ block: 'center' }); node.focus({ preventScroll: true });
+      if (!matchMedia('(prefers-reduced-motion: reduce)').matches) node.animate([{ backgroundColor: 'oklch(0.75 0.18 280 / 0.2)' }, { backgroundColor: 'transparent' }], { duration: 800 });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [messageJump, active?.id, isShown]);
   async function newConversation() {
     if (createBusy.current || !documentId) return;
     createBusy.current = true;
@@ -599,6 +630,7 @@ export function ConversationSidebar({
           </div>
         )}
       </div>
+      {active && <PinnedMessages key={active.id} threadId={active.id} messages={active.messages} onOpen={onOpenPin} />}
       {error && (
         <p className="sidebar-error" role="alert">
           {error}
@@ -629,21 +661,10 @@ export function ConversationSidebar({
               const isLatest = latestMessages.get(message.requestId) === message.id;
               const hasStreamedReply = stream?.requestId === message.requestId && !!stream.text;
               return (
-                <div className={`message ${message.role}`} key={message.id} data-message-id={message.id} data-active={message.id === activeMessageId || undefined}>
-                  {message.selections?.map(selection => <MessageSelection key={selection.id} documentId={documentId} messageId={message.id} threadId={active.id} selection={selection} isActive={selection.id === activeSelectionId} isChanged={passageChanged(selection.quote)} showPassage={() => showPassage(selection)} showOriginal={() => showOriginal(selection.id)} />)}
-                  <div className="message-bubble">
-                    <MarkdownDocument
-                      markdown={message.text}
-                      documentId={documentId}
-                      anchorPrefix={`message-${message.id}-`}
-                      onSelectionLink={slug => {
-                        const selection = message.selections?.find(selection => selection.slug === slug);
-                        if (!selection) return false;
-                        if (passageChanged(selection.quote)) showOriginal(selection.id);
-                        else showPassage(selection);
-                        return true;
-                      }}
-                    />
+                <div className={`message ${message.role}`} key={message.id} tabIndex={-1} data-message-id={message.id} data-active={message.id === activeMessageId || undefined}>
+                  <div className="message-content">
+                    <MessageContent message={message} documentId={documentId} threadId={active.id} activeSelectionId={activeSelectionId} passageChanged={passageChanged} showPassage={showPassage} showOriginal={showOriginal} />
+                    <MessageActions message={message} threadId={active.id} onPinned={() => onOpenPin(message.id)} />
                   </div>
                   {isLatest && !hasStreamedReply && (status === 'queued' || status === 'claimed') && (
                     <div className="message-status" role="status">
@@ -735,6 +756,87 @@ export function ConversationSidebar({
   );
 }
 
+export type MessageContentProps = {
+  message: Message; documentId: string; threadId: string; activeSelectionId: string | null;
+  passageChanged: (quote: Quote) => boolean; showPassage: (selection: SavedSelection) => void; showOriginal: (id: string) => void;
+};
+export function MessageContent({ message, documentId, threadId, activeSelectionId, passageChanged, showPassage, showOriginal, prefix = 'message' }: MessageContentProps & { prefix?: string }) {
+  return <>
+    {message.selections?.map(selection => <MessageSelection key={selection.id} documentId={documentId} messageId={message.id} threadId={threadId} selection={selection} isActive={selection.id === activeSelectionId} isChanged={passageChanged(selection.quote)} showPassage={() => showPassage(selection)} showOriginal={() => showOriginal(selection.id)} />)}
+    <div className="message-bubble"><MarkdownDocument markdown={message.text} documentId={documentId} anchorPrefix={`${prefix}-${message.id}-`} onSelectionLink={slug => {
+      const selection = message.selections?.find(selection => selection.slug === slug);
+      if (!selection) return false;
+      if (passageChanged(selection.quote)) showOriginal(selection.id); else showPassage(selection);
+      return true;
+    }} /></div>
+  </>;
+}
+
+function MessageActions({ message, threadId, onPinned }: { message: Message; threadId: string; onPinned: () => void }) {
+  const { copyFormat } = useMessageSettings();
+  const [saving, setSaving] = useState(false), [error, setError] = useState(''), [copied, setCopied] = useState(false);
+  useEffect(() => { if (copied) { const timer = setTimeout(() => setCopied(false), 1500); return () => clearTimeout(timer); } }, [copied]);
+  return <>
+    <div className="message-actions">
+      <button aria-label="Copy message" title={copied ? 'Copied' : 'Copy message'} onClick={async () => {
+        try { await copyMessage(message.text, copyFormat); setCopied(true); setError(''); } catch (reason) { setError(errorText(reason)); }
+      }}><Icon name={copied ? 'check' : 'copy'} /></button>
+      <button aria-label={message.isPinned ? 'Unpin message' : 'Pin message'} title={message.isPinned ? 'Unpin message' : 'Pin message'} aria-pressed={!!message.isPinned} disabled={saving} onClick={async () => {
+        setSaving(true);
+        try { await api(`/api/threads/${threadId}/messages/${encodeURIComponent(message.id)}/pin`, { isPinned: !message.isPinned }); setError(''); if (!message.isPinned) onPinned(); }
+        catch (reason) { setError(errorText(reason)); }
+        finally { setSaving(false); }
+      }}><Icon name="pin" /></button>
+    </div>
+    {copied && <span className="sr-only" role="status">Message copied</span>}
+    {error && <p role="alert">{error}</p>}
+  </>;
+}
+
+export function PinSymbol({ style }: { style?: PinStyle }) {
+  const symbol = style?.symbol ?? 'pin';
+  return <span className="pin-symbol" data-color={style?.color ?? 'default'} aria-hidden="true">{isPinIcon(symbol) ? <Icon name={symbol} /> : symbol}</span>;
+}
+
+function PinMenu({ message, threadId }: { message: Message; threadId: string }) {
+  const [category, setCategory] = useState('icons'), [saving, setSaving] = useState(false), [error, setError] = useState(''), [open, setOpen] = useState(false);
+  const [style, setStyle] = useState<PinStyle>(message.pinStyle ?? { symbol: 'pin', color: 'default' });
+  useEffect(() => setStyle(message.pinStyle ?? { symbol: 'pin', color: 'default' }), [message.pinStyle]);
+  async function save(pinStyle: PinStyle, isPinned = true) {
+    if (saving) return;
+    setSaving(true);
+    try { await api(`/api/threads/${threadId}/messages/${encodeURIComponent(message.id)}/pin`, { isPinned, pinStyle }); setStyle(pinStyle); setError(''); }
+    catch (reason) { setError(errorText(reason)); }
+    finally { setSaving(false); }
+  }
+  const symbols = category === 'icons' ? pinIcons : (category === 'letters' ? 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' : '0123456789').split('');
+  return <Popover open={open} onOpenChange={setOpen}>
+    <PopoverTrigger className="pin-options" aria-label="Pin options" title="Pin options"><PinSymbol style={style} /></PopoverTrigger>
+    <PopoverContent className="pin-menu" align="start" role="dialog" aria-label="Pin options" onKeyDown={event => {
+      if (event.ctrlKey || event.metaKey || event.altKey || event.nativeEvent.isComposing || !/^[a-z0-9]$/i.test(event.key)) return;
+      event.preventDefault(); event.stopPropagation();
+      setCategory(/^[0-9]$/.test(event.key) ? 'numbers' : 'letters');
+      void save({ ...style, symbol: event.key.toUpperCase() });
+    }}>
+      <div className="pin-categories" role="group" aria-label="Symbol type">{['icons', 'letters', 'numbers'].map(value => <button key={value} aria-pressed={category === value} onClick={() => setCategory(value)}>{value[0].toUpperCase() + value.slice(1)}</button>)}</div>
+      <div className="pin-symbol-grid" role="group" aria-label="Pin symbol">{symbols.map(symbol => <button key={symbol} aria-label={symbol[0].toUpperCase() + symbol.slice(1)} title={symbol[0].toUpperCase() + symbol.slice(1)} aria-pressed={style.symbol === symbol} disabled={saving} onClick={() => { void save({ ...style, symbol }); }}><PinSymbol style={{ ...style, symbol }} /></button>)}</div>
+      <div className="pin-colors" role="group" aria-label="Pin color">{pinColors.map(color => <button key={color} aria-label={color[0].toUpperCase() + color.slice(1)} title={color[0].toUpperCase() + color.slice(1)} aria-pressed={style.color === color} disabled={saving} onClick={() => { void save({ ...style, color }); }}><span className="pin-color" data-color={color} /></button>)}</div>
+      {error && <p role="alert">{error}</p>}
+      <button className="unpin-action" disabled={saving} onClick={() => { void save(style, false); }}><Icon name="pin" />Unpin</button>
+    </PopoverContent>
+  </Popover>;
+}
+
+function PinnedMessages({ messages, threadId, onOpen }: { messages: Message[]; threadId: string; onOpen: (id: string) => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const pins = messages.filter(message => message.isPinned);
+  if (!pins.length) return null;
+  return <nav className="pinned-messages" aria-label="Pinned messages">
+    {(pins.length > 3 && !expanded ? pins.slice(0, 2) : pins).map(message => <div className="pinned-message-row" key={message.id}><PinMenu message={message} threadId={threadId} /><button className="pinned-message-title" title={messagePreview(message.text)} onClick={() => onOpen(message.id)}><span>{messagePreview(message.text)}</span></button></div>)}
+    {pins.length > 3 && <button className="pins-expand" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? 'Show less' : `${pins.length - 2} more`}<Icon name="chevron" /></button>}
+  </nav>;
+}
+
 // Selection badge and excerpt adapted from Plannotator DocumentQAPair (MIT).
 function MessageSelection({ documentId, threadId, messageId, selection, isActive, isChanged, showPassage, showOriginal }: {
   documentId: string; threadId: string; messageId: string; selection: SavedSelection; isActive: boolean; isChanged: boolean; showPassage: () => void; showOriginal: () => void;
@@ -756,7 +858,7 @@ function MessageSelection({ documentId, threadId, messageId, selection, isActive
         try { await api(`/api/threads/${threadId}/selections/${encodeURIComponent(selection.id)}`, { isVisible: !selection.isVisible }); setError(''); }
         catch (reason) { setError(errorText(reason)); }
         finally { setSaving(false); }
-      }}><Icon name={selection.isVisible ? 'eye' : 'eyeOff'} /></button>
+      }}>{selection.isVisible ? 'Hide' : 'Show'}</button>
     </div>
     {isChanged ? <span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={quote.exact}>{quote.exact}</span> :
       <button aria-label={`Show passage: ${quote.exact}`} onClick={showPassage}><span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={quote.exact}>{quote.exact}</span><span className="passage-arrow"><Icon name="arrowUpRight" /></span></button>}

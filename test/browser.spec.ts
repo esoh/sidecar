@@ -22,6 +22,229 @@ async function answer(text: string) {
   await f.agent(`/agent/requests/${request.id}/claim`, {});
   await f.agent('/agent/replies', { requestId: request.id, documentId: request.documentId, threadId: request.threadId, text });
 }
+
+test('pinned references retain selections and dock expansion after the last tab is removed', async ({ page }) => {
+  const doc = await f.register('pins.md', '# Pins\n\nA useful passage.');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByLabel('Message', { exact: true }).fill('Find the useful passage');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByRole('log')).toContainText('Find the useful passage');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"A useful passage."}]}]]\nRead **this** [passage](#selection-1).');
+  const message = page.locator('.messages .message.agent');
+  await message.hover();
+  await message.getByRole('button', { name: 'Pin message', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'Pinned message', exact: true })).toHaveCount(1);
+  const pins = page.getByRole('navigation', { name: 'Pinned messages' });
+  await expect(pins.getByRole('button', { name: /Read/ })).toHaveCount(1);
+  await pins.getByRole('button', { name: 'Pin options', exact: true }).click();
+  const options = page.getByRole('dialog', { name: 'Pin options', exact: true });
+  await options.getByRole('button', { name: 'Star', exact: true }).click();
+  await options.getByRole('button', { name: 'Violet', exact: true }).click();
+  await page.keyboard.press('Escape');
+  await page.reload();
+  await pins.getByRole('button', { name: 'Pin options', exact: true }).click();
+  await expect(options.getByRole('button', { name: 'Star', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(options.getByRole('button', { name: 'Violet', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await options.getByRole('button', { name: 'Letters', exact: true }).click();
+  await page.keyboard.press('a');
+  await expect(options.getByRole('button', { name: 'A', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await page.keyboard.press('7');
+  await expect(options.getByRole('button', { name: '7', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await options.getByRole('button', { name: 'Cyan', exact: true }).click();
+  await page.keyboard.press('Escape');
+  await pins.getByRole('button', { name: /Read/ }).click();
+  const floating = page.getByRole('dialog', { name: 'Pinned message', exact: true });
+  await expect(floating).toContainText('A useful passage.');
+  await floating.getByRole('button', { name: 'Hide selection', exact: true }).click();
+  await expect(page.locator('#document mark')).toHaveCount(0);
+  await writeFile(join(f.directory, 'pins.md'), '# Pins\n\nThe document has changed.');
+  await expect(floating).toContainText('Passage changed');
+  await floating.getByRole('button', { name: 'View original document' }).click();
+  await expect(page.getByRole('region', { name: 'Original document', exact: true }).locator('mark')).toHaveText('A useful passage.');
+  await page.getByRole('button', { name: 'Return to current' }).press('Enter');
+  const beforeResize = (await floating.boundingBox())!;
+  const edge = (await floating.locator('.resize-w').boundingBox())!;
+  await page.mouse.move(edge.x + 3, edge.y + 40); await page.mouse.down();
+  await page.mouse.move(edge.x - 67, edge.y + 40, { steps: 5 }); await page.mouse.up();
+  expect((await floating.boundingBox())!.width).toBeGreaterThan(beforeResize.width + 50);
+  await floating.getByRole('button', { name: 'Dock window', exact: true }).click();
+  const dock = page.getByRole('region', { name: 'Pinned dock', exact: true });
+  await expect(dock.getByRole('tabpanel')).toBeVisible();
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await dock.getByRole('button', { name: 'Go to message', exact: true }).click();
+  await expect(page.locator('.messages .message.agent')).toBeFocused();
+  await expect(dock.getByRole('tabpanel')).toBeVisible();
+  await dock.getByRole('button', { name: 'Move out of dock', exact: true }).click();
+  await expect(dock).toBeHidden();
+  const title = await floating.locator('.reference-titlebar').boundingBox();
+  const canvas = await page.locator('.document-workspace').boundingBox();
+  await page.mouse.move(title!.x + 80, title!.y + 18); await page.mouse.down();
+  await page.mouse.move(canvas!.x + 90, canvas!.y + canvas!.height - 130, { steps: 10 });
+  await expect(dock.getByRole('tabpanel')).toBeVisible();
+  await page.mouse.up();
+  await expect(floating).toHaveCount(0);
+  await expect(dock.getByRole('tabpanel')).toBeVisible();
+  await dock.getByRole('button', { name: 'Close pinned window', exact: true }).click();
+  await expect(dock).toBeHidden();
+  await expect(pins.getByRole('button', { name: /Read/ })).toHaveCount(1);
+  await pins.getByRole('button', { name: 'Pin options', exact: true }).click();
+  await options.getByRole('button', { name: 'Unpin', exact: true }).click();
+  await expect(pins).toHaveCount(0);
+});
+
+test('message copy formats exclude selection controls and preserve Markdown code and external links', async ({ page, context }) => {
+  const doc = await f.register('copy.md', '# Copy\n\nThe passage.');
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByLabel('Message', { exact: true }).fill('Locate this');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByRole('log')).toContainText('Locate this');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"The passage."}]}]]\nRead **this** [passage](#selection-1) and [guide](https://example.com).\n\n`[example](#selection-2)`\n\n    [code example](#selection-3)\n\nSee [reference][ref].\n\n[ref]: #selection-1');
+  const reply = page.locator('.messages .message.agent');
+  await reply.hover();
+  const copy = reply.getByRole('button', { name: 'Copy message', exact: true });
+  await copy.click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('Read **this** passage and [guide](https://example.com).\n\n`[example](#selection-2)`\n\n    [code example](#selection-3)\n\nSee reference.\n\n');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('radio', { name: 'Plain text', exact: true }).check();
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await reply.hover(); await copy.click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('Read this passage and guide.\n\n[example](#selection-2)\n\n[code example](#selection-3)\n\nSee reference.');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('radio', { name: 'Rich text', exact: true }).check();
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await reply.hover(); await copy.click();
+  await expect.poll(() => page.evaluate(async () => (await navigator.clipboard.read())[0].types)).toContain('text/html');
+  const html = await page.evaluate(async () => (await (await navigator.clipboard.read())[0].getType('text/html')).text());
+  expect(html).toContain('<strong>this</strong>');
+  expect(html).toMatch(/href="https:\/\/example\.com\/?"/);
+  expect(html).not.toContain('href="#selection');
+  expect(html).not.toContain('The passage.');
+  await page.reload();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('radio', { name: 'Rich text', exact: true })).toBeChecked();
+});
+
+test('pin list condenses, tabs reorder, and single-window mode keeps the latest opened reference', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  for (const text of ['First question', 'Second question']) {
+    await page.getByLabel('Message', { exact: true }).fill(text);
+    await page.getByLabel('Message', { exact: true }).press('Enter');
+    await expect(page.getByRole('log')).toContainText(text);
+    await answer(text === 'First question' ? 'First answer' : 'Second answer');
+  }
+  const messages = page.locator('.messages .message');
+  await expect(messages).toHaveCount(4);
+  let releaseState!: () => void;
+  const delayedState = new Promise<void>(resolve => { releaseState = resolve; });
+  await page.route('**/api/state', async route => { await delayedState; await route.continue(); });
+  try {
+    for (const message of [messages.nth(0), messages.nth(1)]) {
+      await message.hover(); await message.getByRole('button', { name: 'Pin message', exact: true }).click();
+    }
+  } finally { releaseState(); }
+  await expect(page.getByRole('dialog', { name: 'Pinned message', exact: true })).toHaveCount(2);
+  await page.unroute('**/api/state');
+  while (await page.getByRole('button', { name: 'Close pinned window', exact: true }).count()) await page.getByRole('button', { name: 'Close pinned window', exact: true }).first().click();
+  for (const message of [messages.nth(0), messages.nth(1)]) {
+    await message.hover(); await message.getByRole('button', { name: 'Unpin message', exact: true }).click();
+  }
+  for (const message of await messages.all()) {
+    await message.hover(); await message.getByRole('button', { name: 'Pin message', exact: true }).click();
+    await page.getByRole('button', { name: 'Close pinned window', exact: true }).click();
+  }
+  const pins = page.getByRole('navigation', { name: 'Pinned messages' });
+  await expect(pins.locator('.pinned-message-row')).toHaveCount(2);
+  await pins.getByRole('button', { name: '2 more' }).click();
+  for (const name of ['First question', 'First answer', 'Second question']) {
+    await pins.getByRole('button', { name, exact: true }).click();
+    await page.getByRole('dialog', { name: 'Pinned message', exact: true }).getByRole('button', { name: 'Dock window', exact: true }).click();
+  }
+  const dock = page.getByRole('region', { name: 'Pinned dock', exact: true });
+  await expect(dock.getByRole('tab')).toHaveText(['First question', 'First answer', 'Second question']);
+  const last = await dock.getByRole('tab', { name: 'Second question', exact: true }).boundingBox();
+  const first = await dock.getByRole('tab').first().boundingBox();
+  await page.mouse.move(last!.x + 20, last!.y + 15); await page.mouse.down();
+  await page.mouse.move(first!.x + 2, first!.y + 15, { steps: 10 });
+  await expect(page.locator('.dock-drag-preview')).toBeVisible();
+  await page.mouse.up();
+  await expect(dock.getByRole('tab')).toHaveText(['Second question', 'First question', 'First answer']);
+  const reordered = dock.getByRole('tab', { name: 'Second question', exact: true });
+  await reordered.focus(); await page.keyboard.press('Alt+ArrowRight');
+  await expect(reordered).toBeFocused();
+  await expect(dock.getByRole('tab')).toHaveText(['First question', 'Second question', 'First answer']);
+  await dock.getByRole('tab', { name: 'First answer', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('radio', { name: 'One at a time', exact: true }).check();
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await expect(dock.getByRole('tab')).toHaveText(['Second question']);
+  await expect(pins.locator('.pinned-message-row')).toHaveCount(4);
+  await pins.getByRole('button', { name: 'First question', exact: true }).click();
+  await expect(dock).toBeHidden();
+  const floating = page.getByRole('dialog', { name: 'Pinned message', exact: true });
+  await expect(floating).toHaveCount(1);
+  await expect(floating).toContainText('First question');
+  await page.setViewportSize({ width: 360, height: 420 });
+  await expect.poll(async () => {
+    const rect = await floating.boundingBox();
+    return !!rect && rect.x >= 0 && rect.y >= 0 && rect.x + rect.width <= 360 && rect.y + rect.height <= 420;
+  }).toBe(true);
+});
+
+test('collapsed dock accepts only its bar, previews insertion, and stays collapsed after a drop', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByLabel('Message', { exact: true }).fill('Question');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByRole('log')).toContainText('Question');
+  await answer('Answer');
+  await expect(page.locator('.messages .message')).toHaveCount(2);
+  for (const message of await page.locator('.messages .message').all()) {
+    await message.hover(); await message.getByRole('button', { name: 'Pin message', exact: true }).click();
+    await page.getByRole('button', { name: 'Close pinned window', exact: true }).click();
+  }
+  const pins = page.getByRole('navigation', { name: 'Pinned messages' });
+  await pins.getByRole('button', { name: 'Question', exact: true }).click();
+  await page.getByRole('button', { name: 'Minimize window', exact: true }).click();
+  const dock = page.getByRole('region', { name: 'Pinned dock', exact: true });
+  await expect(dock.getByRole('button', { name: 'Expand pinned dock', exact: true })).toHaveText('1 window');
+  await pins.getByRole('button', { name: 'Answer', exact: true }).click();
+  const floating = page.getByRole('dialog', { name: 'Pinned message', exact: true });
+  await floating.getByRole('button', { name: 'Dock window', exact: true }).click();
+  await expect(dock.getByRole('tabpanel')).toHaveText('Answer');
+  await expect(dock.getByRole('tab', { name: 'Answer', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await dock.getByRole('button', { name: 'Move out of dock', exact: true }).last().click();
+  await dock.getByRole('button', { name: 'Collapse pinned dock', exact: true }).click();
+  const dockBox = (await dock.boundingBox())!;
+  async function startDrag() {
+    const title = (await floating.locator('.reference-titlebar').boundingBox())!;
+    await page.mouse.move(title.x + 60, title.y + 18); await page.mouse.down();
+  }
+  await startDrag();
+  await page.mouse.move(dockBox.x + 10, dockBox.y - 60, { steps: 10 });
+  await expect(dock.getByRole('tabpanel')).toHaveCount(0);
+  await page.mouse.up(); await expect(floating).toBeVisible();
+  await startDrag();
+  await page.mouse.move(dockBox.x + 10, dockBox.y + 18, { steps: 10 });
+  await expect(dock.getByRole('tabpanel')).toBeVisible();
+  await expect(page.locator('.dock-insertion')).toBeVisible();
+  await page.mouse.move(dockBox.x + 10, dockBox.y - 60, { steps: 10 });
+  await expect(dock.getByRole('tabpanel')).toHaveCount(0);
+  await page.mouse.move(dockBox.x + 10, dockBox.y + 18, { steps: 10 });
+  await page.mouse.up();
+  await expect(floating).toHaveCount(0);
+  await expect(dock.getByRole('button', { name: 'Expand pinned dock', exact: true })).toHaveText('2 windows');
+  await dock.getByRole('button', { name: 'Expand pinned dock', exact: true }).click();
+  await expect(dock.getByRole('tab')).toHaveText(['Answer', 'Question']);
+  const beforeResize = (await dock.boundingBox())!;
+  const resize = (await dock.getByRole('separator').boundingBox())!;
+  await page.mouse.move(resize.x + 80, resize.y + 3); await page.mouse.down();
+  await page.mouse.move(resize.x + 80, resize.y - 77, { steps: 5 }); await page.mouse.up();
+  expect((await dock.boundingBox())!.height).toBeGreaterThan(beforeResize.height + 60);
+});
 async function select(page: Page, exact: string) {
   await page.evaluate(exact => {
     const article = document.getElementById('document')!;
