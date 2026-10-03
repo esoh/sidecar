@@ -7,7 +7,7 @@ import type { StreamEvent } from './stream.ts';
 const defaultSocketPath = () => join(process.env.CODEX_HOME ?? homedir() + '/.codex', 'app-server-control/app-server-control.sock');
 export type CodexObserver = (() => void) & { canInterrupt(turnId: string): boolean; interrupt(turnId: string): Promise<void> };
 
-export async function observeCodex(threadId: string, onEvent: (event: StreamEvent) => void, onFailure: (message: string) => void, socketPath = defaultSocketPath(), prefixes?: readonly string[], onTurnEnd?: (turnId: string, status: string) => void): Promise<CodexObserver> {
+export async function observeCodex(threadId: string, onEvent: (event: StreamEvent) => void, onFailure: (message: string) => void, socketPath = defaultSocketPath(), prefixes?: readonly string[], onTurnEnd?: (turnId: string, status: string, answer?: string) => void): Promise<CodexObserver> {
   const socket = new WebSocket(`ws+unix://${socketPath}:/`, { maxPayload: 2 * 1024 * 1024, handshakeTimeout: 5000 });
   let stopped = false, ready = false, nextId = 0;
   const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
@@ -31,7 +31,8 @@ export async function observeCodex(threadId: string, onEvent: (event: StreamEven
       if (value.method === 'turn/completed' && isObject(p.turn) && typeof p.turn.id === 'string') {
         if (replyTurnId === p.turn.id) {
           replyTurnId = undefined;
-          if (onTurnEnd) onTurnEnd(p.turn.id, String(p.turn.status));
+          const last = Array.isArray(p.turn.items) ? p.turn.items.filter(item => isObject(item) && item.type === 'agentMessage').at(-1) : undefined;
+          if (onTurnEnd) onTurnEnd(p.turn.id, String(p.turn.status), isObject(last) && typeof last.text === 'string' ? last.text : undefined);
           else onFailure('Agent turn ended before the reply was finalized.');
         }
         return;

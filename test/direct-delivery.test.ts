@@ -184,4 +184,36 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   const savedQuote = JSON.parse(await readFile(join(directory, 'state.json'), 'utf8'));
   assert.deepEqual(savedQuote.requests[quoted.id].messageQuote, messageQuote);
   assert.deepEqual(savedQuote.threads[quoted.threadId].messages.at(-1).messageQuote, messageQuote);
+
+  // Reproduce the live failure: correct progress, stale final markers, then idle.
+  const progress = quotedEvent.stream.progress.prefix + 'Looking at it.' + quotedEvent.stream.progress.suffix;
+  const stale = event.stream.prefix + 'Wrong markers.' + event.stream.suffix;
+  const nativeMessage = async (turnId: string, messageId: string, text: string) => {
+    if (agent === 'codex') for (const socket of sockets) {
+      socket.send(JSON.stringify({ method: 'item/agentMessage/delta', params: { threadId: owner.sessionId, turnId, itemId: messageId, delta: text } }));
+      socket.send(JSON.stringify({ method: 'item/completed', params: { threadId: owner.sessionId, turnId, item: { id: messageId, type: 'agentMessage', text } } }));
+    }
+    else await forwardHook('claude', { session_id: owner.sessionId, hook_event_name: 'MessageDisplay', turn_id: turnId, message_id: messageId, index: 0, delta: text, final: true });
+  };
+  await nativeMessage('broken', 'good-progress', progress);
+  await nativeMessage('broken', 'bad-final', stale);
+  if (agent === 'codex') for (const socket of sockets) {
+    const end = { method: 'turn/completed', params: { threadId: owner.sessionId, turn: { id: 'broken', status: 'completed', items: [{ type: 'agentMessage', id: 'bad-final', text: stale }] } } };
+    socket.send(JSON.stringify(end)); socket.send(JSON.stringify(end));
+  }
+  else {
+    await post('/agent/control', { ownerKey: key, event: 'started', turnId: 'broken', marker: quotedEvent.stream.progress.prefix });
+    await post('/agent/control', { ownerKey: key, event: 'completed', turnId: 'broken', answer: stale });
+    await post('/agent/control', { ownerKey: key, event: 'completed', turnId: 'broken', answer: stale });
+  }
+  const recovery = await eventCount(8);
+  assert.equal(recovery.type, 'sidecar.recovery');
+  assert.equal(recovery.requestId, quoted.id);
+  assert.equal(recovery.text, undefined);
+  assert.equal(recovery.stream.prefix, quotedEvent.stream.prefix);
+  assert.equal((await state()).requests[quoted.id].replyRecovery.status, 'sent');
+  await nativeMessage('recovery', 'fixed-final', recovery.stream.prefix + 'Recovered answer.' + recovery.stream.suffix);
+  for (let i = 0; i < 100 && (await state()).requests[quoted.id].status !== 'completed'; i++) await delay(10);
+  assert.equal((await state()).requests[quoted.id].answer.text, 'Recovered answer.');
+  assert.equal((agent === 'codex' ? await readFile(deliveries, 'utf8') : watched).trim().split('\n').length, 8);
 });

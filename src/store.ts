@@ -17,6 +17,7 @@ export type RequestRecord = {
   id: string; documentId: string; threadId: string; text: string; clientMessageId: string;
   quote?: Quote; messageQuote?: MessageQuote; status: 'queued' | 'claimed' | 'completed' | 'failed' | 'uncertain' | 'stopped'; createdAt: number;
   submission: string; answer?: { text: string; isError: boolean }; acceptedAt?: number; batchId?: string;
+  replyRecovery?: { id: string; turnId: string; status: 'pending' | 'sent' | 'failed' };
 };
 export type State = { version: 3; owner: Owner; documents: Record<string, DocumentRecord>; threads: Record<string, Thread>; requests: Record<string, RequestRecord> };
 export type Store = { read(): State; update<T>(change: (draft: State) => T): Promise<T> };
@@ -69,6 +70,7 @@ function isOldThread(v: unknown): v is OldThread {
   return isObject(v) && string(v.id) && string(v.documentId) && optionalString(v.title) && (v.createdAt === undefined || number(v.createdAt)) && typeof v.isResolved === 'boolean' && Array.isArray(v.messages) && v.messages.every(m => isMessageFields(m) && !('selections' in m) && (m.quote === undefined || (m.role === 'user' && isQuote(m.quote))));
 }
 function isRequest(v: unknown): v is RequestRecord {
+  if (isObject(v) && v.replyRecovery !== undefined && (!isObject(v.replyRecovery) || !string(v.replyRecovery.id) || !string(v.replyRecovery.turnId) || !['pending', 'sent', 'failed'].includes(String(v.replyRecovery.status)))) return false;
   if (isObject(v) && v.messageQuote !== undefined && (!isMessageQuote(v.messageQuote) || v.quote !== undefined)) return false;
   if (isObject(v) && v.batchId !== undefined && (!string(v.batchId) || !/^[0-9a-f-]{36}$/i.test(v.batchId))) return false;
   return isObject(v) && string(v.id) && string(v.documentId) && string(v.threadId) && string(v.text) && string(v.clientMessageId) && string(v.submission) && number(v.createdAt) && string(v.status) && ['queued','claimed','completed','failed','uncertain','stopped'].includes(v.status) && (v.quote === undefined || isQuote(v.quote)) && (v.acceptedAt === undefined || number(v.acceptedAt)) && (v.answer === undefined || (isObject(v.answer) && string(v.answer.text) && typeof v.answer.isError === 'boolean'));
@@ -342,7 +344,11 @@ export async function openStore(directory: string, owner: Owner): Promise<Store>
         }
       }
     }
-    for (const request of Object.values(parsed.requests)) if (request.status === 'claimed') request.status = 'uncertain';
+    for (const request of Object.values(parsed.requests)) if (request.status === 'claimed') {
+      request.status = 'uncertain';
+      // A handoff may already have reached the agent. Restart never repeats it.
+      if (request.replyRecovery) request.replyRecovery.status = 'failed';
+    }
     for (const thread of Object.values(parsed.threads)) thread.createdAt ??= thread.messages[0]?.createdAt ?? Date.now();
     for (const document of Object.values(parsed.documents)) ensureGeneralThread(parsed, document.id);
     state = parsed;

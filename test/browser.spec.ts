@@ -23,11 +23,37 @@ async function answer(text: string) {
   await f.agent('/agent/replies', { requestId: request.id, documentId: request.documentId, threadId: request.threadId, text });
 }
 
+test('unfinished replies show bounded recovery and a Retry button without disturbing the draft', async ({ page }) => {
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Explain'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  const request = await lastRequest();
+  const prepared = await (await f.agent(`/agent/requests/${request.id}/prepare`, {})).json();
+  const control = (event: string, turnId: string) => f.agent('/agent/control', { ownerKey: ownerKey(f.owner), event, turnId, marker: prepared.stream.prefix });
+  await input.fill('Keep my draft');
+  await control('started', 'first'); await control('completed', 'first');
+  await expect(page.getByText('Reply wasn’t saved; recovering…', { exact: true })).toBeVisible();
+  const recovery = (await state()).requests[request.id].replyRecovery;
+  await f.agent(`/agent/requests/${request.id}/recover`, { recoveryId: recovery.id });
+  await control('started', 'second'); await control('completed', 'second');
+  await expect(page.getByText('Reply couldn’t be saved.', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Retry saving reply', exact: true }).click();
+  await expect(page.getByText('Reply wasn’t saved; recovering…', { exact: true })).toBeVisible();
+  await expect(input).toHaveValue('Keep my draft');
+  await f.agent('/agent/replies', { requestId: request.id, documentId: doc.id, threadId: request.threadId, text: 'Recovered.' });
+  await expect(page.locator('.message.agent').getByText('Recovered.', { exact: true })).toBeVisible();
+  await expect(page.getByText('Reply wasn’t saved; recovering…', { exact: true })).toHaveCount(0);
+  await expect(input).toHaveValue('Keep my draft');
+});
+
 test('a batch shares one Working/Stopped indicator and preserves partial text without interrupting on Enter', async ({ page }) => {
   const doc = await f.register('stop.md');
   await page.goto(`${f.url}/?document=${doc.id}`);
   const input = page.getByLabel('Message', { exact: true });
   await input.fill('Explain'); await input.press('Enter');
+  await expect(input).toHaveValue('');
   const request = await lastRequest();
   await input.fill('Also explain the follow-up'); await input.press('Enter');
   await expect(page.getByRole('log')).toContainText('Also explain the follow-up');

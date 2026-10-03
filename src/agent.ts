@@ -74,11 +74,19 @@ export async function watchClaude(key: string, signal: AbortSignal): Promise<voi
           const line = buffer.slice(0, newline).trim(); buffer = buffer.slice(newline + 1);
           if (line) {
             const event: unknown = JSON.parse(line);
-            if (!isObject(event) || event.type !== 'sidecar.request' || event.ownerKey !== key || typeof event.requestId !== 'string') throw new Error('Invalid Sidecar notification');
-            const prepared = await agentCall(key, `/agent/requests/${encodeURIComponent(event.requestId)}/prepare`, {});
-            if (!prepared.claimStatus || prepared.claimStatus === 'claimed') {
-              await new Promise<void>((resolve, reject) => process.stdout.write(JSON.stringify(prepared) + '\n', error => error ? reject(error) : resolve()));
-              await agentCall(key, `/agent/requests/${encodeURIComponent(event.requestId)}/accepted`, {});
+            if (!isObject(event) || !['sidecar.request', 'sidecar.recovery'].includes(String(event.type)) || event.ownerKey !== key || typeof event.requestId !== 'string') throw new Error('Invalid Sidecar notification');
+            const isRecovery = event.type === 'sidecar.recovery';
+            const path = `/agent/requests/${encodeURIComponent(event.requestId)}`;
+            try {
+              const prepared = await agentCall(key, `${path}/${isRecovery ? 'recover' : 'prepare'}`, isRecovery ? { recoveryId: event.recoveryId } : {});
+              if (!prepared.claimStatus || prepared.claimStatus === 'claimed') {
+                await new Promise<void>((resolve, reject) => process.stdout.write(JSON.stringify(prepared) + '\n', error => error ? reject(error) : resolve()));
+                await agentCall(key, `${path}/accepted`, {});
+              }
+            } catch (error) {
+              // The output may already have reached Monitor; do not repeat it.
+              if (isRecovery) await agentCall(key, `${path}/recovery-failed`, { recoveryId: event.recoveryId }).catch(() => {});
+              throw error;
             }
           }
         }
