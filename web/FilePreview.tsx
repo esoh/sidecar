@@ -9,20 +9,36 @@ function fenced(language: string, text: string) {
   return `${fence}${language}\n${text}\n${fence}\n`;
 }
 
-export function FilePreview({ documentId, path, onReturn }: { documentId: string; path: string; onReturn: () => void }) {
+export function FilePreview({ documentId, root, path, refusal, onReturn }: {
+  documentId: string; root?: string; path: string; refusal?: string; onReturn: () => void;
+}) {
   const [preview, setPreview] = useState<FilePreviewData | null>(null),
-    [error, setError] = useState('');
+    [error, setError] = useState(''),
+    [isCopied, setCopied] = useState(false);
   useEffect(() => {
+    if (refusal) return;
     let stopped = false;
     setPreview(null);
     setError('');
     api<FilePreviewData>(`/api/files/content?document=${encodeURIComponent(documentId)}&path=${encodeURIComponent(path)}`)
       .then((loaded) => { if (!stopped) setPreview(loaded); }, (reason) => { if (!stopped) setError(errorText(reason)); });
     return () => { stopped = true; };
-  }, [documentId, path]);
+  }, [documentId, path, refusal]);
   const markdown = preview && (preview.renderAs === 'markdown' ? preview.text
     : preview.renderAs === 'mermaid' ? fenced('mermaid', preview.text)
     : preview.renderAs === 'graphviz' ? fenced('dot', preview.text) : null);
+  if (refusal) return (
+    <section className="original-document file-preview" aria-label="File preview">
+      <div className="original-banner">
+        <span>{refusal}</span>
+        <button onClick={onReturn}>Back to document</button>
+      </div>
+      <p className="file-refusal">
+        <code>{path}</code>
+        <button onClick={() => { void navigator.clipboard.writeText(path).then(() => setCopied(true)); }}>{isCopied ? 'Copied' : 'Copy path'}</button>
+      </p>
+    </section>
+  );
   return (
     <section className="original-document file-preview" aria-label="File preview">
       <div className="original-banner">
@@ -39,7 +55,7 @@ export function FilePreview({ documentId, path, onReturn }: { documentId: string
       ) : (
         <article className="document-card w-full bg-card rounded-xl p-5 md:p-8 lg:p-10 xl:p-12 shadow-xl border border-border/50">
           {/* An empty document ID keeps relative images from resolving against the open document's folder. */}
-          <MarkdownDocument markdown={markdown} documentId="" anchorPrefix="file-preview-" />
+          <MarkdownDocument markdown={markdown} documentId="" anchorPrefix="file-preview-" linkBase={root && `${root}/${path}`.replace(/\/[^/]*$/, '')} />
         </article>
       )}
     </section>

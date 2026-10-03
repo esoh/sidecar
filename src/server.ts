@@ -12,7 +12,7 @@ import { parseReply } from './reply-metadata.ts';
 import { readDocument } from './documents.ts';
 import { readAppVersion } from './version.ts';
 import { libraryDocument, listLibrary, recordDocumentOpen } from './library.ts';
-import { listFiles, readPreview } from './files.ts';
+import { listFiles, readCode, readPreview } from './files.ts';
 import { claim, createThread, closeDocument, discardEmptyThread, nameThread, pinMessage, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, setSelectionVisibility, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput, type ReplyInput } from './store.ts';
 import { isPinStyle } from './pin-style.ts';
 import { stopRequest, prepareBatch, requestBatch, type State } from './store.ts';
@@ -484,13 +484,14 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       }
       if (method === 'GET' && path === '/api/state') { json(response, snapshot()); return; }
       if (method === 'GET' && path === '/api/library') { json(response, await listLibrary(dirname(directory))); return; }
-      if (method === 'GET' && (path === '/api/files' || path === '/api/files/content')) {
+      if (method === 'GET' && (path === '/api/files' || path === '/api/files/content' || path === '/api/files/code')) {
         // The root always comes from the document record; the viewer cannot name a directory.
         const document = get(store.read().documents, target.searchParams.get('document') ?? '');
         if (!document.workspace) throw new DomainError('This document has no recorded workspace. Reopen it from your agent.', 404);
-        json(response, path === '/api/files'
-          ? await listFiles(document.workspace)
-          : await readPreview(document.workspace, target.searchParams.get('path') ?? ''));
+        const file = target.searchParams.get('path') ?? '';
+        json(response, path === '/api/files' ? await listFiles(document.workspace)
+          : path === '/api/files/code' ? await readCode(document.workspace, file)
+          : await readPreview(document.workspace, file));
         return;
       }
       const libraryRead = path.match(/^\/api\/library\/([^/]+)\/documents\/([^/]+)$/);

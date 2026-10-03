@@ -1,4 +1,4 @@
-import { Fragment, memo, useMemo, useState, useEffect, useRef } from 'react';
+import { Fragment, createContext, memo, useContext, useMemo, useState, useEffect, useRef } from 'react';
 import { BlockRenderer } from '@plannotator/ui/components/BlockRenderer';
 import { MermaidBlock } from '@plannotator/ui/components/MermaidBlock';
 import { GraphvizBlock } from '@plannotator/ui/components/GraphvizBlock';
@@ -16,6 +16,10 @@ setImageSrcResolver((path, documentId) =>
     : `/api/image?${documentId?.includes('/') ? `owner=${encodeURIComponent(documentId.split('/')[0])}&document=${encodeURIComponent(documentId.split('/')[1])}` : `document=${encodeURIComponent(documentId ?? '')}`}&path=${encodeURIComponent(path)}`,
 );
 
+// Plannotator's renderer reports local document and code links through these callbacks.
+export type OpenWorkspaceLink = (kind: 'doc' | 'code', target: string, baseDir?: string) => void;
+export const WorkspaceLinks = createContext<OpenWorkspaceLink | null>(null);
+
 // Plannotator's RenderedMarkdown composition, with its Viewer's diagram blocks.
 // Sidecar owns conversations; the upstream components own rendering and controls.
 export const MarkdownDocument = memo(function MarkdownDocument({
@@ -24,13 +28,17 @@ export const MarkdownDocument = memo(function MarkdownDocument({
   anchorPrefix = '',
   libraryOwner,
   onSelectionLink,
+  linkBase,
 }: {
   markdown: string;
   documentId: string;
   anchorPrefix?: string;
   libraryOwner?: string;
   onSelectionLink?: (slug: string) => boolean;
+  /** Absolute folder that relative links resolve from; replies resolve from the workspace root. */
+  linkBase?: string;
 }) {
+  const openLink = useContext(WorkspaceLinks);
   const blocks = useMemo(
     () =>
       parseMarkdownToBlocks(markdown).map((block) => {
@@ -57,6 +65,8 @@ export const MarkdownDocument = memo(function MarkdownDocument({
         block={block}
         orderedIndex={orderedIndex}
         imageBaseDir={libraryOwner ? `${libraryOwner}/${documentId}` : documentId}
+        onOpenLinkedDoc={openLink ? (path) => openLink('doc', path, linkBase) : undefined}
+        onOpenCodeFile={openLink ? (path) => openLink('code', path, linkBase) : undefined}
         headingAnchorId={headings.has(block.id) ? anchorPrefix + headings.get(block.id) : undefined}
         onNavigateAnchor={
           anchorPrefix

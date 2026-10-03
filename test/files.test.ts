@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { listFiles, readPreview, type VaultNode } from '../src/files.ts';
+import { listFiles, readCode, readPreview, type VaultNode } from '../src/files.ts';
 import { fixture } from './support.ts';
 
 const git = (cwd: string, ...args: string[]) => promisify(execFile)('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', ...args], { cwd });
@@ -110,4 +110,40 @@ test('viewer file routes read only the stored document workspace', async t => {
   const gone = await f.view(`/api/files?document=${doc.id}`);
   assert.equal(gone.status, 404);
   assert.match((await gone.json()).error, /workspace directory is unavailable/);
+});
+
+test('code reads stay inside the workspace and accept line suffixes', async t => {
+  const root = await workspace(t), outside = await workspace(t);
+  await write(outside, { 'secret.ts': 'export const secret = 1;' });
+  await write(root, { 'src/app.ts': 'export const answer = 42;\n', 'notes.md': '# Notes', 'node_modules/pkg/index.js': 'x', '.env': 'A=1' });
+  await symlink(join(outside, 'secret.ts'), join(root, 'escape.ts'));
+  const app = { codeFile: true, filepath: 'src/app.ts', contents: 'export const answer = 42;\n' };
+  assert.deepEqual(await readCode(root, 'src/app.ts'), app);
+  assert.deepEqual(await readCode(root, 'src/app.ts:1'), app);
+  assert.deepEqual(await readCode(root, 'src/app.ts:1-3'), app);
+  const status = (path: string) => readCode(root, path).then(() => 200, (error: { status?: number }) => error.status);
+  assert.equal(await status('escape.ts'), 403);
+  assert.equal(await status('../x.ts'), 403);
+  assert.equal(await status('notes.md'), 415);
+  assert.equal(await status('node_modules/pkg/index.js'), 415);
+  assert.equal(await status('.env'), 415);
+  assert.equal(await status('src/missing.ts'), 404);
+});
+
+test('odd preview paths fail cleanly instead of with server errors', async t => {
+  const root = await workspace(t);
+  await write(root, { '..dots.md': '# Dots', 'notes.md': '# Notes' });
+  assert.equal((await readPreview(root, '..dots.md')).text, '# Dots');
+  const status = (path: string) => readPreview(root, path).then(() => 200, (error: { status?: number }) => error.status);
+  assert.equal(await status('notes.md/x.md'), 404);
+  assert.equal(await status('a\0.md'), 400);
+});
+
+test('viewer code route reads the stored workspace', async t => {
+  const root = await workspace(t);
+  await write(root, { 'src/app.ts': 'export {};\n' });
+  const f = await fixture(t), doc = await f.register();
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  assert.deepEqual(await (await f.view(`/api/files/code?document=${doc.id}&path=${encodeURIComponent('src/app.ts:1')}`)).json(), { codeFile: true, filepath: 'src/app.ts', contents: 'export {};\n' });
+  assert.equal((await f.view(`/api/files/code?document=${doc.id}&path=${encodeURIComponent('../x.ts')}`)).status, 403);
 });

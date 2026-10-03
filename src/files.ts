@@ -95,26 +95,39 @@ export async function listFiles(root: string, limit = DEFAULT_FILE_LIMIT): Promi
 }
 
 export type FilePreviewData = { path: string; text: string; renderAs: 'markdown' | 'html' | 'mermaid' | 'graphviz' };
+export type CodeFileData = { codeFile: true; filepath: string; contents: string };
+// Code-link file types copied from @plannotator/core 0.25.7 code-file.ts (MIT).
+const CODE_FILE_REGEX = /(?:\.(tsx?|jsx?|py|rb|go|rs|java|c|cpp|h|hpp|cs|swift|kt|scala|sh|bash|zsh|sql|graphql|json|ya?ml|toml|ini|css|scss|less|xml|tf|lua|r|dart|ex|exs|vue|svelte|astro|zig|proto)|(?:^|\/)(Dockerfile|Makefile|Rakefile|Gemfile|Procfile|Vagrantfile|Brewfile|Justfile))$/i;
 const isOutside = (root: string, candidate: string) => {
   const fromRoot = relative(root, candidate);
-  return fromRoot.startsWith('..') || isAbsolute(fromRoot);
+  return fromRoot === '..' || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot);
 };
-export async function readPreview(root: string, path: string): Promise<FilePreviewData> {
-  if (!path || isAbsolute(path)) throw new DomainError('Expected a path inside the workspace');
+// Resolve a viewer-supplied path to a regular file of an accepted type inside the real root.
+async function workspaceFile(root: string, path: string, accepted: RegExp) {
+  if (!path || isAbsolute(path) || path.includes('\0')) throw new DomainError('Expected a path inside the workspace');
   const lexical = resolve(root, path);
   if (isOutside(root, lexical)) throw new DomainError('Path is outside the workspace', 403);
   const real = await realpath(lexical).catch((error: unknown) => {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') throw new DomainError('File not found', 404);
+    if (error instanceof Error && 'code' in error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) throw new DomainError('File not found', 404);
     throw error;
   });
   const realRoot = await realpath(root);
   if (isOutside(realRoot, real)) throw new DomainError('Path is outside the workspace', 403);
   const relativePath = relative(realRoot, real).split(sep).join('/');
-  if (!ANNOTATABLE_DOC_REGEX.test(relativePath) || isFileBrowserExcludedPath(relativePath))
+  if (!accepted.test(relativePath) || isFileBrowserExcludedPath(relativePath))
     throw new DomainError('This file type cannot be previewed', 415);
   const info = await stat(real);
   if (!info.isFile()) throw new DomainError('A regular file is required');
   if (info.size > MAX_ANNOTATABLE_FILE_BYTES) throw new DomainError('File exceeds the 2 MiB preview limit', 413);
+  return { relativePath, text: await readFile(real, 'utf8') };
+}
+export async function readPreview(root: string, path: string): Promise<FilePreviewData> {
+  const { relativePath, text } = await workspaceFile(root, path, ANNOTATABLE_DOC_REGEX);
   const diagram = diagramRenderKindForPath(relativePath);
-  return { path: relativePath, text: await readFile(real, 'utf8'), renderAs: diagram ?? (/\.html?$/i.test(relativePath) ? 'html' : 'markdown') };
+  return { path: relativePath, text, renderAs: diagram ?? (/\.html?$/i.test(relativePath) ? 'html' : 'markdown') };
+}
+// Code links may carry a :line or :start-end suffix, which Plannotator's popout parses itself.
+export async function readCode(root: string, path: string): Promise<CodeFileData> {
+  const { relativePath, text } = await workspaceFile(root, path.replace(/:\d+(?:-\d+)?$/, ''), CODE_FILE_REGEX);
+  return { codeFile: true, filepath: relativePath, contents: text };
 }

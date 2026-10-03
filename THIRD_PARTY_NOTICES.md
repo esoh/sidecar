@@ -56,6 +56,12 @@ The Files panel imports `FileBrowser` and `useFileBrowser` from the published
 `@plannotator/ui` 0.47.0, connected to Sidecar through its `setFileTreeBackend`
 seam. The preview banner reuses Sidecar's original-document styling.
 
+Local file links use the `onOpenLinkedDoc`/`onOpenCodeFile` callbacks and
+`setDocPreviewFetcher` of `@plannotator/ui` 0.47.0 `InlineMarkdown`, and open
+code in its `CodeFilePopout` through `useCodeFilePopout`. The code-link file
+types in `src/files.ts` are copied from `@plannotator/core` 0.25.7
+`code-file.ts`.
+
 Inter and Geist Mono are served from Plannotator's Fontsource dependencies;
 the fonts use the SIL Open Font License 1.1 distributed with those packages.
 KaTeX and its fonts retain the licenses included in the KaTeX dependency.

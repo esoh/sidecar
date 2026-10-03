@@ -13,7 +13,11 @@ import {
 } from './conversations.tsx';
 import { useQuestionDrafts, forgetDocument, type QuestionDraft, type QuestionDrafts } from './useQuestionDrafts.ts';
 import { locateQuote, quoteRange, selectionText, selectionSentence, excludedSelection } from './selection.ts';
-import { MarkdownDocument } from './MarkdownDocument.tsx';
+import { MarkdownDocument, WorkspaceLinks, type OpenWorkspaceLink } from './MarkdownDocument.tsx';
+import { resolveWorkspaceLink, splitLineSuffix } from './links.ts';
+import { CodeFilePopout } from '@plannotator/ui/components/CodeFilePopout';
+import { useCodeFilePopout } from '@plannotator/ui/hooks/useCodeFilePopout';
+import { setDocPreviewFetcher } from '@plannotator/ui/components/InlineMarkdown';
 import { DocumentLibrary } from './DocumentLibrary.tsx';
 import { SettingsProvider, TextSettings } from './TextSettings.tsx';
 import { PinnedWindows } from './PinnedWindows.tsx';
@@ -148,6 +152,7 @@ function App() {
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   // Reselecting a file reloads it from disk.
   const [previewNonce, setPreviewNonce] = useState(0);
+  const [previewRefusal, setPreviewRefusal] = useState<string | null>(null);
   const filesResize = useResizablePanel({
     storageKey: 'sidecar-files-width',
     defaultWidth: 280,
@@ -242,16 +247,52 @@ function App() {
     setComposing(false);
     setChoices(null);
   }, []);
-  const openPreview = (path: string) => {
-    if (current?.workspace && `${current.workspace}/${path}` === current.path) { setPreviewPath(null); return; }
+  const openPreview = (path: string, refusal?: string) => {
+    if (!refusal && current?.workspace && `${current.workspace}/${path}` === current.path) { setPreviewPath(null); return; }
     // Keep passage drafts in passageDrafts; only drop the live selection on the hidden document.
     clearPendingSelection();
     window.getSelection()?.removeAllRanges();
     setOriginalMessageId(null);
+    setPreviewRefusal(refusal ?? null);
     setPreviewPath(path);
     setPreviewNonce((nonce) => nonce + 1);
     if (innerWidth <= 850) setFilesShown(false);
   };
+  const codePopout = useCodeFilePopout({
+    buildUrl: useCallback((codePath: string) => `/api/files/code?document=${encodeURIComponent(documentId)}&path=${encodeURIComponent(codePath)}`, [documentId]),
+  });
+  const workspaceRoot = useRef<string | undefined>(undefined);
+  workspaceRoot.current = current?.workspace;
+  const resolveLink = (kind: 'doc' | 'code', target: string, baseDir?: string) => {
+    const root = workspaceRoot.current;
+    if (!root) return null;
+    // Repository-style code paths (src/app.ts:4) are workspace-relative; ./ and ../ follow the linking file.
+    return resolveWorkspaceLink(target, root, kind === 'code' && !/^\.\.?\//.test(target) ? root : baseDir ?? root);
+  };
+  const handleLink = useRef<OpenWorkspaceLink>(() => undefined);
+  handleLink.current = (kind, target, baseDir) => {
+    const [file, line] = kind === 'code' ? splitLineSuffix(target) : [target, ''];
+    const resolved = resolveLink(kind, file, baseDir);
+    codePopout.close();
+    if (!resolved) openPreview(file, 'This document has no recorded workspace. Reopen it from your agent.');
+    else if ('outside' in resolved) openPreview(resolved.outside, "Outside this document's workspace");
+    else if (kind === 'code') void codePopout.open(resolved.path + line);
+    else openPreview(resolved.path);
+  };
+  // Stable identity so memoized documents and messages do not re-render on every state tick.
+  const openLink = useCallback<OpenWorkspaceLink>((...args) => handleLink.current(...args), []);
+  useEffect(() => {
+    // Plannotator's hover preview for `path:line` code references reads Sidecar's code route.
+    setDocPreviewFetcher(async (candidate) => {
+      const [file, line] = splitLineSuffix(candidate);
+      const resolved = resolveLink('code', file);
+      if (!resolved || 'outside' in resolved) return null;
+      const response = await fetch(`/api/files/code?document=${encodeURIComponent(documentId)}&path=${encodeURIComponent(resolved.path + line)}`);
+      if (!response.ok) return null;
+      const data = await response.json() as { contents: string; filepath: string };
+      return { contents: data.contents, filepath: data.filepath };
+    });
+  }, [documentId]);
   const clearSelection = useCallback(() => {
     removeAttachment();
     clearPendingSelection();
@@ -679,7 +720,7 @@ function App() {
     </>
   );
   return (
-    <>
+    <WorkspaceLinks.Provider value={openLink}>
       <header className="topbar">
         <div className="brand">
           <Icon name="logo" />
@@ -756,7 +797,7 @@ function App() {
         <main className="canvas">
           <div className="reading-width">
             {previewPath && (
-              <FilePreview key={`${current?.workspace}\n${previewPath}\n${previewNonce}`} documentId={documentId} path={previewPath} onReturn={() => setPreviewPath(null)} />
+              <FilePreview key={`${current?.workspace}\n${previewPath}\n${previewNonce}`} documentId={documentId} root={current?.workspace} path={previewPath} refusal={previewRefusal ?? undefined} onReturn={() => setPreviewPath(null)} />
             )}
             {!previewPath && originalMessage?.quote && (
               <OriginalDocument
@@ -801,7 +842,7 @@ function App() {
               }}
             >
               {current && !documentError && <DocumentHeader key={documentId} repoInfo={current.repoInfo} markdown={content.markdown} onError={setError} />}
-              <MarkdownDocument markdown={content.markdown} documentId={documentId} />
+              <MarkdownDocument markdown={content.markdown} documentId={documentId} linkBase={current?.path.replace(/\/[^/]*$/, '')} />
             </article>
           </div>
         </main>
@@ -908,7 +949,8 @@ function App() {
           </section>,
           document.body,
         )}
-    </>
+      {codePopout.popoutProps && <CodeFilePopout {...codePopout.popoutProps} />}
+    </WorkspaceLinks.Provider>
   );
 }
 const root = document.getElementById('root');

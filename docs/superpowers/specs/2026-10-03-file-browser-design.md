@@ -49,3 +49,13 @@ Both routes require the existing viewer cookie and Host/Origin checks. The clien
 - `pnpm test`, `pnpm typecheck`, and the full Playwright suite pass. `THIRD_PARTY_NOTICES.md` names each ported file and revision; the README documents the panel and `--workspace`.
 
 As built on 2026-10-03: server listing and preview live in `src/files.ts` with Plannotator's Git status copied unchanged into `src/workspace-status.ts`. The file-type predicates are copied from `@plannotator/core` 0.25.7 rather than imported at runtime, because Playwright's loader will not compile TypeScript inside `node_modules`; the package remains a dependency for type imports. The viewer imports `FileBrowser`/`useFileBrowser` from `@plannotator/ui` 0.47.0 through `setFileTreeBackend`; its labels hide `.md`/`.html` extensions as upstream does. HTML previews use an empty sandbox. Relative images in previews are intentionally not resolved.
+
+## Local file links
+
+User-approved addition, 2026-10-03: links to local files in documents, previews, replies and pinned windows open inside Sidecar instead of navigating the viewer to `/Users/...`.
+
+- Plannotator's renderer classifies the links; Sidecar wires its `onOpenLinkedDoc` and `onOpenCodeFile` callbacks. The read-only library keeps plain links.
+- Absolute paths and `file://` URLs resolve as given. Relative document links resolve from the linking file's folder (replies from the workspace root); code paths resolve from the workspace root unless they start with `./` or `../`.
+- Document links open the existing read-only preview. Code links open Plannotator's `CodeFilePopout` without comment controls; it does not scroll to a `:line` suffix. Hovering a `path:line` reference uses the same code route.
+- `GET /api/files/code?document=ID&path=RELATIVE[:line]` applies the preview route's containment, exclusions and 2 MiB limit with Plannotator's code-file types, returning `{ codeFile: true, filepath, contents }`.
+- A link outside the workspace, or any link in a document without a workspace, shows the refusal and **Copy path** in the preview pane; nothing outside the root is read.

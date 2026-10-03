@@ -2542,3 +2542,48 @@ test('files panel never shows Plannotator settings hint while loading', async ({
   await expect(page.getByRole('complementary', { name: 'Files' }).getByTitle('a.md', { exact: true })).toBeVisible();
   expect(await page.evaluate(() => (window as unknown as { sawHint?: boolean }).sawHint ?? false)).toBe(false);
 });
+
+test('file links in documents and replies open previews, code popouts or a refusal', async ({ page, context }) => {
+  const outside = await filesWorkspace({ 'far.md': '# Far\n' });
+  const root = await filesWorkspace({
+    'docs/main.md': `# Main\n\nRead [the sibling](sibling.md), [the app](../src/app.ts:1), and \`src/app.ts:1\`.\n\nAlso [far doc](${outside}/far.md).\n`,
+    'docs/sibling.md': '# Sibling heading\n',
+    'docs/guide.md': '# Guide heading\n',
+    'src/app.ts': 'export const answer = 42;\n',
+  });
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  const doc = await (await f.agent('/agent/documents', { path: join(root, 'docs', 'main.md'), workspace: root })).json();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const article = page.locator('#document'), preview = page.getByRole('region', { name: 'File preview' });
+  await article.getByRole('link', { name: 'the sibling' }).click();
+  await expect(preview.getByRole('heading', { name: 'Sibling heading' })).toBeVisible();
+  expect(page.url()).toContain(`document=${doc.id}`);
+  await preview.getByRole('button', { name: 'Back to document' }).click();
+
+  await article.getByRole('link', { name: 'the app' }).click();
+  await expect(page.getByText('export const answer = 42;')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByText('export const answer = 42;')).toHaveCount(0);
+  await article.getByText('src/app.ts:1', { exact: true }).click();
+  await expect(page.getByText('export const answer = 42;')).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  await article.getByRole('link', { name: 'far doc' }).click();
+  await expect(preview).toContainText("Outside this document's workspace");
+  await expect(preview).toContainText(`${outside}/far.md`);
+  await preview.getByRole('button', { name: 'Copy path' }).click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`${outside}/far.md`);
+  await preview.getByRole('button', { name: 'Back to document' }).click();
+
+  await page.getByLabel('Message', { exact: true }).fill('Where is the guide?');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(page.getByRole('log').getByText('Where is the guide?', { exact: true })).toBeVisible();
+  await answer(`See [the guide](${root}/docs/guide.md).`);
+  await page.getByRole('log').getByRole('link', { name: 'the guide' }).click();
+  await expect(preview.getByRole('heading', { name: 'Guide heading' })).toBeVisible();
+
+  const bare = await f.register('bare.md', '# Bare\n\nSee [a file](/tmp/elsewhere.md).\n');
+  await page.goto(`${f.url}/?document=${bare.id}`);
+  await page.locator('#document').getByRole('link', { name: 'a file' }).click();
+  await expect(preview).toContainText('This document has no recorded workspace');
+});
