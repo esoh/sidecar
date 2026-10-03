@@ -45,6 +45,9 @@ function boolean(body: Record<string, unknown>, key: string): boolean {
   if (typeof value !== 'boolean') throw new DomainError(`Expected ${key} to be a boolean`);
   return value;
 }
+function markAccepted(state: State, id: string) {
+  for (const request of requestBatch(state, id)) request.acceptedAt ??= Date.now();
+}
 async function bodyOf(request: IncomingMessage): Promise<Record<string, unknown>> {
   let size = 0;
   const chunks: Buffer[] = [];
@@ -191,6 +194,10 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     const active = stream;
     if (!active || closed) return;
     const progress = active.accept(event);
+    // Matching output is proof of receipt even if the handoff acknowledgement was lost.
+    if (active.hasStarted && !store.read().requests[active.route.requestId]?.acceptedAt) {
+      await store.update(state => markAccepted(state, active.route.requestId));
+    }
     if (progress) {
       try { await store.update(state => recordProgress(state, { ...active.route, ...progress })); }
       catch { active.fail('Could not save the progress update. Send a complete reply to recover.'); }
@@ -277,7 +284,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       if ('claimStatus' in notification && notification.claimStatus !== 'claimed') return;
       if (closed) return;
       await notifyCodex(owner, notification, transportAbort.signal);
-      await store.update(state => { if (state.requests[request.id]) for (const member of requestBatch(state, request.id)) member.acceptedAt ??= Date.now(); });
+      await store.update(state => { if (state.requests[request.id]) markAccepted(state, request.id); });
       connectionError = null;
     } catch (error) {
       if (!closed) {
@@ -672,7 +679,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       const acceptedPath = path.match(/^\/agent\/requests\/([^/]+)\/accepted$/);
       if (method === 'POST' && acceptedPath?.[1]) {
         const id = acceptedPath[1];
-        await store.update(state => { for (const request of requestBatch(state, id)) request.acceptedAt ??= Date.now(); });
+        await store.update(state => markAccepted(state, id));
         changed(); json(response, { ok: true }); return;
       }
       const preparePath = path.match(/^\/agent\/requests\/([^/]+)\/prepare$/);
@@ -700,7 +707,12 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       const claimPath = path.match(/^\/agent\/requests\/([^/]+)\/claim$/);
       if (method === 'POST' && claimPath?.[1]) {
         const id = claimPath[1];
-        const result = await store.update(state => claim(state, id, { resume: body.resume === undefined ? false : boolean(body, 'resume') }));
+        const result = await store.update(state => {
+          const result = claim(state, id, { resume: body.resume === undefined ? false : boolean(body, 'resume') });
+          // This endpoint is called by the agent after receiving an ID-only event.
+          if (result.claimStatus !== 'uncertain') markAccepted(state, id);
+          return result;
+        });
         const state = store.read();
         const document = await documentContext(get(state.documents, result.request.documentId));
         // Recover a prepared event truncated by a native monitor; never replace its stream.

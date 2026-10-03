@@ -146,7 +146,7 @@ Immediately after the final opening marker, optionally emit one line `[[sidecar-
 
 - `threadTitle`: short name, 1–80 characters on one line, only for an unnamed thread.
 - `isError`: `true` when the request failed; include a useful explanation in the answer. Streaming failure replies need no separate `reply --error` call.
-- `highlights`: **only when the user explicitly asks you to identify or highlight something in the document**. Do not attach highlights to ordinary explanations or routine edits. Each item has `exact` (visible document text, without Markdown formatting delimiters), optional `prefix`/`suffix` (immediately surrounding visible text to disambiguate), and an optional short `label`. Up to 20 highlights per agent reply, each exact text at most 16,384 characters; prefix/suffix at most 512 each and label at most 80 on one line. Only supply text you know from the document; retrieve context if needed. Use sufficient context for a unique match—Sidecar never chooses arbitrarily between repeated passages. These are viewer annotations: **do not edit the Markdown to create a highlight**.
+- `highlights`: **only when the user explicitly asks you to identify or highlight something in the document**. Contextual questions such as “where?”, “show me where”, or “which passage?” count: use a highlight and a selection link in your answer, without requiring the user to name the highlight feature. For an insertion-point question, highlight the existing anchor paragraph or heading and say **before** or **after** it; do not edit the document merely to point at it. Do not attach highlights to ordinary explanations or routine edits. Each item has `exact` (visible document text, without Markdown formatting delimiters), optional `prefix`/`suffix` (immediately surrounding visible text to disambiguate), and an optional short `label`. Up to 20 highlights per agent reply, each exact text at most 16,384 characters; prefix/suffix at most 512 each and label at most 80 on one line. Only supply text you know from the document; retrieve context if needed. Use sufficient context for a unique match—Sidecar never chooses arbitrarily between repeated passages. These are viewer annotations: **do not edit the Markdown to create a highlight**.
 
 Sidecar generates stable `selection-1`, `selection-2`, etc. slugs in array order, scoped to that reply. Link with `[friendly text](#selection-1)`; labels are optional and do not determine slugs. Each selection gets its own eye control. The app saves one shared document snapshot per version, not a document copy per highlight. Links navigate without changing visibility; changed passages retain their original view. Metadata does not execute shell commands, edit files, or resolve threads. The complete-reply fallback accepts the same optional metadata line on stdin, followed by prose.
 
@@ -156,5 +156,14 @@ Example when explicitly asked to identify the retry limit and timeout (substitut
 [[sidecar:SUPPLIED_NONCE]]
 [[sidecar-meta {"threadTitle":"Retry settings","highlights":[{"exact":"The retry limit is three.","label":"Retries"},{"exact":"The timeout is ten seconds."}]}]]
 See the [retry limit](#selection-1) and [timeout](#selection-2).
+[[/sidecar:SUPPLIED_NONCE]]
+```
+
+If you suggest adding a paragraph and the user asks “where?”, anchor to existing text:
+
+```text
+[[sidecar:SUPPLIED_NONCE]]
+[[sidecar-meta {"highlights":[{"exact":"The timeout is ten seconds.","label":"Insertion point"}]}]]
+Add it after [this paragraph](#selection-1).
 [[/sidecar:SUPPLIED_NONCE]]
 ```
