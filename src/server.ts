@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readFile, writeFile, realpath, mkdir, rename, unlink, rm } from 'node:fs/promises';
+import { readFile, writeFile, realpath, mkdir, rename, unlink, rm, stat } from 'node:fs/promises';
 import { basename, join, dirname, relative, isAbsolute, extname } from 'node:path';
 import { notifyCodex } from './agent.ts';
 import { observeCodex, readCodexActivity, type CodexObserver } from './codex-stream.ts';
@@ -618,9 +618,16 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       if (method === 'POST' && path === '/agent/documents') {
         const repoInfo = body.repoInfo;
         if (repoInfo !== undefined && !isRepoInfo(repoInfo)) throw new DomainError('Invalid repository metadata');
+        let workspace: string | undefined;
+        if (body.workspace !== undefined) {
+          const declared = text(body, 'workspace');
+          if (!isAbsolute(declared)) throw new DomainError('Workspace must be an absolute directory path');
+          workspace = await realpath(declared).catch(() => { throw new DomainError('Workspace must be an existing directory'); });
+          if (!(await stat(workspace)).isDirectory()) throw new DomainError('Workspace must be an existing directory');
+        }
         const canonical = await realpath(text(body, 'path'));
         await readDocument(canonical);
-        const document = await store.update(state => registerDocument(state, { path: canonical, title: optionalText(body, 'title'), generated: body.generated === undefined ? false : boolean(body, 'generated'), repoInfo }));
+        const document = await store.update(state => registerDocument(state, { path: canonical, title: optionalText(body, 'title'), generated: body.generated === undefined ? false : boolean(body, 'generated'), repoInfo, workspace }));
         if (closed) throw new DomainError('Sidecar stopped while opening the document. Open it again from your agent.', 503);
         await refresh(document); changed(); json(response, { ...document, title: title(document) }); return;
       }

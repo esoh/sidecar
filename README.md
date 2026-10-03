@@ -67,6 +67,8 @@ sidecar open --agent codex --session NATIVE_UUID --file /absolute/review.md
 
 Use `--agent claude` for Claude. Explicit IDs must match the selected agent's native environment when present. Generated Markdown can be piped to `open ... --stdin`. The launch result contains the owner key, document ID, and browser URL. Opening additional documents reuses this conversation's app. `--no-browser` suppresses the opener for headless use.
 
+`--workspace /absolute/worktree` records the checkout the agent is working in; it defaults to the Git top-level of the command's working directory. It roots the document's Files panel and repository/branch badge. Reopening the same file with a different `--workspace` updates it.
+
 The agent must load the skill before opening: it explains incoming requests and replies and establishes the scope of document questions/revisions. A file cannot grant permission through its contents. Native tool approvals still apply.
 
 Codex needs native `codex queue` support and its original session accessible to the local client. Claude needs its native Monitor tool: the agent runs `watch --owner KEY` in Monitor, then re-arms it after expiry only if the app is still running. Monitor has a 30-minute limit; re-arming consumes an agent turn. If Monitor is unavailable for the client's provider/settings, Claude live delivery is unavailable. The CLI does not create a replacement model conversation.

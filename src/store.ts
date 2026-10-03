@@ -9,7 +9,7 @@ import { isPinStyle, type PinStyle } from './pin-style.ts';
 export type Owner = { agent: 'codex' | 'claude'; sessionId: string };
 export { isQuote, type Quote } from './quote.ts';
 export type RepoInfo = { display: string; branch?: string };
-export type DocumentRecord = { id: string; path: string; generated: boolean; providedTitle?: string; userTitle?: string; repoInfo?: RepoInfo };
+export type DocumentRecord = { id: string; path: string; generated: boolean; providedTitle?: string; userTitle?: string; repoInfo?: RepoInfo; workspace?: string };
 export type MessageSelection = { id: string; slug: string; quote: Quote; isVisible: boolean; label?: string };
 export type Message = { id: string; role: 'user' | 'agent'; text: string; requestId: string; createdAt: number; selections?: MessageSelection[]; messageQuote?: MessageQuote; isPinned?: boolean; pinStyle?: PinStyle };
 export type Thread = { id: string; documentId: string; title?: string; createdAt?: number; isResolved: boolean; messages: Message[] };
@@ -45,7 +45,7 @@ export function isRepoInfo(v: unknown): v is RepoInfo {
   return isObject(v) && string(v.display) && v.display.trim().length > 0 && v.display.length <= 512 && (v.branch === undefined || (string(v.branch) && v.branch.length > 0 && v.branch.length <= 512));
 }
 function isDocument(v: unknown): v is DocumentRecord {
-  return isObject(v) && string(v.id) && string(v.path) && isAbsolute(v.path) && typeof v.generated === 'boolean' && optionalString(v.providedTitle) && optionalString(v.userTitle) && (v.repoInfo === undefined || isRepoInfo(v.repoInfo));
+  return isObject(v) && string(v.id) && string(v.path) && isAbsolute(v.path) && typeof v.generated === 'boolean' && optionalString(v.providedTitle) && optionalString(v.userTitle) && (v.repoInfo === undefined || isRepoInfo(v.repoInfo)) && (v.workspace === undefined || (string(v.workspace) && isAbsolute(v.workspace)));
 }
 function isMessage(v: unknown): v is Message {
   if (isObject(v) && v.messageQuote !== undefined && (!isMessageQuote(v.messageQuote) || v.role !== 'user' || (Array.isArray(v.selections) && v.selections.length > 0))) return false;
@@ -137,7 +137,7 @@ export function createState(owner: Owner): State {
   ownerKey(owner);
   return { version: 3, owner: structuredClone(owner), documents: {}, threads: {}, requests: {} };
 }
-export function registerDocument(state: State, input: {path: string; title?: string; generated: boolean; repoInfo?: RepoInfo}): DocumentRecord {
+export function registerDocument(state: State, input: {path: string; title?: string; generated: boolean; repoInfo?: RepoInfo; workspace?: string}): DocumentRecord {
   if (!isAbsolute(input.path)) throw new DomainError('Document path must be absolute');
   if (input.repoInfo !== undefined && !isRepoInfo(input.repoInfo)) throw new DomainError('Invalid repository metadata');
   const path = resolve(input.path);
@@ -147,6 +147,7 @@ export function registerDocument(state: State, input: {path: string; title?: str
     state.documents[document.id] = document;
   }
   if (input.repoInfo !== undefined) document.repoInfo = structuredClone(input.repoInfo);
+  if (input.workspace !== undefined) document.workspace = input.workspace;
   ensureGeneralThread(state, document.id);
   if (input.title?.trim()) document.providedTitle = input.title.trim();
   return document;
