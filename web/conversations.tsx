@@ -450,6 +450,7 @@ export function ConversationSidebar({
   const creatingId = useRef<string | null>(null),
     createBusy = useRef(false);
   const positions = useRef(new Map<string, number>());
+  const conversation = useRef<HTMLElement>(null);
   const messages = useRef<HTMLDivElement>(null),
     back = useRef<HTMLButtonElement>(null),
     filterInput = useRef<HTMLButtonElement>(null);
@@ -460,8 +461,21 @@ export function ConversationSidebar({
   const recovering = requests.find(request => request.threadId === activeId && request.replyRecovery && ['claimed', 'uncertain'].includes(request.status));
   const requestStatuses = new Map(requests.map((request) => [request.id, request.status]));
   const requestGroups = new Map(requests.map(request => [request.id, request.batchId ?? request.id]));
+  const answeredGroups = new Set(active?.messages.filter(message => message.role === 'agent').map(message => requestGroups.get(message.requestId) ?? message.requestId));
+  const pendingIds = new Set(requests.filter(request => !request.acceptedAt && !['completed', 'failed', 'stopped'].includes(request.status)
+    && !answeredGroups.has(request.batchId ?? request.id)).map(request => request.id));
+  const queuedMessages = active?.messages.filter(message => message.role === 'user' && pendingIds.has(message.requestId)) ?? [];
+  // A later input can be saved before the current reply. Display each delivered batch together.
+  const messageGroups = new Map<string, Message[]>();
+  for (const message of active?.messages ?? []) {
+    if (message.role === 'user' && pendingIds.has(message.requestId)) continue;
+    const id = requestGroups.get(message.requestId) ?? message.requestId;
+    const group = messageGroups.get(id) ?? [];
+    group.push(message); messageGroups.set(id, group);
+  }
+  const deliveredMessages = [...messageGroups.values()].flat();
   const recoveryStatuses = new Map(requests.map(request => [request.id, request.replyRecovery?.status]));
-  const latestMessages = new Map(active?.messages.map(message => [requestGroups.get(message.requestId) ?? message.requestId, message.id]));
+  const latestMessages = new Map(deliveredMessages.map(message => [requestGroups.get(message.requestId) ?? message.requestId, message.id]));
   const inProgress = new Set(
     requests.filter((request) => request.status === 'claimed' && recoveryStatuses.get(request.batchId ?? request.id) !== 'failed').map((request) => request.threadId),
   );
@@ -506,16 +520,16 @@ export function ConversationSidebar({
       atBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 24;
     } else if (previousId.current) filterInput.current?.focus({ preventScroll: true });
     previousId.current = active?.id ?? null;
-  }, [active?.id, active?.messages.length, text, isShown]);
+  }, [active?.id, deliveredMessages.length, queuedMessages.length, text, isShown]);
   useLayoutEffect(() => {
     if (!isShown || !activeMessageId) return;
-    const node = Array.from(messages.current?.querySelectorAll<HTMLElement>('[data-selection-id]') ?? []).find(node => node.dataset.selectionId === activeSelectionId)
-      ?? Array.from(messages.current?.querySelectorAll<HTMLElement>('[data-message-id]') ?? []).find(node => node.dataset.messageId === activeMessageId);
+    const node = Array.from(conversation.current?.querySelectorAll<HTMLElement>('[data-selection-id]') ?? []).find(node => node.dataset.selectionId === activeSelectionId)
+      ?? Array.from(conversation.current?.querySelectorAll<HTMLElement>('[data-message-id]') ?? []).find(node => node.dataset.messageId === activeMessageId);
     node?.scrollIntoView({ block: 'nearest' });
   }, [activeSelectionId, activeMessageId, active?.id, isShown, messageVisit]);
   useLayoutEffect(() => {
     if (!isShown || !messageJump || handledJump.current === messageJump.sequence) return;
-    const node = Array.from(messages.current?.querySelectorAll<HTMLElement>('[data-message-id]') ?? []).find(node => node.dataset.messageId === messageJump.id);
+    const node = Array.from(conversation.current?.querySelectorAll<HTMLElement>('[data-message-id]') ?? []).find(node => node.dataset.messageId === messageJump.id);
     if (!node) return;
     const frame = requestAnimationFrame(() => {
       handledJump.current = messageJump.sequence;
@@ -664,7 +678,7 @@ export function ConversationSidebar({
         </p>
       )}
       {active ? (
-        <section className="sidebar-view" id="threads" data-active-thread={active.id} aria-label="Thread conversation">
+        <section ref={conversation} className="sidebar-view" id="threads" data-active-thread={active.id} aria-label="Thread conversation">
           <div
             className="messages"
             ref={messages}
@@ -683,7 +697,7 @@ export function ConversationSidebar({
                 <p>Ask a question about this document.</p>
               </div>
             )}
-            {active.messages.map((message) => {
+            {deliveredMessages.map((message) => {
               const status = requestStatuses.get(message.requestId);
               const requestId = requestGroups.get(message.requestId) ?? message.requestId;
               const isLatest = latestMessages.get(requestId) === message.id;
@@ -694,9 +708,9 @@ export function ConversationSidebar({
                     <MessageContent message={message} documentId={documentId} threadId={active.id} activeSelectionId={activeSelectionId} passageChanged={passageChanged} showPassage={showPassage} showOriginal={showOriginal} onQuoteMessage={onQuoteMessage} onGoToMessage={onGoToMessage} />
                     <MessageActions message={message} threadId={active.id} onPinned={() => onOpenPin(message.id)} />
                   </div>
-                  {isLatest && requestId !== recovering?.id && !hasStreamedReply && (status === 'queued' || status === 'claimed' || status === 'stopped') && (
+                  {isLatest && requestId !== recovering?.id && !hasStreamedReply && (status === 'claimed' || status === 'stopped') && (
                     <div className="message-status" role="status">
-                      {status === 'stopped' ? 'Stopped' : status === 'queued' ? 'Queued' : 'Working…'}
+                      {status === 'stopped' ? 'Stopped' : 'Working…'}
                     </div>
                   )}
                 </div>
@@ -735,6 +749,16 @@ export function ConversationSidebar({
             </div>}
             {!recovering && stream?.threadId === active.id && stream.error && <p role="alert">Reply could not be saved. Check the attached agent’s connection.</p>}
           </div>
+          {!!queuedMessages.length && <section className="queued-messages" aria-label="Queued messages">
+            <div className="queue-heading" role="status">Queued · {queuedMessages.length}</div>
+            <ol>
+              {queuedMessages.map(message => <li key={message.id} tabIndex={0} data-message-id={message.id} data-active={message.id === activeMessageId || undefined}>
+                <span className="queue-preview" title={message.text}>{messagePreview(message.text)}</span>
+                {message.selections?.map(selection => <button key={selection.id} data-selection-id={selection.id} aria-label="Show queued selection" title={selection.quote.exact} onClick={() => passageChanged(selection.quote) ? showOriginal(selection.id) : showPassage(selection)}><Icon name="annotation" /></button>)}
+                {message.messageQuote && <button aria-label="Go to queued quote" title={message.messageQuote.exact} onClick={() => onGoToMessage(message.messageQuote!.messageId)}><Icon name="comment" /></button>}
+              </li>)}
+            </ol>
+          </section>}
           <QuestionForm
             key={active.id}
             documentId={documentId}

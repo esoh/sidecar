@@ -8,11 +8,25 @@ import { fixture } from './support.ts';
 let f: Awaited<ReturnType<typeof fixture>>;
 let cleanup: (() => Promise<void>)[];
 let pageErrors: string[];
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ page, context }, info) => {
   cleanup = []; pageErrors = [];
   page.on('pageerror', error => pageErrors.push(error.message));
   page.on('console', message => { if (message.type() === 'error' && message.text().includes('Content Security Policy')) pageErrors.push(message.text()); });
   f = await fixture({ after: fn => { cleanup.push(fn); } });
+  // Most UI tests exercise delivered chat. Transport tests control the handoff explicitly.
+  if (!info.tags.includes('@manual-delivery')) {
+    await context.route('**/api/questions', async route => {
+      const response = await route.fetch();
+      if (response.ok()) await f.agent(`/agent/requests/${(await response.json()).id}/accepted`, {});
+      await route.fulfill({ response });
+    });
+    const view = f.view;
+    f.view = async (...args) => {
+      const response = await view(...args);
+      if (args[0] === '/api/questions' && args[1] && response.ok) await f.agent(`/agent/requests/${(await response.clone().json()).id}/accepted`, {});
+      return response;
+    };
+  }
 });
 test.afterEach(async () => { try { expect(pageErrors).toEqual([]); } finally { for (const fn of cleanup) await fn(); } });
 async function state() { return (await f.view('/api/state')).json(); }
@@ -22,6 +36,92 @@ async function answer(text: string) {
   await f.agent(`/agent/requests/${request.id}/claim`, {});
   await f.agent('/agent/replies', { requestId: request.id, documentId: request.documentId, threadId: request.threadId, text });
 }
+
+test('queued previews wait for batch delivery and keep selections, order and drafts', { tag: '@manual-delivery' }, async ({ page }) => {
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true });
+  const queue = page.getByRole('region', { name: 'Queued messages', exact: true });
+  const log = page.getByRole('log');
+  await expect(page.locator('#document')).toContainText('Hello world.');
+  await select(page, 'Hello world.');
+  await input.fill('Explain **this passage**'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  const first = await lastRequest();
+  await input.fill('And this follow-up'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await expect(queue).toContainText('Queued · 2');
+  await expect(queue.getByRole('listitem')).toHaveText(['Explain this passage', 'And this follow-up']);
+  await expect(log.locator('.message.user')).toHaveCount(0);
+  await expect(queue.getByRole('button', { name: 'Show queued selection' })).toHaveCount(1);
+  const prepared = await (await f.agent(`/agent/requests/${first.id}/prepare`, {})).json();
+  await expect(queue.getByRole('listitem')).toHaveCount(2);
+  await input.fill('Arrived after the batch'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  const later = await lastRequest();
+  await input.fill('Keep this draft'); await page.reload();
+  await expect(queue).toContainText('Queued · 3');
+  await expect(log.locator('.message.user')).toHaveCount(0);
+  await f.agent(`/agent/requests/${first.id}/accepted`, {});
+  await expect(queue.getByRole('listitem')).toHaveText(['Arrived after the batch']);
+  await expect(log.locator('.message.user .message-bubble')).toHaveText(['Explain this passage', 'And this follow-up']);
+  await expect(log.locator('.message-selection')).toContainText('Hello world.');
+  await expect(log.locator('.message-status')).toHaveText('Working…');
+  await f.agent('/agent/stream-events', { ownerKey: ownerKey(f.owner), turnId: 'queue-test', messageId: 'final', index: 0, delta: prepared.stream.prefix + 'First answer' + prepared.stream.suffix, final: true });
+  await f.agent(`/agent/requests/${later.id}/prepare`, {});
+  await expect(queue).toBeVisible();
+  await f.agent(`/agent/requests/${later.id}/accepted`, {});
+  await expect(queue).toHaveCount(0);
+  await expect(log.locator('.message-bubble')).toHaveText(['Explain this passage', 'And this follow-up', 'First answer', 'Arrived after the batch']);
+  await expect(input).toHaveValue('Keep this draft');
+  await page.reload();
+  await expect(queue).toHaveCount(0);
+  await expect(log.locator('.message.user')).toHaveCount(3);
+});
+
+test('queued previews survive uncertain delivery and agent claims persist receipt', { tag: '@manual-delivery' }, async ({ page }) => {
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Waiting for receipt'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  const request = await lastRequest();
+  await f.agent(`/agent/requests/${request.id}/prepare`, {});
+  await f.reopen();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const queue = page.getByRole('region', { name: 'Queued messages', exact: true });
+  await expect(queue).toContainText('Waiting for receipt');
+  await expect(page.getByRole('log').locator('.message.user')).toHaveCount(0);
+  await f.agent(`/agent/requests/${request.id}/claim`, { resume: true });
+  await expect(queue).toHaveCount(0);
+  await expect(page.getByRole('log')).toContainText('Waiting for receipt');
+  await f.reopen();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(queue).toHaveCount(0);
+  await expect(page.getByRole('log')).toContainText('Waiting for receipt');
+});
+
+test('matching output moves a queued batch into chat even when its acknowledgement is missing', { tag: '@manual-delivery' }, async ({ page }) => {
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Inspect this'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  const request = await lastRequest();
+  const prepared = await (await f.agent(`/agent/requests/${request.id}/prepare`, {})).json();
+  const queue = page.getByRole('region', { name: 'Queued messages', exact: true });
+  const emit = (messageId: string, delta: string) => f.agent('/agent/stream-events', { ownerKey: ownerKey(f.owner), turnId: 'receipt-test', messageId, index: 0, delta, final: true });
+  await emit('unrelated', 'An unrelated update');
+  await expect(queue).toBeVisible();
+  await emit('progress', prepared.stream.progress.prefix + 'Inspecting now' + prepared.stream.progress.suffix);
+  await expect(queue).toHaveCount(0);
+  await expect(page.getByRole('log').locator('.message-bubble')).toHaveText(['Inspect this', 'Inspecting now']);
+  expect((await state()).requests[request.id].acceptedAt).toEqual(expect.any(Number));
+  await f.reopen();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(queue).toHaveCount(0);
+  await expect(page.getByRole('log').locator('.message-bubble')).toHaveText(['Inspect this', 'Inspecting now']);
+});
 
 test('unfinished replies show bounded recovery and a Retry button without disturbing the draft', async ({ page }) => {
   const doc = await f.register();
@@ -48,7 +148,7 @@ test('unfinished replies show bounded recovery and a Retry button without distur
   await expect(input).toHaveValue('Keep my draft');
 });
 
-test('a batch shares one Working/Stopped indicator and preserves partial text without interrupting on Enter', async ({ page }) => {
+test('a batch shares one Working/Stopped indicator and preserves partial text without interrupting on Enter', { tag: '@manual-delivery' }, async ({ page }) => {
   const doc = await f.register('stop.md');
   await page.goto(`${f.url}/?document=${doc.id}`);
   const input = page.getByLabel('Message', { exact: true });
@@ -56,7 +156,7 @@ test('a batch shares one Working/Stopped indicator and preserves partial text wi
   await expect(input).toHaveValue('');
   const request = await lastRequest();
   await input.fill('Also explain the follow-up'); await input.press('Enter');
-  await expect(page.getByRole('log')).toContainText('Also explain the follow-up');
+  await expect(input).toHaveValue('');
   const second = await lastRequest();
   const prepared = await (await f.agent(`/agent/requests/${request.id}/prepare`, {})).json();
   await f.agent(`/agent/requests/${request.id}/accepted`, {});
@@ -556,7 +656,7 @@ test('selection spans inline formatting, code and emoji; outside and empty selec
   await page.getByRole('button', { name: 'New conversation', exact: true }).click();
   await page.getByLabel('Message', { exact: true }).fill('General after outside selection');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
-  await expect(page.locator('#threads').getByText('General after outside selection', { exact: true })).toBeVisible();
+  await expect(page.getByRole('log').getByText('General after outside selection', { exact: true })).toBeVisible();
   expect((await lastRequest()).quote).toBeUndefined();
 });
 
@@ -1163,7 +1263,7 @@ test('a delayed create response preserves messages already received through live
   } finally { release(); }
 });
 
-test('one header status follows native activity across documents without repeating queue messages', async ({ page }) => {
+test('one header status follows native activity across documents without repeating queue messages', { tag: '@manual-delivery' }, async ({ page }) => {
   const doc = await f.register(), other = await f.register('other.md');
   await page.goto(`${f.url}/?document=${doc.id}`);
   const status = page.getByRole('status', { name: 'Agent status', exact: true });
@@ -1211,34 +1311,37 @@ test('one header status follows native activity across documents without repeati
   await expect(dot).toHaveAttribute('data-activity', 'disconnected');
 });
 
-test('conversation messages show their own queued and working status until answered', async ({ page }) => {
+test('delivered messages show Working while later inputs stay in the queue', { tag: '@manual-delivery' }, async ({ page }) => {
   const doc = await f.register(); await page.goto(`${f.url}/?document=${doc.id}`);
   const message = page.getByLabel('Message', { exact: true });
   await message.fill('First question'); await message.press('Enter'); await expect(message).toHaveValue('');
   const first = await lastRequest();
   const firstStatus = page.locator('.message.user').filter({ hasText: 'First question' }).getByRole('status');
-  await expect(firstStatus).toHaveText('Queued');
+  const queue = page.getByRole('region', { name: 'Queued messages', exact: true });
+  await expect(queue).toContainText('First question');
+  await expect(firstStatus).toHaveCount(0);
   await f.agent(`/agent/requests/${first.id}/claim`, {});
   await message.fill('Follow-up question'); await message.press('Enter'); await expect(message).toHaveValue('');
   const second = await lastRequest();
   const secondStatus = page.locator('.message.user').filter({ hasText: 'Follow-up question' }).getByRole('status');
   await expect(firstStatus).toHaveText('Working…');
-  await expect(secondStatus).toHaveText('Queued');
+  await expect(queue).toContainText('Follow-up question');
+  await expect(secondStatus).toHaveCount(0);
   await page.reload();
   await expect(firstStatus).toHaveText('Working…');
-  await expect(secondStatus).toHaveText('Queued');
+  await expect(queue).toContainText('Follow-up question');
   const markers = await (await f.agent('/agent/streams', { requestId: first.id, documentId: doc.id, threadId: first.threadId })).json();
   await f.agent('/agent/stream-events', { ownerKey: `claude-${f.owner.sessionId}`, messageId: 'status-reply', turnId: 'status-turn', index: 0, delta: markers.prefix + 'First answer', final: false });
   await expect(page.getByRole('log')).toContainText('First answer');
   await expect(firstStatus).toHaveCount(0);
-  await expect(secondStatus).toHaveText('Queued');
+  await expect(queue).toContainText('Follow-up question');
   await page.reload();
   await expect(firstStatus).toHaveCount(0);
-  await expect(secondStatus).toHaveText('Queued');
+  await expect(queue).toContainText('Follow-up question');
   await f.agent('/agent/replies', { requestId: first.id, documentId: doc.id, threadId: first.threadId, text: 'First answer' });
   await expect(page.getByRole('log')).toContainText('First answer');
   await expect(firstStatus).toHaveCount(0);
-  await expect(secondStatus).toHaveText('Queued');
+  await expect(queue).toContainText('Follow-up question');
   await f.agent(`/agent/requests/${second.id}/claim`, {});
   await expect(secondStatus).toHaveText('Working…');
   await f.agent('/agent/replies', { requestId: second.id, documentId: doc.id, threadId: second.threadId, text: 'Second answer' });
@@ -1246,7 +1349,7 @@ test('conversation messages show their own queued and working status until answe
   await expect(page.getByRole('log').getByRole('status')).toHaveCount(0);
 });
 
-test('thread previews show unread dots and active-request spinners independently', async ({ page }) => {
+test('thread previews show unread dots and active-request spinners independently', { tag: '@manual-delivery' }, async ({ page }) => {
   const doc = await f.register(); await page.goto(`${f.url}/?document=${doc.id}`);
   const message = page.getByLabel('Message', { exact: true });
   await message.fill('First question'); await message.press('Enter'); await expect(message).toHaveValue('');
@@ -2143,7 +2246,7 @@ test('document badges, copy and brightness preserve text anchors and controls', 
   expect((await page.locator('#document h2').boundingBox())!.y).toBeGreaterThan(badgeBox.y + badgeBox.height);
 });
 
-test('progress updates remain in history and Working moves below the latest update', async ({ page }) => {
+test('progress updates remain in history and Working moves below the latest update', { tag: '@manual-delivery' }, async ({ page }) => {
   const doc = await f.register();
   await page.goto(`${f.url}/?document=${doc.id}`);
   await page.getByLabel('Message', { exact: true }).fill('Inspect this document');

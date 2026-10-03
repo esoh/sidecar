@@ -410,6 +410,14 @@ body {
   min-height: 0;
   padding: 20px 18px;
 }
+.queued-messages { flex: 0 1 auto; min-height: 52px; max-height: 30%; margin: 0 18px; padding: 9px 0; border-top: 1px solid var(--line); overflow: auto; }
+.queue-heading { color: var(--subtle); font-size: 10px; margin-bottom: 4px; }
+.queued-messages ol { list-style: none; margin: 0; padding: 0; }
+.queued-messages li { display: flex; align-items: center; gap: 6px; min-height: 26px; border-radius: 4px; font-size: 11px; }
+.queued-messages li[data-active] { background: oklch(0.75 0.18 280 / 0.08); }
+.queue-preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queued-messages button { display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: 24px; height: 24px; padding: 4px; color: var(--subtle); }
+.queued-messages button .sidecar-icon { width: 13px; height: 13px; }
 .message {
   margin-bottom: 23px;
 }
