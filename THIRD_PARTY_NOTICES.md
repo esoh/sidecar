@@ -44,6 +44,14 @@ adapted from `DocumentQAPair` in `@plannotator/ui` 0.47.0
 `components/ai/DocumentAIChatPanel.tsx`, with Sidecar's two-line excerpt limit
 and requested rounded attachment background.
 
+`src/workspace-status.ts` is copied unchanged from Plannotator's
+`packages/shared/workspace-status.ts`. The file-browser exclusions and tree
+builder in `src/files.ts` are copied from `packages/shared/reference-common.ts`,
+and its walk, file cap and changed-file seeding follow `handleFileBrowserFiles`
+in `packages/server/reference-handlers.ts`. File-type predicates are imported
+from the published `@plannotator/core` 0.25.7 `annotatable` module.
+Source: https://github.com/backnotprop/plannotator/tree/772c620302f584654c3d8e17bbffb2c6255d3331/packages
+
 Inter and Geist Mono are served from Plannotator's Fontsource dependencies;
 the fonts use the SIL Open Font License 1.1 distributed with those packages.
 KaTeX and its fonts retain the licenses included in the KaTeX dependency.
