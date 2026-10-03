@@ -457,7 +457,8 @@ export function ConversationSidebar({
   const handledJump = useRef<number | null>(null);
   const active = threads.find((thread) => thread.id === activeId);
   const requestStatuses = new Map(requests.map((request) => [request.id, request.status]));
-  const latestMessages = new Map(active?.messages.map(message => [message.requestId, message.id]));
+  const requestGroups = new Map(requests.map(request => [request.id, request.batchId ?? request.id]));
+  const latestMessages = new Map(active?.messages.map(message => [requestGroups.get(message.requestId) ?? message.requestId, message.id]));
   const inProgress = new Set(
     requests.filter((request) => request.status === 'claimed').map((request) => request.threadId),
   );
@@ -681,8 +682,9 @@ export function ConversationSidebar({
             )}
             {active.messages.map((message) => {
               const status = requestStatuses.get(message.requestId);
-              const isLatest = latestMessages.get(message.requestId) === message.id;
-              const hasStreamedReply = stream?.requestId === message.requestId && !!stream.text;
+              const requestId = requestGroups.get(message.requestId) ?? message.requestId;
+              const isLatest = latestMessages.get(requestId) === message.id;
+              const hasStreamedReply = stream?.requestId === requestId && !!stream.text;
               return (
                 <div className={`message ${message.role}`} key={message.id} tabIndex={-1} data-message-id={message.id} data-active={message.id === activeMessageId || undefined}>
                   <div className="message-content">

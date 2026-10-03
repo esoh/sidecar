@@ -16,7 +16,7 @@ export type Thread = { id: string; documentId: string; title?: string; createdAt
 export type RequestRecord = {
   id: string; documentId: string; threadId: string; text: string; clientMessageId: string;
   quote?: Quote; messageQuote?: MessageQuote; status: 'queued' | 'claimed' | 'completed' | 'failed' | 'uncertain' | 'stopped'; createdAt: number;
-  submission: string; answer?: { text: string; isError: boolean }; acceptedAt?: number;
+  submission: string; answer?: { text: string; isError: boolean }; acceptedAt?: number; batchId?: string;
 };
 export type State = { version: 3; owner: Owner; documents: Record<string, DocumentRecord>; threads: Record<string, Thread>; requests: Record<string, RequestRecord> };
 export type Store = { read(): State; update<T>(change: (draft: State) => T): Promise<T> };
@@ -70,6 +70,7 @@ function isOldThread(v: unknown): v is OldThread {
 }
 function isRequest(v: unknown): v is RequestRecord {
   if (isObject(v) && v.messageQuote !== undefined && (!isMessageQuote(v.messageQuote) || v.quote !== undefined)) return false;
+  if (isObject(v) && v.batchId !== undefined && (!string(v.batchId) || !/^[0-9a-f-]{36}$/i.test(v.batchId))) return false;
   return isObject(v) && string(v.id) && string(v.documentId) && string(v.threadId) && string(v.text) && string(v.clientMessageId) && string(v.submission) && number(v.createdAt) && string(v.status) && ['queued','claimed','completed','failed','uncertain','stopped'].includes(v.status) && (v.quote === undefined || isQuote(v.quote)) && (v.acceptedAt === undefined || number(v.acceptedAt)) && (v.answer === undefined || (isObject(v.answer) && string(v.answer.text) && typeof v.answer.isError === 'boolean'));
 }
 function records<T extends {id: string}>(v: unknown, check: (v: unknown) => v is T): v is Record<string,T> {
@@ -113,6 +114,10 @@ export function readSavedState(value: unknown): State {
   }
   for (const request of Object.values(state.requests)) {
     if (get(state.threads, request.threadId).documentId !== request.documentId) throw new Error('Malformed request routing');
+    if (request.batchId) {
+      const leader = get(state.requests, request.batchId);
+      if (leader.batchId !== leader.id || leader.threadId !== request.threadId || leader.documentId !== request.documentId || leader.status !== request.status) throw new Error('Malformed request batch');
+    }
   }
   return state;
 }
@@ -217,13 +222,28 @@ export function submit(state: State, input: SubmitInput): RequestRecord {
   thread.messages.push({ id, role: 'user', text: input.text, requestId: request.id, createdAt: request.createdAt, ...(input.messageQuote ? { messageQuote: structuredClone(input.messageQuote) } : {}), ...(input.quote ? { selections: [{ id, slug: 'selection-1', quote: structuredClone(input.quote), isVisible: true }] } : {}) });
   return request;
 }
+export function requestBatch(state: State, requestId: string): RequestRecord[] {
+  const request = get(state.requests, requestId);
+  if (request.batchId && request.batchId !== requestId) throw new DomainError(`Use batch request ${request.batchId}`, 409);
+  return request.batchId ? Object.values(state.requests).filter(r => r.batchId === requestId) : [request];
+}
+export function prepareBatch(state: State, requestId: string): RequestRecord[] {
+  const existing = requestBatch(state, requestId), request = get(state.requests, requestId);
+  if (request.batchId || request.status !== 'queued') return existing;
+  if (Object.values(state.requests).some(r => r.status === 'claimed')) throw new DomainError('Another request is in progress', 409);
+  // Freeze even a single input: an ID-only handoff must not absorb later arrivals.
+  const batch = Object.values(state.requests).filter(r => r.threadId === request.threadId && r.status === 'queued' && !r.batchId);
+  for (const member of batch) member.batchId = requestId;
+  return batch;
+}
 export function claim(state: State, requestId: string, options: {resume?: boolean}): ClaimResult {
+  requestBatch(state, requestId);
   const request = get(state.requests, requestId);
   if (request.status === 'completed' || request.status === 'failed' || request.status === 'stopped') return { claimStatus: 'completed', request };
   if (request.status === 'claimed') return { claimStatus: 'already-claimed', request };
   if (request.status === 'uncertain' && !options.resume) return { claimStatus: 'uncertain', request };
   if (Object.values(state.requests).some(r => r.id !== requestId && r.status === 'claimed')) throw new DomainError('Another request is in progress', 409);
-  request.status = 'claimed';
+  for (const member of prepareBatch(state, requestId)) member.status = 'claimed';
   return { claimStatus: 'claimed', request };
 }
 export function recordProgress(state: State, input: ReplyInput & { messageId: string }): void {
@@ -241,6 +261,7 @@ export function recordProgress(state: State, input: ReplyInput & { messageId: st
   thread.messages.push({ id, role: 'agent', text: input.text, requestId: request.id, createdAt: Date.now() });
 }
 export function reply(state: State, input: ReplyInput): void {
+  const batch = requestBatch(state, input.requestId);
   const request = get(state.requests, input.requestId);
   if (request.status === 'stopped') throw new DomainError('This request was stopped; submit a new message to continue', 409);
   if (request.documentId !== input.documentId || request.threadId !== input.threadId) throw new DomainError('Reply routing does not match the request', 409);
@@ -252,7 +273,7 @@ export function reply(state: State, input: ReplyInput): void {
   }
   if (request.status !== 'claimed') throw new DomainError('Claim the request before replying', 409);
   request.answer = answer;
-  request.status = answer.isError ? 'failed' : 'completed';
+  for (const member of batch) member.status = answer.isError ? 'failed' : 'completed';
   const thread = get(state.threads, request.threadId), id = randomUUID();
   if (!thread.title && input.metadata?.threadTitle) nameThread(state, thread.id, input.metadata.threadTitle);
   const selections = input.metadata?.highlights?.map((h, index): MessageSelection => {
@@ -262,9 +283,10 @@ export function reply(state: State, input: ReplyInput): void {
   thread.messages.push({ id, role: 'agent', text: answer.text, requestId: request.id, createdAt: Date.now(), ...(selections?.length ? { selections } : {}) });
 }
 export function stopRequest(state: State, requestId: string, partial: string): void {
+  const batch = requestBatch(state, requestId);
   const request = get(state.requests, requestId);
   if (request.status !== 'claimed') return;
-  request.status = 'stopped';
+  for (const member of batch) member.status = 'stopped';
   request.answer = { text: partial, isError: false };
   const thread = get(state.threads, request.threadId), last = thread.messages.at(-1);
   if (partial.trim() && !(last?.role === 'agent' && last.requestId === requestId && last.text === partial))

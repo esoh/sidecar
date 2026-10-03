@@ -14,7 +14,7 @@ import { readAppVersion } from './version.ts';
 import { libraryDocument, listLibrary, recordDocumentOpen } from './library.ts';
 import { claim, createThread, closeDocument, discardEmptyThread, nameThread, pinMessage, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, setSelectionVisibility, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput, type ReplyInput } from './store.ts';
 import { isPinStyle } from './pin-style.ts';
-import { stopRequest } from './store.ts';
+import { stopRequest, prepareBatch, requestBatch, type State } from './store.ts';
 import { isMessageQuote } from './quote.ts';
 
 const rendererRequire = createRequire(import.meta.resolve('@plannotator/ui/components/BlockRenderer'));
@@ -66,6 +66,18 @@ function sameSecret(value: unknown, secret: string): boolean {
 function json(response: ServerResponse, value: unknown, status = 200): void {
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   response.end(JSON.stringify(value));
+}
+function requestContext(state: State, id: string) {
+  const requests = requestBatch(state, id), request = get(state.requests, id), thread = get(state.threads, request.threadId);
+  const questions = thread.messages.filter(message => message.role === 'user');
+  const previous = questions[questions.findIndex(message => message.requestId === requests[0].id) - 1];
+  const messages = requests.map(request => ({
+    requestId: request.id, text: request.text,
+    ...(request.quote ? { quote: { exact: request.quote.exact, ...(request.quote.sentence ? { sentence: request.quote.sentence } : {}) } } : {}),
+    ...(request.messageQuote ? { messageQuote: request.messageQuote } : {}),
+  }));
+  const { requestId: _, ...single } = messages[0];
+  return { documentId: request.documentId, thread: { id: thread.id, lastRequestId: previous?.requestId ?? null, ...(thread.title ? { title: thread.title } : {}) }, ...(messages.length > 1 ? { messages } : single) };
 }
 export async function startServer({ owner, directory, port = 0, pollMs = 1000 }: ServerOptions) {
   const appVersion = await readAppVersion();
@@ -204,8 +216,9 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     return result;
   }
   function pending() {
-    const head = Object.values(store.read().requests).find(r => ['queued', 'claimed', 'uncertain'].includes(r.status));
-    return head && head.status !== 'claimed' ? head : undefined;
+    const requests = Object.values(store.read().requests);
+    if (requests.some(r => r.status === 'claimed')) return;
+    return requests.find(r => (!r.batchId || r.batchId === r.id) && ['queued', 'uncertain'].includes(r.status));
   }
   function notifyAgent(response: ServerResponse, sent: Set<string>) {
     const request = pending();
@@ -224,14 +237,14 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       if ('claimStatus' in notification && notification.claimStatus !== 'claimed') return;
       if (closed) return;
       await notifyCodex(owner, notification, transportAbort.signal);
-      await store.update(state => { if (state.requests[request.id]) state.requests[request.id].acceptedAt = Date.now(); });
+      await store.update(state => { if (state.requests[request.id]) for (const member of requestBatch(state, request.id)) member.acceptedAt ??= Date.now(); });
       connectionError = null;
     } catch (error) {
       if (!closed) {
         // A failed queue command may already have delivered. Do not automatically execute it twice.
         await store.update(state => {
           const current = state.requests[request.id];
-          if (current?.status === 'claimed' && directRequestId === current.id) current.status = error instanceof Error && 'code' in error && error.code === 'ENOENT' ? 'queued' : 'uncertain';
+          if (current?.status === 'claimed' && directRequestId === current.id) for (const member of requestBatch(state, current.id)) member.status = error instanceof Error && 'code' in error && error.code === 'ENOENT' ? 'queued' : 'uncertain';
         });
         if (directRequestId === request.id) directRequestId = undefined;
         if (stream?.route.requestId === request.id) { stopObserver?.(); stopObserver = undefined; stream = undefined; }
@@ -249,7 +262,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     const state = store.read();
     // Show Working once native delivery succeeds; reserving the request alone is still Queued.
     const delivered = directRequestId && state.requests[directRequestId];
-    if (delivered && delivered.status === 'claimed' && !delivered.acceptedAt && !stream?.hasStarted) delivered.status = 'queued';
+    if (delivered && delivered.status === 'claimed' && !delivered.acceptedAt && !stream?.hasStarted) for (const member of requestBatch(state, delivered.id)) member.status = 'queued';
     for (const request of Object.values(state.requests)) if (request.status === 'queued' && request.acceptedAt) request.status = 'claimed';
     return { ...state, appVersion, stream: stream ? { ...stream.snapshot(), turnId: controlTurn(), canStop: canStop(), stopping: stopping?.stream === stream, stopError } : null, lastLifecycle, activity: compacting ? 'compacting' : agentActivity, connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError, documents: Object.fromEntries(Object.values(state.documents).map(document => {
       const cached = cache.get(document.id);
@@ -261,7 +274,8 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     return 'data' in result ? { id: document.id, path: document.path, title: title(document), ...result.data } : { id: document.id, path: document.path, title: title(document), error: result.error };
   }
   async function startReplyStream(route: import('./stream.ts').ReplyRoute) {
-    const current = get(store.read().requests, route.requestId);
+    const state = store.read(); requestBatch(state, route.requestId);
+    const current = get(state.requests, route.requestId);
     if (current.status !== 'claimed' || current.documentId !== route.documentId || current.threadId !== route.threadId) throw new DomainError('Claim the matching request before streaming', 409);
     if (!stream || stream.route.requestId !== current.id) {
       stopObserver?.(); stopObserver = undefined;
@@ -282,18 +296,19 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   }
   async function prepareNotification(id: string) {
     const notification = { type: 'sidecar.request', ownerKey: ownerKey(owner), requestId: id };
-    const state = store.read(), request = get(state.requests, id);
-    if (request.status === 'uncertain') return notification;
-    if (request.status !== 'queued') return { ...notification, claimStatus: request.status === 'claimed' ? 'already-claimed' : 'completed' };
-    const thread = get(state.threads, request.threadId);
-    const questions = thread.messages.filter(message => message.role === 'user');
-    const previous = questions[questions.findIndex(message => message.requestId === id) - 1];
-    const quote = request.quote && { exact: request.quote.exact, ...(request.quote.sentence ? { sentence: request.quote.sentence } : {}) };
-    const context = { documentId: request.documentId, thread: { id: thread.id, lastRequestId: previous?.requestId ?? null, ...(thread.title ? { title: thread.title } : {}) }, text: request.text, ...(quote ? { quote } : {}), ...(request.messageQuote ? { messageQuote: request.messageQuote } : {}) };
-    // ponytail: large contexts retain the fetch path; avoid OS argument and native watcher output limits.
-    if (Buffer.byteLength(JSON.stringify(context)) > 48 * 1024) return notification;
-    const result = await store.update(state => claim(state, id, {}));
-    if (result.claimStatus !== 'claimed') return { ...notification, claimStatus: result.claimStatus };
+    const prepared = await store.update(state => {
+      const request = get(state.requests, id);
+      if (request.status === 'uncertain') return {};
+      if (request.status !== 'queued') return { claimStatus: request.status === 'claimed' ? 'already-claimed' : 'completed' };
+      prepareBatch(state, id);
+      const context = requestContext(state, id);
+      // ponytail: large contexts retain the fetch path; avoid OS argument and native watcher output limits.
+      if (Buffer.byteLength(JSON.stringify(context)) > 48 * 1024) return {};
+      const result = claim(state, id, {});
+      return { claimStatus: result.claimStatus, context };
+    });
+    if (!prepared.context) return { ...notification, ...(prepared.claimStatus ? { claimStatus: prepared.claimStatus } : {}) };
+    const request = get(store.read().requests, id);
     directRequestId = id;
     const route = { requestId: id, documentId: request.documentId, threadId: request.threadId };
     let markers: { prefix: string; suffix: string } | { error: string };
@@ -301,7 +316,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     catch { markers = { error: 'Streaming unavailable. Use the complete-reply command.' }; }
     if (get(store.read().requests, id).status !== 'claimed') return { ...notification, claimStatus: 'completed' };
     changed();
-    return { ...notification, stream: markers, ...context,
+    return { ...notification, stream: markers, ...prepared.context,
       instruction: 'Follow the Sidecar skill.' };
   }
   const server = createServer((request, response) => { void handle(request, response); });
@@ -587,7 +602,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       const acceptedPath = path.match(/^\/agent\/requests\/([^/]+)\/accepted$/);
       if (method === 'POST' && acceptedPath?.[1]) {
         const id = acceptedPath[1];
-        await store.update(state => { const request = get(state.requests, id); request.acceptedAt ??= Date.now(); });
+        await store.update(state => { for (const request of requestBatch(state, id)) request.acceptedAt ??= Date.now(); });
         changed(); json(response, { ok: true }); return;
       }
       const preparePath = path.match(/^\/agent\/requests\/([^/]+)\/prepare$/);
@@ -602,7 +617,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         const markers = result.claimStatus === 'already-claimed' && stream?.route.requestId === id
           ? stream.error ? { error: stream.error } : { prefix: stream.prefix, suffix: stream.suffix, progress: stream.progress }
           : undefined;
-        changed(); json(response, { ...result, ...(markers ? { stream: markers } : {}), document, thread: get(state.threads, result.request.threadId) }); return;
+        changed(); json(response, { ...result, ...requestContext(state, id), ...(markers ? { stream: markers } : {}), document, thread: get(state.threads, result.request.threadId) }); return;
       }
       if (method === 'POST' && path === '/agent/streams') {
         const route = { requestId: text(body, 'requestId'), documentId: text(body, 'documentId'), threadId: text(body, 'threadId') };
