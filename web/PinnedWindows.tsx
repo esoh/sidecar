@@ -18,7 +18,7 @@ export function PinnedWindows({ workspace, threads, documentId, openRequests, on
   workspace: RefObject<HTMLDivElement | null>; threads: Thread[]; documentId: string;
   openRequests: string[]; onOpened: (ids: string[]) => void;
   onGoToMessage: (id: string) => void;
-} & Pick<MessageContentProps, 'activeSelectionId' | 'passageChanged' | 'showPassage' | 'showOriginal'>) {
+} & Pick<MessageContentProps, 'activeSelectionId' | 'passageChanged' | 'showPassage' | 'showOriginal' | 'onQuoteMessage'>) {
   // Array order records when a window was opened; docking, focus and tab order are independent.
   const [windows, setWindows] = useState<WindowPosition[]>([]);
   const [docked, setDocked] = useState<string[]>([]), [activeDock, setActiveDock] = useState<string | null>(null);
@@ -160,7 +160,7 @@ export function PinnedWindows({ workspace, threads, documentId, openRequests, on
   const displayTabs = preview ? visibleDock.filter(id => id !== preview.id) : visibleDock;
   const renderMessage = (id: string, prefix: string) => {
     const entry = find(id);
-    return entry && <div className={`message ${entry.message.role}`}><MessageContent {...contentProps} {...entry} documentId={documentId} prefix={prefix} /></div>;
+    return entry && <div className={`message ${entry.message.role}`}><MessageContent {...contentProps} {...entry} documentId={documentId} prefix={prefix} onGoToMessage={onGoToMessage} /></div>;
   };
 
   return <>

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { isQuote, type Quote } from '../src/quote.ts';
+import { isQuote, isMessageQuote, type MessageQuote, type Quote } from '../src/quote.ts';
 
-export type QuestionDraft = { text: string; retry: { signature: string; id: string } | null; quote?: Quote };
+export type QuestionDraft = { text: string; retry: { signature: string; id: string } | null; quote?: Quote; messageQuote?: MessageQuote };
 export type QuestionDrafts = {
   get(id: string): QuestionDraft | undefined;
   set(id: string, draft: QuestionDraft): void;
@@ -24,11 +24,13 @@ function readDraft(key: string): QuestionDraft | undefined {
   try {
     const saved: unknown = JSON.parse(localStorage.getItem(key) ?? 'null');
     if (!saved || typeof saved !== 'object' || !('text' in saved) || typeof saved.text !== 'string' || !('retry' in saved)) return;
-    const quote = 'quote' in saved && isQuote(saved.quote) ? saved.quote : undefined;
-    if (saved.retry === null) return { text: saved.text, retry: null, ...(quote ? { quote } : {}) };
+    const messageQuote = 'messageQuote' in saved && isMessageQuote(saved.messageQuote) ? saved.messageQuote : undefined;
+    const quote = !messageQuote && 'quote' in saved && isQuote(saved.quote) ? saved.quote : undefined;
+    const attachment = messageQuote ? { messageQuote } : quote ? { quote } : {};
+    if (saved.retry === null) return { text: saved.text, retry: null, ...attachment };
     const retry = saved.retry;
     if (retry && typeof retry === 'object' && 'signature' in retry && typeof retry.signature === 'string' && 'id' in retry && typeof retry.id === 'string')
-      return { text: saved.text, retry: { signature: retry.signature, id: retry.id }, ...(quote ? { quote } : {}) };
+      return { text: saved.text, retry: { signature: retry.signature, id: retry.id }, ...attachment };
   } catch { /* Keep in-memory drafts usable without browser storage. */ }
 }
 export function useQuestionDrafts(documentId: string): QuestionDrafts {
@@ -44,7 +46,7 @@ export function useQuestionDrafts(documentId: string): QuestionDrafts {
         if (closedDocuments.has(documentId) || localStorage.getItem(`sidecar-closed-document:${documentId}`)) { dirty.clear(); return; }
         for (const id of dirty) {
           const draft = values.get(id);
-          if (draft?.text || draft?.quote) localStorage.setItem(key(id), JSON.stringify(draft));
+          if (draft?.text || draft?.quote || draft?.messageQuote) localStorage.setItem(key(id), JSON.stringify(draft));
           else localStorage.removeItem(key(id));
         }
         dirty.clear(); setError('');

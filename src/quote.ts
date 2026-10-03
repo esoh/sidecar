@@ -1,4 +1,8 @@
 export type Quote = { exact: string; prefix: string; suffix: string; start: number; end: number; version: string; sentence?: string };
+export type MessageQuote = { threadId: string; messageId: string; exact: string };
+export function isMessageQuote(value: unknown): value is MessageQuote {
+  return isObject(value) && string(value.threadId) && value.threadId.length > 0 && value.threadId.length <= 256 && string(value.messageId) && value.messageId.length > 0 && value.messageId.length <= 256 && string(value.exact) && !!value.exact.trim() && value.exact.length <= 128 * 1024;
+}
 
 function isObject(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 const string = (v: unknown): v is string => typeof v === 'string';

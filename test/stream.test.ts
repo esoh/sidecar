@@ -17,6 +17,90 @@ async function setup(t: Parameters<typeof fixture>[0]) {
   return { f, request, route, markers, emit, snapshot };
 }
 
+test('Stop targets a live marked turn, preserves partial output, and rejects stale or late work', async t => {
+  const { f, request, route, markers, emit, snapshot } = await setup(t);
+  const control = (event: string, turnId = 'turn-a') => f.agent('/agent/control', { ownerKey: `claude-${f.owner.sessionId}`, event, turnId });
+  const stop = (turnId = 'turn-a') => f.view(`/api/requests/${request.id}/stop`, { turnId });
+  await control('poll');
+  assert.equal((await stop()).status, 409, 'delivered is not evidence of this request running');
+  await emit(0, 'Unrelated terminal answer.', true, 'unrelated');
+  assert.equal((await snapshot()).stream.canStop, false);
+  await emit(0, markers.progress.prefix + 'Checking.' + markers.progress.suffix, true, 'progress');
+  assert.equal((await snapshot()).stream.canStop, false, 'display hook IDs cannot identify a native Claude turn');
+  assert.equal((await f.agent('/agent/control', { ownerKey: `claude-${f.owner.sessionId}`, event: 'started', turnId: 'turn-a', marker: markers.prefix })).status, 200);
+  assert.equal((await snapshot()).stream.canStop, true);
+  assert.equal((await stop('another-turn')).status, 409);
+  await emit(0, markers.prefix + 'Partial answer');
+  assert.equal((await stop()).status, 202);
+  assert.equal((await snapshot()).stream.stopping, true);
+  assert.equal((await (await control('poll', 'other-turn')).json()).stop, undefined);
+  assert.deepEqual((await (await control('poll')).json()).stop, { requestId: request.id, turnId: 'turn-a' });
+  await control('interrupted');
+  const saved = await snapshot();
+  assert.equal(saved.stream, null);
+  assert.equal(saved.requests[request.id].status, 'stopped');
+  assert.deepEqual(saved.threads[request.threadId].messages.map((m: any) => m.text), ['Explain', 'Checking.', 'Partial answer']);
+  await control('interrupted');
+  await emit(1, ' late text' + markers.suffix, true);
+  assert.equal((await stop()).status, 409);
+  assert.equal((await f.agent('/agent/replies', { ...route, text: 'Late replacement' })).status, 409);
+  await f.reopen();
+  assert.deepEqual((await snapshot()).threads[request.threadId], saved.threads[request.threadId]);
+});
+
+test('a completed reply wins a Stop race; a failed interrupt leaves the request recoverable', async t => {
+  const { f, request, markers, emit, snapshot } = await setup(t);
+  const control = (event: string) => f.agent('/agent/control', { ownerKey: `claude-${f.owner.sessionId}`, event, turnId: 'turn-a' });
+  await control('poll');
+  await emit(0, markers.prefix + 'Answer');
+  await f.agent('/agent/control', { ownerKey: `claude-${f.owner.sessionId}`, event: 'started', turnId: 'turn-a', marker: markers.prefix });
+  await f.view(`/api/requests/${request.id}/stop`, { turnId: 'turn-a' });
+  await control('stop-failed');
+  assert.equal((await snapshot()).requests[request.id].status, 'claimed');
+  assert.equal((await snapshot()).stream.stopping, false);
+  assert.match((await snapshot()).stream.stopError, /not confirmed/);
+  await f.view(`/api/requests/${request.id}/stop`, { turnId: 'turn-a' });
+  await emit(1, markers.suffix, true);
+  await control('interrupted');
+  assert.equal((await snapshot()).requests[request.id].status, 'completed');
+  assert.equal((await snapshot()).requests[request.id].answer.text, 'Answer');
+});
+
+test('Claude binds its native control turn by markers even when display hooks use a different turn ID', async t => {
+  const { f, request, markers, emit, snapshot } = await setup(t);
+  const control = (event: string, fields = {}) => f.agent('/agent/control', { ownerKey: `claude-${f.owner.sessionId}`, event, turnId: 'native-turn', ...fields });
+  await control('poll');
+  await emit(0, markers.prefix + 'Partial');
+  assert.equal((await snapshot()).stream.canStop, false);
+  await control('started', { marker: '[[sidecar:wrong]]\n' });
+  assert.equal((await snapshot()).stream.canStop, false);
+  assert.equal((await control('started', { marker: markers.prefix })).status, 200);
+  assert.equal((await snapshot()).stream.turnId, 'native-turn');
+  assert.equal((await snapshot()).stream.canStop, true);
+  assert.equal((await f.view(`/api/requests/${request.id}/stop`, { turnId: 'turn-a' })).status, 409);
+  assert.equal((await f.view(`/api/requests/${request.id}/stop`, { turnId: 'native-turn' })).status, 202);
+  await control('interrupted', { answer: markers.prefix + 'Partial with the last native chunk' });
+  assert.equal((await snapshot()).requests[request.id].answer.text, 'Partial with the last native chunk');
+  assert.equal((await snapshot()).requests[request.id].status, 'stopped');
+});
+
+test('a complete native Claude answer wins Stop before its delayed display hook and saves metadata', async t => {
+  const { f, request, markers, emit, snapshot } = await setup(t);
+  const control = (event: string, fields = {}) => f.agent('/agent/control', { ownerKey: `claude-${f.owner.sessionId}`, event, turnId: 'native-turn', ...fields });
+  await control('started', { marker: markers.prefix });
+  await emit(0, markers.prefix + 'Partial');
+  await f.view(`/api/requests/${request.id}/stop`, { turnId: 'native-turn' });
+  const answer = markers.prefix + '[[sidecar-meta {"threadTitle":"Completed race","highlights":[{"exact":"First heading"}]}]]\nComplete answer' + markers.suffix;
+  await control('interrupted', { answer });
+  const saved = await snapshot();
+  assert.equal(saved.requests[request.id].status, 'completed');
+  assert.equal(saved.requests[request.id].answer.text, 'Complete answer');
+  assert.equal(saved.threads[request.threadId].title, 'Completed race');
+  assert.equal(saved.threads[request.threadId].messages.at(-1).selections[0].quote.exact, 'First heading');
+  await emit(0, answer, true, 'late-display');
+  assert.deepEqual((await snapshot()).threads[request.threadId].messages, saved.threads[request.threadId].messages);
+});
+
 test('reply metadata is hidden while streaming, then titles and multiple selections save with the answer', async t => {
   const { f, request, route, markers, emit, snapshot } = await setup(t);
   const metadata = JSON.stringify({ threadTitle: 'Find the greeting', highlights: [{ exact: 'First heading', label: 'Heading' }, { exact: 'Hello world.' }] });

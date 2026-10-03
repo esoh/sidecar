@@ -12,6 +12,8 @@ import { useMessageSettings } from './TextSettings.tsx';
 import { isPinIcon, pinColors, pinIcons, type PinStyle } from '../src/pin-style.ts';
 
 import type { QuestionDraft, QuestionDrafts } from './useQuestionDrafts.ts';
+import type { MessageQuote } from '../src/quote.ts';
+import { excludedSelection, selectionText } from './selection.ts';
 
 const paths = {
   minimize: 'M5 18h14',
@@ -32,6 +34,7 @@ const paths = {
   arrowUpRight: 'M7 17 17 7M7 7h10v10',
   back: 'M19 12H5m6-6-6 6 6 6',
   send: 'M12 19V5m-6 6 6-6 6 6',
+  stop: 'M6 6h12v12H6z',
   pencil: 'm16 3 5 5L8 21H3v-5L16 3ZM14 5l5 5',
   check: 'm5 12 4 4L19 6',
   clock: 'M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0ZM12 6v6l4 2',
@@ -55,6 +58,7 @@ export function QuestionForm({
   documentId,
   threadId,
   quote,
+  messageQuote,
   quoteChanged = false,
   onSent,
   floating = false,
@@ -64,10 +68,12 @@ export function QuestionForm({
   draftKey,
   onSendingChange,
   onRemoveSelection,
+  stream,
 }: {
   documentId: string;
   threadId?: string;
   quote?: Quote;
+  messageQuote?: MessageQuote;
   quoteChanged?: boolean;
   onSent: (request: RequestRecord) => void;
   floating?: boolean;
@@ -77,6 +83,7 @@ export function QuestionForm({
   draftKey: string;
   onSendingChange?: (sending: boolean) => void;
   onRemoveSelection?: () => void;
+  stream?: ViewerState['stream'];
 }) {
   const [initialDraft] = useState(() => drafts.get(draftKey));
   const [text, setText] = useState(initialDraft?.text ?? ''),
@@ -84,6 +91,10 @@ export function QuestionForm({
     [busy, setBusy] = useState(false);
   const input = useRef<HTMLTextAreaElement>(null), sending = useRef(false);
   const retry = useRef(initialDraft?.retry ?? null);
+  const [isStopping, setStopping] = useState(false);
+  const hasStop = !floating && !text.length && stream && stream.threadId === threadId && (stream.canStop || stream.stopping);
+  const attachment = messageQuote ? { messageQuote } : quote ? { quote } : {};
+  const attachedText = messageQuote?.exact ?? quote?.exact;
   const updateDraft = (draft: QuestionDraft, immediately = false) => {
     drafts.set(draftKey, draft);
     if (immediately) drafts.flush();
@@ -107,10 +118,10 @@ export function QuestionForm({
       onSubmit={async (event) => {
         event.preventDefault();
         if (disabled || sending.current || !text.trim() || !documentId) return;
-        const body = { documentId, text, ...(threadId ? { threadId } : {}), ...(quote ? { quote } : {}) };
+        const body = { documentId, text, ...(threadId ? { threadId } : {}), ...attachment };
         const signature = JSON.stringify(body);
         if (retry.current?.signature !== signature) retry.current = { signature, id: crypto.randomUUID() };
-        const submittedDraft = { text, retry: retry.current, ...(quote ? { quote } : {}) };
+        const submittedDraft = { text, retry: retry.current, ...attachment };
         updateDraft(submittedDraft, true);
         sending.current = true;
         setBusy(true);
@@ -168,10 +179,10 @@ export function QuestionForm({
           </button>
         </div>
       )}
-      {!floating && quote && (
+      {!floating && attachedText && (
         <div className="draft-selection">
-          <span className="selection-badge text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary">selection</span>
-          <span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={quote.exact}>{quote.exact}</span>
+          <span className="selection-badge text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary">{messageQuote ? 'quote' : 'selection'}</span>
+          <span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={attachedText}>{attachedText}</span>
           <button type="button" className="cancel-button" aria-label="Remove selection" onClick={onRemoveSelection}><Icon name="close" /></button>
         </div>
       )}
@@ -186,20 +197,28 @@ export function QuestionForm({
           onBlur={drafts.flush}
           onChange={(event) => {
             setText(event.target.value);
-            updateDraft({ text: event.target.value, retry: retry.current, ...(quote ? { quote } : {}) });
+            updateDraft({ text: event.target.value, retry: retry.current, ...attachment });
           }}
         />
-        <div className="composer-actions">
-          <button
+      <div className="composer-actions">
+          {hasStop ? <button type="button" className="send-button" aria-label="Stop response" title={stream?.stopping || isStopping ? 'Stopping…' : 'Stop response'} disabled={isStopping || stream?.stopping} onClick={async () => {
+            if (!stream?.turnId || isStopping) return;
+            setStopping(true); setError('');
+            try { await api(`/api/requests/${stream.requestId}/stop`, { turnId: stream.turnId }); }
+            catch (reason) { setError(errorText(reason)); }
+            finally { setStopping(false); }
+          }}><Icon name="stop" /></button> : <button
             className="send-button"
             aria-label={floating ? 'Send comment' : 'Send message'}
             disabled={disabled || busy || !text.trim()}
           >
             {floating ? 'Send' : <Icon name="send" />}
-          </button>
+          </button>}
         </div>
       </div>
       {(error || drafts.error) && <p role="alert">{error || drafts.error}</p>}
+      {stream && stream.threadId === threadId && stream.stopping && <span role="status">Stopping…</span>}
+      {stream && stream.threadId === threadId && stream.stopError && <p role="alert">{stream.stopError}</p>}
     </form>
   );
 }
@@ -376,6 +395,7 @@ export function ConversationSidebar({
   onOpenPin,
   onGoToMessage,
   messageJump,
+  onQuoteMessage,
 }: {
   documentId: string;
   threads: Thread[];
@@ -397,6 +417,7 @@ export function ConversationSidebar({
   onOpenPin: (messageId: string) => void;
   onGoToMessage: (messageId: string) => void;
   messageJump: { id: string; sequence: number } | null;
+  onQuoteMessage: (quote: MessageQuote) => void;
 }) {
   const [filter, setFilter] = useState('unresolved'),
     [search, setSearch] = useState(''),
@@ -521,7 +542,7 @@ export function ConversationSidebar({
   async function leaveConversation() {
     if (!active || isLeaving) return;
     // Pending submissions retain their draft until accepted; don't discard them.
-    if (active.messages.length || (drafts.get(active.id)?.text.trim() || drafts.get(active.id)?.quote)) {
+    if (active.messages.length || (drafts.get(active.id)?.text.trim() || drafts.get(active.id)?.quote || drafts.get(active.id)?.messageQuote)) {
       onOpen(null);
       return;
     }
@@ -665,12 +686,12 @@ export function ConversationSidebar({
               return (
                 <div className={`message ${message.role}`} key={message.id} tabIndex={-1} data-message-id={message.id} data-active={message.id === activeMessageId || undefined}>
                   <div className="message-content">
-                    <MessageContent message={message} documentId={documentId} threadId={active.id} activeSelectionId={activeSelectionId} passageChanged={passageChanged} showPassage={showPassage} showOriginal={showOriginal} />
+                    <MessageContent message={message} documentId={documentId} threadId={active.id} activeSelectionId={activeSelectionId} passageChanged={passageChanged} showPassage={showPassage} showOriginal={showOriginal} onQuoteMessage={onQuoteMessage} onGoToMessage={onGoToMessage} />
                     <MessageActions message={message} threadId={active.id} onPinned={() => onOpenPin(message.id)} />
                   </div>
-                  {isLatest && !hasStreamedReply && (status === 'queued' || status === 'claimed') && (
+                  {isLatest && !hasStreamedReply && (status === 'queued' || status === 'claimed' || status === 'stopped') && (
                     <div className="message-status" role="status">
-                      {status === 'queued' ? 'Queued' : 'Working…'}
+                      {status === 'stopped' ? 'Stopped' : status === 'queued' ? 'Queued' : 'Working…'}
                     </div>
                   )}
                 </div>
@@ -704,7 +725,9 @@ export function ConversationSidebar({
             threadId={active.id}
             drafts={drafts}
             draftKey={active.id}
+            stream={stream}
             quote={drafts.get(active.id)?.quote}
+            messageQuote={drafts.get(active.id)?.messageQuote}
             onRemoveSelection={onRemoveSelection}
             disabled={isLeaving}
             onSent={(request) => {
@@ -747,7 +770,7 @@ export function ConversationSidebar({
                     {match ? <>{match.before}<mark>{match.match}</mark>{match.after}</> : thread.messages.at(-1)?.text ?? 'Start a conversation about this document.'}
                   </span>
                 </span>
-                {(drafts.get(thread.id)?.text || drafts.get(thread.id)?.quote) && <span className="row-tag">Draft</span>}
+                {(drafts.get(thread.id)?.text || drafts.get(thread.id)?.quote || drafts.get(thread.id)?.messageQuote) && <span className="row-tag">Draft</span>}
               </span>
             </button>;
           })}
@@ -761,11 +784,24 @@ export function ConversationSidebar({
 export type MessageContentProps = {
   message: Message; documentId: string; threadId: string; activeSelectionId: string | null;
   passageChanged: (quote: Quote) => boolean; showPassage: (selection: SavedSelection) => void; showOriginal: (id: string) => void;
+  onQuoteMessage: (quote: MessageQuote) => void; onGoToMessage: (id: string) => void;
 };
-export function MessageContent({ message, documentId, threadId, activeSelectionId, passageChanged, showPassage, showOriginal, prefix = 'message' }: MessageContentProps & { prefix?: string }) {
+export function MessageContent({ message, documentId, threadId, activeSelectionId, passageChanged, showPassage, showOriginal, onQuoteMessage, onGoToMessage, prefix = 'message' }: MessageContentProps & { prefix?: string }) {
+  function capture(root: HTMLElement) {
+    const selected = window.getSelection();
+    if (!selected?.rangeCount || selected.isCollapsed) return;
+    const range = selected.getRangeAt(0);
+    if (!root.contains(range.startContainer) || !root.contains(range.endContainer) || [range.startContainer, range.endContainer].some(node => node.parentElement?.closest(excludedSelection))) return;
+    const exact = selectionText(range.cloneContents());
+    if (exact.trim()) onQuoteMessage({ threadId, messageId: message.id, exact });
+  }
   return <>
+    {message.messageQuote && <div className="message-selection message-quote quote">
+      <span className="selection-badge text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary">quote</span>
+      <button aria-label="Go to quoted message" onClick={() => onGoToMessage(message.messageQuote!.messageId)}><span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={message.messageQuote.exact}>{message.messageQuote.exact}</span><span className="passage-arrow"><Icon name="arrowUpRight" /></span></button>
+    </div>}
     {message.selections?.map(selection => <MessageSelection key={selection.id} documentId={documentId} messageId={message.id} threadId={threadId} selection={selection} isActive={selection.id === activeSelectionId} isChanged={passageChanged(selection.quote)} showPassage={() => showPassage(selection)} showOriginal={() => showOriginal(selection.id)} />)}
-    <div className="message-bubble"><MarkdownDocument markdown={message.text} documentId={documentId} anchorPrefix={`${prefix}-${message.id}-`} onSelectionLink={slug => {
+    <div className="message-bubble" onMouseUp={event => capture(event.currentTarget)} onTouchEnd={event => capture(event.currentTarget)} onKeyUp={event => { if (event.key === 'Shift' || event.key.startsWith('Arrow')) capture(event.currentTarget); }}><MarkdownDocument markdown={message.text} documentId={documentId} anchorPrefix={`${prefix}-${message.id}-`} onSelectionLink={slug => {
       const selection = message.selections?.find(selection => selection.slug === slug);
       if (!selection) return false;
       if (passageChanged(selection.quote)) showOriginal(selection.id); else showPassage(selection);

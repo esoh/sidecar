@@ -209,18 +209,21 @@ function App() {
   const removeAttachment = useCallback(() => {
     if (!activeThreadId) return;
     const draft = drafts.get(activeThreadId);
-    if (draft?.quote) { const { quote, ...rest } = draft; drafts.set(activeThreadId, rest); }
+    if (draft?.quote || draft?.messageQuote) { const { quote, messageQuote, ...rest } = draft; drafts.set(activeThreadId, rest); }
   }, [activeThreadId, drafts]);
-  const clearSelection = useCallback(() => {
+  const clearPendingSelection = useCallback(() => {
     // Plannotator's handleToolbarClose removes only the pending source, before
     // the browser starts its next gesture. Keep saved highlight nodes in place.
-    removeAttachment();
     highlighter.current?.remove('selection');
     painted.current.delete('selection');
     setSelection(undefined);
     setComposing(false);
     setChoices(null);
-  }, [removeAttachment]);
+  }, []);
+  const clearSelection = useCallback(() => {
+    removeAttachment();
+    clearPendingSelection();
+  }, [removeAttachment, clearPendingSelection]);
   const openComment = useCallback(() => {
     removeAttachment();
     setComposing(true);
@@ -530,7 +533,8 @@ function App() {
     setSelection(quote);
     if (activeThreadId && isSidebarShown) {
       const draft = drafts.get(activeThreadId) ?? { text: '', retry: null };
-      drafts.set(activeThreadId, { ...draft, quote });
+      const { messageQuote, ...rest } = draft;
+      drafts.set(activeThreadId, { ...rest, quote });
     }
     setComposing(false);
     setChoices(null);
@@ -563,6 +567,15 @@ function App() {
   }
   const passageChanged = (quote: Quote) => !!documentError || !locateQuote(documentText, quote);
   const selectionActions = {
+    onQuoteMessage: (messageQuote: import('../src/quote.ts').MessageQuote) => {
+      const target = activeThreadId && isSidebarShown ? activeThreadId : messageQuote.threadId;
+      clearPendingSelection();
+      const { quote, ...draft } = drafts.get(target) ?? { text: '', retry: null };
+      drafts.set(target, { ...draft, messageQuote });
+      if (activeThreadId !== target || !isSidebarShown) openThread(target);
+      ignoreClick.current = true;
+      requestAnimationFrame(() => { ignoreClick.current = false; });
+    },
     activeSelectionId: activeMessageId,
     passageChanged,
     showOriginal: (selectionId: string) => {
