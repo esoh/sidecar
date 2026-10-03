@@ -107,6 +107,10 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   assert.equal(second.requestId, next.id);
   assert.equal(second.documentId, doc.id);
   assert.deepEqual(second.thread, { id: req.threadId, lastRequestId: req.id, title: 'Widget retry behavior' });
+  assert.deepEqual(second.messages, [
+    { requestId: next.id, text: 'Why?' },
+    { requestId: later.id, text: 'And after that?' },
+  ]);
   assert.equal(second.history, undefined, 'history is available on demand, not repeated in every event');
   const saved = await state();
   assert.equal(saved.requests[req.id].status, 'completed');
@@ -116,15 +120,26 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   assert.equal(saved.threads[req.threadId].messages.at(-1).selections[0].quote.version, version);
   assert.notEqual(event.stream.prefix, second.stream.prefix);
 
-  await post('/agent/replies', { requestId: next.id, documentId: doc.id, threadId: req.threadId, text: 'Because the retry limit is three.' });
+  const afterDelivery = await (await post('/api/questions', { documentId: doc.id, threadId: req.threadId, text: 'Arrived after delivery', clientMessageId: 'after-delivery' })).json();
+  const combined = second.stream.prefix + 'Because the retry limit is three, then it stops.' + second.stream.suffix;
+  if (agent === 'codex') {
+    for (const socket of sockets) {
+      socket.send(JSON.stringify({ method: 'item/agentMessage/delta', params: { threadId: owner.sessionId, turnId: 'batch-reply', itemId: 'combined', delta: combined } }));
+      socket.send(JSON.stringify({ method: 'item/completed', params: { threadId: owner.sessionId, turnId: 'batch-reply', item: { id: 'combined', type: 'agentMessage', text: combined } } }));
+    }
+  } else await forwardHook('claude', { session_id: owner.sessionId, hook_event_name: 'MessageDisplay', message_id: 'combined', turn_id: 'batch-reply', index: 0, delta: combined, final: true });
   const third = await eventCount(3);
-  assert.equal(third.requestId, later.id);
-  assert.equal(third.thread.lastRequestId, next.id, 'use the preceding request, never a later queued request');
-  const history = await (await post(`/agent/requests/${later.id}/claim`, {})).json();
+  assert.equal(third.requestId, afterDelivery.id);
+  assert.equal(third.thread.lastRequestId, later.id, 'use the last batched input, never a later queued request');
+  const history = await (await post(`/agent/requests/${afterDelivery.id}/claim`, {})).json();
   assert.equal(history.claimStatus, 'already-claimed');
   assert.deepEqual(history.stream, third.stream, 'context recovery retains the same progress and final markers');
   assert.equal(history.thread.messages.filter((m: any) => m.role === 'agent').length, 3);
-  await post('/agent/replies', { requestId: later.id, documentId: doc.id, threadId: req.threadId, text: 'Then it stops retrying.' });
+  const afterBatch = await state();
+  assert.equal(afterBatch.requests[next.id].status, 'completed');
+  assert.equal(afterBatch.requests[later.id].status, 'completed');
+  assert.equal(afterBatch.threads[req.threadId].messages.at(-1).text, 'Because the retry limit is three, then it stops.');
+  await post('/agent/replies', { requestId: afterDelivery.id, documentId: doc.id, threadId: req.threadId, text: 'Then it stops retrying.' });
   const exact = 'The widget retries three times.';
   const quote = { exact, prefix: 'Context\n', suffix: '\n', start: 8, end: 8 + exact.length, version };
   const revised = markdown.replace('three times', 'four times');

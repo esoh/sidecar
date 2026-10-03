@@ -23,13 +23,20 @@ async function answer(text: string) {
   await f.agent('/agent/replies', { requestId: request.id, documentId: request.documentId, threadId: request.threadId, text });
 }
 
-test('Stop requires a matching active turn and preserves partial text without interrupting on Enter', async ({ page }) => {
+test('a batch shares one Working/Stopped indicator and preserves partial text without interrupting on Enter', async ({ page }) => {
   const doc = await f.register('stop.md');
   await page.goto(`${f.url}/?document=${doc.id}`);
   const input = page.getByLabel('Message', { exact: true });
   await input.fill('Explain'); await input.press('Enter');
   const request = await lastRequest();
+  await input.fill('Also explain the follow-up'); await input.press('Enter');
+  await expect(page.getByRole('log')).toContainText('Also explain the follow-up');
+  const second = await lastRequest();
   const prepared = await (await f.agent(`/agent/requests/${request.id}/prepare`, {})).json();
+  await f.agent(`/agent/requests/${request.id}/accepted`, {});
+  await expect(page.locator('.message-status')).toHaveCount(1);
+  await expect(page.locator('.message-status')).toHaveText('Working…');
+  await expect(page.locator('.messages .message.user')).toHaveCount(2);
   const stop = page.getByRole('button', { name: 'Stop response', exact: true });
   const control = (event: string) => f.agent('/agent/control', { ownerKey: ownerKey(f.owner), event, turnId: 'active-turn' });
   await control('poll');
@@ -37,6 +44,7 @@ test('Stop requires a matching active turn and preserves partial text without in
   await f.agent('/agent/stream-events', { ownerKey: ownerKey(f.owner), turnId: 'active-turn', messageId: 'reply', index: 0, delta: prepared.stream.prefix + 'Partial **answer**', final: false });
   await f.agent('/agent/control', { ownerKey: ownerKey(f.owner), event: 'started', turnId: 'active-turn', marker: prepared.stream.prefix });
   await expect(stop).toBeEnabled();
+  await expect(page.locator('.message-status')).toHaveCount(0);
   await input.press('Enter');
   expect((await state()).stream.stopping).toBe(false);
   await input.fill('Follow-up'); await expect(stop).toHaveCount(0);
@@ -46,6 +54,7 @@ test('Stop requires a matching active turn and preserves partial text without in
   expect((await (await control('poll')).json()).stop).toEqual({ requestId: request.id, turnId: 'active-turn' });
   await control('interrupted');
   await expect(page.getByText('Stopped', { exact: true })).toBeVisible();
+  expect((await state()).requests[second.id].status).toBe('stopped');
   await expect(page.locator('.messages .message.agent')).toContainText('Partial answer');
   await expect(stop).toHaveCount(0);
   await page.reload();
@@ -1152,6 +1161,8 @@ test('one header status follows native activity across documents without repeati
   const message = page.getByLabel('Message', { exact: true });
   await message.fill('First question'); await message.press('Enter'); await expect(message).toHaveValue('');
   const first = await lastRequest();
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click();
   await message.fill('Second question'); await message.press('Enter'); await expect(message).toHaveValue('');
   await expect(status).toHaveText('Claude · Busy · 2 queued');
   await expect(page.locator('#threads')).not.toContainText('Queued; waiting for agent.');
@@ -1179,13 +1190,12 @@ test('conversation messages show their own queued and working status until answe
   const message = page.getByLabel('Message', { exact: true });
   await message.fill('First question'); await message.press('Enter'); await expect(message).toHaveValue('');
   const first = await lastRequest();
+  const firstStatus = page.locator('.message.user').filter({ hasText: 'First question' }).getByRole('status');
+  await expect(firstStatus).toHaveText('Queued');
+  await f.agent(`/agent/requests/${first.id}/claim`, {});
   await message.fill('Follow-up question'); await message.press('Enter'); await expect(message).toHaveValue('');
   const second = await lastRequest();
-  const firstStatus = page.locator('.message.user').filter({ hasText: 'First question' }).getByRole('status');
   const secondStatus = page.locator('.message.user').filter({ hasText: 'Follow-up question' }).getByRole('status');
-  await expect(firstStatus).toHaveText('Queued');
-  await expect(secondStatus).toHaveText('Queued');
-  await f.agent(`/agent/requests/${first.id}/claim`, {});
   await expect(firstStatus).toHaveText('Working…');
   await expect(secondStatus).toHaveText('Queued');
   await page.reload();
@@ -1215,8 +1225,6 @@ test('thread previews show unread dots and active-request spinners independently
   const message = page.getByLabel('Message', { exact: true });
   await message.fill('First question'); await message.press('Enter'); await expect(message).toHaveValue('');
   const first = await lastRequest();
-  await message.fill('Follow-up question'); await message.press('Enter'); await expect(message).toHaveValue('');
-  const second = await lastRequest();
   await page.getByRole('button', { name: 'Threads', exact: true }).click();
   const row = page.locator(`[data-thread-id="${first.threadId}"]`);
   const unread = row.getByLabel('Unread reply', { exact: true });
@@ -1224,6 +1232,7 @@ test('thread previews show unread dots and active-request spinners independently
   const queued = row.getByLabel('Queued', { exact: true });
   await expect(progress).toHaveCount(0); await expect(unread).toHaveCount(0); await expect(queued).toBeVisible();
   await f.agent(`/agent/requests/${first.id}/claim`, {});
+  const second = await (await f.view('/api/questions', { documentId: doc.id, threadId: first.threadId, text: 'Follow-up question', clientMessageId: 'after-delivery' })).json();
   await expect(progress).toBeVisible(); await expect(unread).toHaveCount(0); await expect(queued).toHaveCount(0);
   await f.agent('/agent/replies', { requestId: first.id, documentId: doc.id, threadId: first.threadId, text: 'First answer' });
   await expect(unread).toBeVisible(); await expect(progress).toHaveCount(0); await expect(queued).toBeVisible();
