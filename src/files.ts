@@ -1,8 +1,17 @@
 import { readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { ANNOTATABLE_DOC_REGEX, MAX_ANNOTATABLE_FILE_BYTES, diagramRenderKindForPath } from '@plannotator/core/annotatable';
 import { filterWorkspaceStatusForDirectory, getWorkspaceStatusForDirectory, getWorkspaceStatusRelativePaths, type WorkspaceFileChange, type WorkspaceStatusPayload } from './workspace-status.ts';
 import { DomainError } from './store.ts';
+
+// File-type predicates copied from @plannotator/core 0.25.7 annotatable.ts (MIT): the package
+// ships TypeScript source, which Playwright's loader will not compile from node_modules.
+const ANNOTATABLE_DOC_REGEX = /(?:\.(?:mdx?|txt|mmd|mermaid|dot|gv|html?|ya?ml|jsonc?|json5|toml|ini|cfg|conf|properties|csv|tsv|log|xml)|\.env\.example)$/i;
+const MAX_ANNOTATABLE_FILE_BYTES = 2 * 1024 * 1024;
+function diagramRenderKindForPath(input: string): 'mermaid' | 'graphviz' | null {
+  if (/\.(?:mmd|mermaid)$/i.test(input.trim())) return 'mermaid';
+  if (/\.(?:dot|gv)$/i.test(input.trim())) return 'graphviz';
+  return null;
+}
 
 // Exclusions and tree building copied from Plannotator packages/shared/reference-common.ts
 // at 772c620 (MIT); see THIRD_PARTY_NOTICES.md.

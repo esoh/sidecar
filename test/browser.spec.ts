@@ -2388,3 +2388,103 @@ test('message history navigates identical selections within one thread and prese
   await page.getByLabel('Search threads').fill('Alpha bravo');
   await expect(page.locator('.thread-preview mark')).toHaveText('Alpha bravo');
 });
+
+async function filesWorkspace(files: Record<string, string>) {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'sidecar-files-ui-')));
+  cleanup.push(() => rm(root, { recursive: true, force: true }));
+  for (const [path, text] of Object.entries(files)) {
+    await mkdir(join(root, path, '..'), { recursive: true });
+    await writeFile(join(root, path), text);
+  }
+  return root;
+}
+
+test('files panel previews workspace files read-only and keeps drafts', async ({ page }) => {
+  const root = await filesWorkspace({
+    'docs/plan.md': '# Plan heading\n\nPlan body text.\n\n![chart](a.png)\n',
+    'page.html': '<p id="static">Static HTML</p><script>document.getElementById("static").textContent = "ran"</script>',
+    'flow.mmd': 'graph TD\n  Start --> Finish\n',
+    'src.ts': 'export {};\n',
+  });
+  const doc = await f.register('main.md', '# Main document\n\nMain body passage for comments.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document')).toContainText('Main body passage');
+  await expect(page.getByRole('button', { name: 'Show files' })).toHaveCount(0);
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  await page.getByRole('button', { name: 'Show files' }).click();
+  const panel = page.getByRole('complementary', { name: 'Files' });
+  await expect(panel.getByTitle('docs/plan.md', { exact: true })).toBeVisible();
+  await expect(panel.getByTitle('page.html', { exact: true })).toBeVisible();
+  await expect(panel.getByTitle('src.ts', { exact: true })).toHaveCount(0);
+
+  await select(page, 'Main body passage');
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('Draft survives preview');
+  await panel.getByTitle('docs/plan.md', { exact: true }).click();
+  const preview = page.getByRole('region', { name: 'File preview' });
+  await expect(preview.getByRole('heading', { name: 'Plan heading' })).toBeVisible();
+  await expect(preview).toContainText('docs/plan.md');
+  await expect(page.locator('#document')).toBeHidden();
+  await expect(page.getByLabel('Comment', { exact: true })).toHaveCount(0);
+  await expect(preview.locator('img').first()).toHaveAttribute('src', /[?&]document=&/);
+  await page.evaluate(() => {
+    const text = [...document.querySelectorAll('.file-preview p')].find(p => p.textContent === 'Plan body text.')!.firstChild!;
+    const range = document.createRange(); range.setStart(text, 0); range.setEnd(text, 4);
+    getSelection()!.removeAllRanges(); getSelection()!.addRange(range);
+  });
+  await page.keyboard.press('c');
+  await expect(page.getByLabel('Comment', { exact: true })).toHaveCount(0);
+
+  await panel.getByTitle('page.html', { exact: true }).click();
+  const frame = page.frameLocator('iframe[title="Preview of page.html"]');
+  await expect(frame.locator('#static')).toHaveText('Static HTML');
+  await expect(page.locator('iframe[title="Preview of page.html"]')).toHaveAttribute('sandbox', '');
+  await panel.getByTitle('flow.mmd', { exact: true }).click();
+  await expect(preview.locator('svg').first()).toBeVisible();
+
+  await preview.getByRole('button', { name: 'Back to document' }).click();
+  await expect(page.locator('#document')).toBeVisible();
+  await select(page, 'Main body passage');
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await expect(page.getByLabel('Comment', { exact: true })).toHaveValue('Draft survives preview');
+  expect(Object.keys((await state()).documents)).toEqual([doc.id]);
+  await page.reload();
+  await expect(page.getByRole('complementary', { name: 'Files' })).toBeVisible();
+});
+
+test('files panel handles empty workspaces, its own document and conversation navigation', async ({ page }) => {
+  const empty = await filesWorkspace({ 'src.ts': 'export {};\n' });
+  const root = await filesWorkspace({ 'nav.md': '# Navigation\n\nQuoted passage text.\n', 'a.md': '# A file\n' });
+  const doc = await (await f.agent('/agent/documents', { path: join(root, 'nav.md'), workspace: empty })).json();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Show files' }).click();
+  const panel = page.getByRole('complementary', { name: 'Files' });
+  await expect(panel).toContainText('No previewable files in this workspace.');
+  await expect(panel).not.toContainText('Settings');
+
+  // A new declaration re-roots the open panel through the live state update.
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  await expect(panel.getByTitle('nav.md', { exact: true })).toBeVisible();
+  await writeFile(join(root, 'b.md'), '# B file\n');
+  await panel.getByRole('button', { name: 'Refresh files' }).click();
+  await expect(panel.getByTitle('b.md', { exact: true })).toBeVisible();
+
+  await select(page, 'Quoted passage text');
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('About this passage');
+  await page.getByRole('button', { name: 'Send comment', exact: true }).click();
+  await expect(page.getByRole('log').getByText('About this passage', { exact: true })).toBeVisible();
+  await answer('Noted.');
+  await panel.getByTitle('a.md', { exact: true }).click();
+  const preview = page.getByRole('region', { name: 'File preview' });
+  await expect(preview.getByRole('heading', { name: 'A file' })).toBeVisible();
+  await page.getByRole('log').getByText('Quoted passage text').first().click();
+  await expect(preview).toHaveCount(0);
+  await expect(page.locator('#document')).toBeVisible();
+  await panel.getByTitle('a.md', { exact: true }).click();
+  await expect(preview).toBeVisible();
+  // Selecting the open document's own file returns to it.
+  await panel.getByTitle('nav.md', { exact: true }).click();
+  await expect(preview).toHaveCount(0);
+  await expect(page.locator('#document')).toBeVisible();
+});

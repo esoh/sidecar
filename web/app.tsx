@@ -19,6 +19,8 @@ import { SettingsProvider, TextSettings } from './TextSettings.tsx';
 import { PinnedWindows } from './PinnedWindows.tsx';
 import { DocumentHeader } from './DocumentHeader.tsx';
 import { OriginalDocument } from './OriginalDocument.tsx';
+import { FilesPanel } from './FilesPanel.tsx';
+import { FilePreview } from './FilePreview.tsx';
 import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
 import { ResizeHandle } from '@plannotator/ui/components/ResizeHandle';
 import { onCodeHighlightSwap } from '@plannotator/ui/utils/codeHighlight';
@@ -137,6 +139,24 @@ function App() {
   useLayoutEffect(() => {
     document.documentElement.style.setProperty('--sidecar-panel-width', `${panelResize.width}px`);
   }, [panelResize.width]);
+  const [isFilesShown, setFilesShown] = useState(() => {
+    try { return localStorage.getItem('sidecar-files-open') === 'true'; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('sidecar-files-open', String(isFilesShown)); } catch { /* per-browser convenience only */ }
+  }, [isFilesShown]);
+  const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const filesResize = useResizablePanel({
+    storageKey: 'sidecar-files-width',
+    defaultWidth: 280,
+    side: 'left',
+    onSnapClose: () => setFilesShown(false),
+    onClick: () => setFilesShown(false),
+    apply: (width) => document.documentElement.style.setProperty('--sidecar-files-width', `${width}px`),
+  });
+  useLayoutEffect(() => {
+    document.documentElement.style.setProperty('--sidecar-files-width', `${filesResize.width}px`);
+  }, [filesResize.width]);
   const openThread = useCallback(
     (id: string | null) => {
       const focusBeforeOpen = document.activeElement;
@@ -220,6 +240,15 @@ function App() {
     setComposing(false);
     setChoices(null);
   }, []);
+  const openPreview = (path: string) => {
+    if (current?.workspace && `${current.workspace}/${path}` === current.path) { setPreviewPath(null); return; }
+    // Keep passage drafts in passageDrafts; only drop the live selection on the hidden document.
+    clearPendingSelection();
+    window.getSelection()?.removeAllRanges();
+    setOriginalMessageId(null);
+    setPreviewPath(path);
+    if (innerWidth <= 850) setFilesShown(false);
+  };
   const clearSelection = useCallback(() => {
     removeAttachment();
     clearPendingSelection();
@@ -584,6 +613,7 @@ function App() {
       clearSelection();
       window.getSelection()?.removeAllRanges();
       setOriginalMessageId(selectionId);
+      setPreviewPath(null);
       setActiveMessageId(selectionId);
       if (innerWidth <= 850) setSidebarShown(false);
     },
@@ -592,6 +622,7 @@ function App() {
       if (entry) setActiveThreadId(entry.thread.id);
       setActiveMessageId(selection.id);
       setOriginalMessageId(null);
+      setPreviewPath(null);
       requestAnimationFrame(() => {
         const root = article.current, range = root && quoteRange(root, selection.quote);
         if (!range) return;
@@ -670,6 +701,18 @@ function App() {
         )}
         <AgentStatus state={state} connected={connected} />
         <TextSettings version={state?.appVersion} />
+        {current?.workspace && (
+          <button
+            className="sidebar-toggle"
+            aria-label={isFilesShown ? 'Hide files' : 'Show files'}
+            title={isFilesShown ? 'Hide files' : 'Show files'}
+            aria-expanded={isFilesShown}
+            aria-controls="files-panel"
+            onClick={() => setFilesShown((shown) => !shown)}
+          >
+            <Icon name="folder" />
+          </button>
+        )}
         <button
           className="sidebar-toggle"
           aria-label={isSidebarShown ? 'Hide conversations' : 'Show conversations'}
@@ -691,11 +734,27 @@ function App() {
           {error}
         </p>
       )}
-      <div className={`layout${isSidebarShown ? '' : ' sidebar-collapsed'}`}>
+      <div className={`layout${isSidebarShown ? '' : ' sidebar-collapsed'}${isFilesShown && current?.workspace ? ' files-open' : ''}`}>
+        {isFilesShown && current?.workspace && (
+          <>
+            <FilesPanel documentId={documentId} root={current.workspace} activePath={previewPath} onSelect={openPreview} />
+            <ResizeHandle
+              {...filesResize.handleProps}
+              className="files-resize"
+              side="left"
+              hideHoverTrack
+              tooltip="Drag to resize · Click to collapse"
+              onCollapse={() => setFilesShown(false)}
+            />
+          </>
+        )}
         <div className="document-workspace" ref={workspace}>
         <main className="canvas">
           <div className="reading-width">
-            {originalMessage?.quote && (
+            {previewPath && (
+              <FilePreview key={previewPath} documentId={documentId} path={previewPath} onReturn={() => setPreviewPath(null)} />
+            )}
+            {!previewPath && originalMessage?.quote && (
               <OriginalDocument
                 key={originalMessage.id}
                 documentId={documentId}
@@ -704,7 +763,7 @@ function App() {
                 onReturn={() => setOriginalMessageId(null)}
               />
             )}
-            {!originalMessage && (documentError || !current) && (
+            {!previewPath && !originalMessage && (documentError || !current) && (
               <p data-testid="document-error" role="alert">
                 {documentError || 'Open a document from your agent.'}
               </p>
@@ -712,7 +771,7 @@ function App() {
             <article
               className="document-card w-full bg-card rounded-xl p-5 md:p-8 lg:p-10 xl:p-12 shadow-xl border border-border/50"
               id="document"
-              hidden={!!originalMessage}
+              hidden={!!originalMessage || !!previewPath}
               ref={article}
               tabIndex={-1}
               aria-label="Document"

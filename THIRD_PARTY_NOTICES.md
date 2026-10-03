@@ -48,9 +48,13 @@ and requested rounded attachment background.
 `packages/shared/workspace-status.ts`. The file-browser exclusions and tree
 builder in `src/files.ts` are copied from `packages/shared/reference-common.ts`,
 and its walk, file cap and changed-file seeding follow `handleFileBrowserFiles`
-in `packages/server/reference-handlers.ts`. File-type predicates are imported
-from the published `@plannotator/core` 0.25.7 `annotatable` module.
+in `packages/server/reference-handlers.ts`. Its file-type predicates are copied
+from the published `@plannotator/core` 0.25.7 `annotatable.ts`.
 Source: https://github.com/backnotprop/plannotator/tree/772c620302f584654c3d8e17bbffb2c6255d3331/packages
+
+The Files panel imports `FileBrowser` and `useFileBrowser` from the published
+`@plannotator/ui` 0.47.0, connected to Sidecar through its `setFileTreeBackend`
+seam. The preview banner reuses Sidecar's original-document styling.
 
 Inter and Geist Mono are served from Plannotator's Fontsource dependencies;
 the fonts use the SIL Open Font License 1.1 distributed with those packages.

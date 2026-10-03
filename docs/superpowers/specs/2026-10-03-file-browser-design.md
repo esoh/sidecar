@@ -38,7 +38,7 @@ Both routes require the existing viewer cookie and Host/Origin checks. The clien
 - A collapsible left Files panel, toggled from the top bar and resized with Plannotator's `ResizeHandle`. Its width and open state are saved in this browser. It starts closed.
 - The panel renders `FileBrowser` with search, change badges, and line counts. Vault, annotation counts, and edit statuses are not used.
 - Selecting a file replaces the main pane with a read-only preview, following the existing **View original document** pattern: a banner reading "Previewing `path`" with **Back to document**. Selecting the open document's own file returns to the document.
-- Rendering follows Plannotator's rules for the path: Markdown, plain text, and data/config files through `MarkdownDocument`; Mermaid and Graphviz sources as diagrams; HTML in an `srcdoc` iframe with Plannotator's `sandbox="allow-scripts"` policy (opaque origin, so it cannot reach Sidecar's cookie or API).
+- Rendering follows Plannotator's rules for the path: Markdown, plain text, and data/config files through `MarkdownDocument`; Mermaid and Graphviz sources as diagrams; HTML in an `srcdoc` iframe with an empty `sandbox` (opaque origin, no scripts): Sidecar's page CSP is inherited by `srcdoc` and would block inline scripts anyway, so the preview is static.
 - During a preview, passage selection and commenting are disabled. The conversation pane, its drafts, pins, and windows stay attached to the current document.
 
 ## Verification

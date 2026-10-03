@@ -96,6 +96,12 @@ The document library shows shorthand relative last-opened times (such as `5m ago
 
 Click the **Claude/Codex** label in a viewer or the library to see and copy its original session ID. Session IDs identify the owning conversation; an active Sidecar viewer does not by itself prove its agent is online.
 
+## Workspace files
+
+The folder button in the top bar opens a **Files** panel listing the document's workspace — the worktree its agent declared with `--workspace`, or the Git top-level it opened from. It uses Plannotator's file browser: the same file types, excluded folders (such as `node_modules` and `.claude`), 5,000-file cap, filter box, and Git change badges. Changed and untracked files are listed even past the cap. **Refresh** reloads the tree; it does not watch for changes.
+
+Selecting a file previews it read-only in place of the document, with **Back to document** to return. Markdown, text and data files render as Markdown, Mermaid and Graphviz sources as diagrams, and HTML in a static sandboxed frame. Previewing never registers a document, starts a conversation, or contacts the agent; passage comments are unavailable until you return. Relative images inside previewed files are not loaded. The panel's width and open state are saved in this browser. Documents without a recorded workspace hide the button; reopen them from the agent to add one.
+
 ## Passage comments
 
 Select text and click **Comment** or press **C** to open a floating composer beside the passage. The shortcut leaves typing and Ctrl/Cmd+C untouched. The highlight remains visible while you type. Clicking outside dismisses an empty composer; a composer with a draft stays open. **Send** (or Enter) starts a thread with the original agent; **Cancel** or Escape discards the unsent comment. Select another passage at any time to start a separate comment; reselecting a passage restores its draft while this page stays open. Failed sends preserve the draft for retry. Shift+Enter adds a new line. Textboxes grow with their contents and then scroll.
