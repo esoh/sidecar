@@ -51,7 +51,10 @@ test('pinned references retain selections and dock expansion after the last tab 
   await page.keyboard.press('7');
   await expect(options.getByRole('button', { name: '7', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await options.getByRole('button', { name: 'Cyan', exact: true }).click();
-  await page.keyboard.press('Escape');
+  await options.getByRole('button', { name: 'Go to message', exact: true }).press('Enter');
+  await expect(options).toBeHidden();
+  await expect(message).toBeFocused();
+  await expect(page.getByRole('dialog', { name: 'Pinned message', exact: true })).toHaveCount(0);
   await pins.getByRole('button', { name: /Read/ }).click();
   const floating = page.getByRole('dialog', { name: 'Pinned message', exact: true });
   await expect(floating).toContainText('A useful passage.');
@@ -74,16 +77,23 @@ test('pinned references retain selections and dock expansion after the last tab 
   await dock.getByRole('button', { name: 'Go to message', exact: true }).click();
   await expect(page.locator('.messages .message.agent')).toBeFocused();
   await expect(dock.getByRole('tabpanel')).toBeVisible();
+  const rememberedHeight = (await dock.boundingBox())!.height;
+  expect(rememberedHeight).toBeGreaterThan(140);
   await dock.getByRole('button', { name: 'Move out of dock', exact: true }).click();
   await expect(dock).toBeHidden();
   const title = await floating.locator('.reference-titlebar').boundingBox();
   const canvas = await page.locator('.document-workspace').boundingBox();
   await page.mouse.move(title!.x + 80, title!.y + 18); await page.mouse.down();
+  await expect(dock).toContainText('Drop a window here');
+  expect((await dock.boundingBox())!.height).toBe(140);
+  await page.mouse.move(canvas!.x + 90, canvas!.y + canvas!.height - 200, { steps: 10 });
+  await expect(dock).not.toHaveClass(/is-preview/);
   await page.mouse.move(canvas!.x + 90, canvas!.y + canvas!.height - 130, { steps: 10 });
   await expect(dock.getByRole('tabpanel')).toBeVisible();
   await page.mouse.up();
   await expect(floating).toHaveCount(0);
   await expect(dock.getByRole('tabpanel')).toBeVisible();
+  expect((await dock.boundingBox())!.height).toBe(rememberedHeight);
   await dock.getByRole('button', { name: 'Close pinned window', exact: true }).click();
   await expect(dock).toBeHidden();
   await expect(pins.getByRole('button', { name: /Read/ })).toHaveCount(1);
@@ -189,7 +199,7 @@ test('pin list condenses, tabs reorder, and single-window mode keeps the latest 
   await page.setViewportSize({ width: 360, height: 420 });
   await expect.poll(async () => {
     const rect = await floating.boundingBox();
-    return !!rect && rect.x >= 0 && rect.y >= 0 && rect.x + rect.width <= 360 && rect.y + rect.height <= 420;
+    return !!rect && rect.x === 0 && rect.width === 360 && rect.y >= 0 && rect.y + rect.height <= 420;
   }).toBe(true);
 });
 

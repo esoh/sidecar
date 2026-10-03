@@ -8,7 +8,7 @@ import { messagePreview } from './message-copy.ts';
 type WindowPosition = { id: string; x: number; y: number; width: number; height: number; layer: number };
 type Point = { x: number; y: number };
 type DockPreview = { id: string; index: number };
-const margin = 8, barHeight = 38;
+const margin = 0, barHeight = 38, minDockHeight = 140;
 function clampWindow(value: WindowPosition): WindowPosition {
   const width = Math.min(value.width, innerWidth - margin * 2), height = Math.min(value.height, innerHeight - margin * 2);
   return { ...value, width, height, x: Math.max(margin, Math.min(value.x, innerWidth - width - margin)), y: Math.max(margin, Math.min(value.y, innerHeight - height - margin)) };
@@ -94,10 +94,10 @@ export function PinnedWindows({ workspace, threads, documentId, openRequests, on
     const index = items.findIndex(node => { const rect = node.getBoundingClientRect(); return x < rect.left + rect.width / 2; });
     return index < 0 ? items.length : index;
   }
-  function dockBounds() {
+  function dockBounds(isEmpty = visibleDock.length === 0) {
     const bounds = workspace.current?.getBoundingClientRect();
     if (!bounds) return new DOMRect();
-    const dockHeight = expanded ? Math.min(height, Math.max(barHeight, bounds.height - 50)) : barHeight;
+    const dockHeight = expanded ? Math.min(isEmpty ? minDockHeight : height, Math.max(barHeight, bounds.height - 50)) : barHeight;
     return new DOMRect(bounds.left, bounds.bottom - dockHeight, bounds.width, dockHeight);
   }
   function listen(event: ReactPointerEvent, move: (point: Point) => void, finish: (cancelled: boolean) => void) {
@@ -127,7 +127,8 @@ export function PinnedWindows({ workspace, threads, documentId, openRequests, on
       if (!detached && (point.y < bounds.top - 28 || point.x < bounds.left - 28 || point.x > bounds.right + 28)) {
         detached = true; offset = { x: Math.min(120, value.width / 2), y: 18 }; moveOut(value.id, point); setGhost(null);
       }
-      const inside = point.x >= bounds.left && point.x <= bounds.right && point.y >= bounds.top && point.y <= bounds.bottom;
+      const targetBounds = detached && fromDock && originalOrder.length === 1 ? dockBounds(true) : bounds;
+      const inside = point.x >= targetBounds.left && point.x <= targetBounds.right && point.y >= targetBounds.top && point.y <= targetBounds.bottom;
       target = inside ? { id: value.id, index: gap(point.x, value.id) } : null;
       setPreview(target);
       if (detached) updateWindow(value.id, { x: point.x - offset.x, y: point.y - offset.y });
@@ -144,14 +145,15 @@ export function PinnedWindows({ workspace, threads, documentId, openRequests, on
     event.stopPropagation(); const start = { x: event.clientX, y: event.clientY };
     listen(event, point => {
       const dx = point.x - start.x, dy = point.y - start.y;
-      const left = edge.includes('w') ? Math.max(margin, Math.min(value.x + dx, value.x + value.width - Math.min(240, innerWidth - 16))) : value.x;
-      const top = edge.includes('n') ? Math.max(margin, Math.min(value.y + dy, value.y + value.height - Math.min(160, innerHeight - 16))) : value.y;
+      const left = edge.includes('w') ? Math.max(margin, Math.min(value.x + dx, value.x + value.width - Math.min(240, innerWidth - margin * 2))) : value.x;
+      const top = edge.includes('n') ? Math.max(margin, Math.min(value.y + dy, value.y + value.height - Math.min(160, innerHeight - margin * 2))) : value.y;
       const right = edge.includes('e') ? Math.min(innerWidth - margin, Math.max(value.x + 240, value.x + value.width + dx)) : value.x + value.width;
       const bottom = edge.includes('s') ? Math.min(innerHeight - margin, Math.max(value.y + 160, value.y + value.height + dy)) : value.y + value.height;
       updateWindow(value.id, { x: left, y: top, width: right - left, height: bottom - top });
     }, cancelled => { if (cancelled) updateWindow(value.id, value); });
   }
   const visibleDock = docked.filter(id => windows.some(window => window.id === id) && find(id));
+  const dockContentHeight = visibleDock.length ? height : minDockHeight;
   const activeId = visibleDock.includes(activeDock ?? '') ? activeDock : visibleDock[0];
   const displayedId = preview?.id ?? activeId;
   const isDockOpen = expanded || !!preview;
@@ -180,12 +182,12 @@ export function PinnedWindows({ workspace, threads, documentId, openRequests, on
         {['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'].map(edge => <div key={edge} className={`resize-edge resize-${edge}`} onPointerDown={event => resize(event, value, edge)} />)}
       </section>
     ))}</div>, document.body)}
-    {(visibleDock.length > 0 || dragging) && <section ref={dock} className={`pinned-dock${isDockOpen ? ' is-expanded' : ''}${preview ? ' is-preview' : ''}`} aria-label="Pinned dock" style={isDockOpen ? { height: `min(${height}px, calc(100% - 50px))` } : undefined}>
-      {isDockOpen && <div className="dock-resize" role="separator" tabIndex={0} aria-label="Resize pinned dock" aria-orientation="horizontal" aria-valuenow={height} aria-valuemin={140} aria-valuemax={Math.max(140, innerHeight - 100)} onKeyDown={event => {
-        if (event.key === 'ArrowUp' || event.key === 'ArrowDown') { event.preventDefault(); setHeight(Math.max(140, Math.min(innerHeight - 100, height + (event.key === 'ArrowUp' ? 20 : -20)))); }
+    {(visibleDock.length > 0 || dragging) && <section ref={dock} className={`pinned-dock${isDockOpen ? ' is-expanded' : ''}${preview ? ' is-preview' : ''}`} aria-label="Pinned dock" style={isDockOpen ? { height: `min(${dockContentHeight}px, calc(100% - 50px))` } : undefined}>
+      {isDockOpen && <div className="dock-resize" role="separator" tabIndex={0} aria-label="Resize pinned dock" aria-orientation="horizontal" aria-valuenow={dockContentHeight} aria-valuemin={minDockHeight} aria-valuemax={Math.max(minDockHeight, innerHeight - 100)} onKeyDown={event => {
+        if (event.key === 'ArrowUp' || event.key === 'ArrowDown') { event.preventDefault(); setHeight(Math.max(minDockHeight, Math.min(innerHeight - 100, height + (event.key === 'ArrowUp' ? 20 : -20)))); }
       }} onPointerDown={event => {
         const start = event.clientY, original = height;
-        listen(event, point => setHeight(Math.max(140, Math.min((workspace.current?.clientHeight ?? innerHeight) - 50, original + start - point.y))), cancelled => { if (cancelled) setHeight(original); });
+        listen(event, point => setHeight(Math.max(minDockHeight, Math.min((workspace.current?.clientHeight ?? innerHeight) - 50, original + start - point.y))), cancelled => { if (cancelled) setHeight(original); });
       }} />}
       <header className="dock-header" onPointerDown={event => {
         const value = windows.find(window => window.id === activeId);

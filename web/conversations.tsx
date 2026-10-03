@@ -374,6 +374,7 @@ export function ConversationSidebar({
   messageVisit,
   onMessageSent,
   onOpenPin,
+  onGoToMessage,
   messageJump,
 }: {
   documentId: string;
@@ -394,6 +395,7 @@ export function ConversationSidebar({
   messageVisit: number;
   onMessageSent: (request: RequestRecord) => void;
   onOpenPin: (messageId: string) => void;
+  onGoToMessage: (messageId: string) => void;
   messageJump: { id: string; sequence: number } | null;
 }) {
   const [filter, setFilter] = useState('unresolved'),
@@ -630,7 +632,7 @@ export function ConversationSidebar({
           </div>
         )}
       </div>
-      {active && <PinnedMessages key={active.id} threadId={active.id} messages={active.messages} onOpen={onOpenPin} />}
+      {active && <PinnedMessages key={active.id} threadId={active.id} messages={active.messages} onOpen={onOpenPin} onGoToMessage={onGoToMessage} />}
       {error && (
         <p className="sidebar-error" role="alert">
           {error}
@@ -798,8 +800,9 @@ export function PinSymbol({ style }: { style?: PinStyle }) {
   return <span className="pin-symbol" data-color={style?.color ?? 'default'} aria-hidden="true">{isPinIcon(symbol) ? <Icon name={symbol} /> : symbol}</span>;
 }
 
-function PinMenu({ message, threadId }: { message: Message; threadId: string }) {
+function PinMenu({ message, threadId, onGoToMessage }: { message: Message; threadId: string; onGoToMessage: (id: string) => void }) {
   const [category, setCategory] = useState('icons'), [saving, setSaving] = useState(false), [error, setError] = useState(''), [open, setOpen] = useState(false);
+  const navigating = useRef(false);
   const [style, setStyle] = useState<PinStyle>(message.pinStyle ?? { symbol: 'pin', color: 'default' });
   useEffect(() => setStyle(message.pinStyle ?? { symbol: 'pin', color: 'default' }), [message.pinStyle]);
   async function save(pinStyle: PinStyle, isPinned = true) {
@@ -810,9 +813,9 @@ function PinMenu({ message, threadId }: { message: Message; threadId: string }) 
     finally { setSaving(false); }
   }
   const symbols = category === 'icons' ? pinIcons : (category === 'letters' ? 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' : '0123456789').split('');
-  return <Popover open={open} onOpenChange={setOpen}>
+  return <Popover open={open} onOpenChange={value => { if (value) navigating.current = false; setOpen(value); }}>
     <PopoverTrigger className="pin-options" aria-label="Pin options" title="Pin options"><PinSymbol style={style} /></PopoverTrigger>
-    <PopoverContent className="pin-menu" align="start" role="dialog" aria-label="Pin options" onKeyDown={event => {
+    <PopoverContent className="pin-menu" align="start" role="dialog" aria-label="Pin options" finalFocus={() => !navigating.current} onKeyDown={event => {
       if (event.ctrlKey || event.metaKey || event.altKey || event.nativeEvent.isComposing || !/^[a-z0-9]$/i.test(event.key)) return;
       event.preventDefault(); event.stopPropagation();
       setCategory(/^[0-9]$/.test(event.key) ? 'numbers' : 'letters');
@@ -822,17 +825,18 @@ function PinMenu({ message, threadId }: { message: Message; threadId: string }) 
       <div className="pin-symbol-grid" role="group" aria-label="Pin symbol">{symbols.map(symbol => <button key={symbol} aria-label={symbol[0].toUpperCase() + symbol.slice(1)} title={symbol[0].toUpperCase() + symbol.slice(1)} aria-pressed={style.symbol === symbol} disabled={saving} onClick={() => { void save({ ...style, symbol }); }}><PinSymbol style={{ ...style, symbol }} /></button>)}</div>
       <div className="pin-colors" role="group" aria-label="Pin color">{pinColors.map(color => <button key={color} aria-label={color[0].toUpperCase() + color.slice(1)} title={color[0].toUpperCase() + color.slice(1)} aria-pressed={style.color === color} disabled={saving} onClick={() => { void save({ ...style, color }); }}><span className="pin-color" data-color={color} /></button>)}</div>
       {error && <p role="alert">{error}</p>}
-      <button className="unpin-action" disabled={saving} onClick={() => { void save(style, false); }}><Icon name="pin" />Unpin</button>
+      <button className="pin-action" onClick={() => { navigating.current = true; setOpen(false); onGoToMessage(message.id); }}><Icon name="arrowUpRight" />Go to message</button>
+      <button className="pin-action unpin-action" disabled={saving} onClick={() => { void save(style, false); }}><Icon name="pin" />Unpin</button>
     </PopoverContent>
   </Popover>;
 }
 
-function PinnedMessages({ messages, threadId, onOpen }: { messages: Message[]; threadId: string; onOpen: (id: string) => void }) {
+function PinnedMessages({ messages, threadId, onOpen, onGoToMessage }: { messages: Message[]; threadId: string; onOpen: (id: string) => void; onGoToMessage: (id: string) => void }) {
   const [expanded, setExpanded] = useState(false);
   const pins = messages.filter(message => message.isPinned);
   if (!pins.length) return null;
   return <nav className="pinned-messages" aria-label="Pinned messages">
-    {(pins.length > 3 && !expanded ? pins.slice(0, 2) : pins).map(message => <div className="pinned-message-row" key={message.id}><PinMenu message={message} threadId={threadId} /><button className="pinned-message-title" title={messagePreview(message.text)} onClick={() => onOpen(message.id)}><span>{messagePreview(message.text)}</span></button></div>)}
+    {(pins.length > 3 && !expanded ? pins.slice(0, 2) : pins).map(message => <div className="pinned-message-row" key={message.id}><PinMenu message={message} threadId={threadId} onGoToMessage={onGoToMessage} /><button className="pinned-message-title" title={messagePreview(message.text)} onClick={() => onOpen(message.id)}><span>{messagePreview(message.text)}</span></button></div>)}
     {pins.length > 3 && <button className="pins-expand" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? 'Show less' : `${pins.length - 2} more`}<Icon name="chevron" /></button>}
   </nav>;
 }

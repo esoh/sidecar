@@ -159,6 +159,12 @@ function App() {
     },
     [documentId, drafts],
   );
+  function goToMessage(id: string) {
+    const thread = threads.find(thread => thread.messages.some(message => message.id === id));
+    if (!thread) return;
+    openThread(thread.id);
+    setMessageJump(previous => ({ id, sequence: (previous?.sequence ?? 0) + 1 }));
+  }
   useEffect(() => {
     if (!current || activeThreadId !== undefined) return;
     let saved: string | null = null;
@@ -723,12 +729,7 @@ function App() {
             </article>
           </div>
         </main>
-        <PinnedWindows key={documentId} workspace={workspace} threads={threads} documentId={documentId} openRequests={openPins} onOpened={ids => setOpenPins(previous => previous.filter(id => !ids.includes(id)))} {...selectionActions} onGoToMessage={id => {
-          const thread = threads.find(thread => thread.messages.some(message => message.id === id));
-          if (!thread) return;
-          openThread(thread.id);
-          setMessageJump(previous => ({ id, sequence: (previous?.sequence ?? 0) + 1 }));
-        }} />
+        <PinnedWindows key={documentId} workspace={workspace} threads={threads} documentId={documentId} openRequests={openPins} onOpened={ids => setOpenPins(previous => previous.filter(id => !ids.includes(id)))} {...selectionActions} onGoToMessage={goToMessage} />
         </div>
         {isSidebarShown && (
           <ResizeHandle
@@ -762,6 +763,7 @@ function App() {
           messageVisit={messageVisit}
           onMessageSent={request => setSentRequestId(request.id)}
           onOpenPin={id => setOpenPins(previous => [...previous.filter(value => value !== id), id])}
+          onGoToMessage={goToMessage}
           messageJump={messageJump}
         />
       </div>

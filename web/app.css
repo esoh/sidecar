@@ -1279,8 +1279,9 @@ pre code.pn-code[data-keep-layout] {
 .pin-colors { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
 .pin-colors button { display: flex; justify-content: center; align-items: center; width: 30px; height: 28px; }
 .pin-color { width: 12px; height: 12px; border-radius: 50%; background: currentColor; }
-.pin-menu .unpin-action { display: flex; align-items: center; gap: 7px; border-top: 1px solid var(--line); border-radius: 0; width: 100%; margin-top: 12px; padding: 8px 5px; color: var(--subtle); text-align: left; }
-.unpin-action .sidecar-icon { width: 13px; height: 13px; }
+.pin-menu .pin-action { display: flex; align-items: center; gap: 7px; width: 100%; margin-top: 12px; padding: 8px 5px; color: var(--subtle); text-align: left; }
+.pin-menu .unpin-action { border-top: 1px solid var(--line); border-radius: 0; }
+.pin-action .sidecar-icon { width: 13px; height: 13px; }
 .reference-footer { flex-shrink: 0; border-top: 1px solid var(--line); padding: 5px 11px; }
 .reference-footer button { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; color: var(--subtle); }
 .reference-footer .sidecar-icon { width: 12px; height: 12px; }
