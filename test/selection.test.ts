@@ -9,6 +9,19 @@ test('selection anchors use UTF-16 context and reject ambiguous matches', () => 
   assert.equal(locateQuote('prefix different suffix', quote), null);
 });
 
+test('renderer smart quotes preserve source anchors and DOM offsets without hiding ambiguity', () => {
+  const first = "Before admission: the transfer chain must identify the same surviving party and referring CallSessions. The admission's recorded route and session destinations must also agree.";
+  const second = "The graph compares the original requested extension or phone number with the admission's recorded dialed address.";
+  for (const exact of [first, second]) {
+    const rendered = '😀 “' + exact.replaceAll("'", '’') + '” tail';
+    const quote = { exact, prefix: '😀 "', suffix: '" tail', start: 4, end: 4 + exact.length, version: 'same' };
+    assert.deepEqual(locateQuote(rendered, quote), { start: 4, end: 4 + exact.length });
+    assert.equal(locateQuote(rendered.replace('admission', 'completion'), quote), null);
+  }
+  const quote = { exact: "admission's", prefix: '', suffix: '', start: 0, end: 11, version: 'same' };
+  assert.equal(locateQuote("admission’s admission's", quote), null);
+});
+
 test('sentence context is mechanical, bounded, and omitted for whole or multi-sentence selections', () => {
   const text = 'Previous sentence. The widget retries three times. Next sentence.';
   const start = text.indexOf('three');

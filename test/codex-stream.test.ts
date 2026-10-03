@@ -11,6 +11,39 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { startServer } from '../src/server.ts';
 import { ReplyStream, type ReplyRoute, type StreamEvent } from '../src/stream.ts';
 
+test('Codex interrupts only the turn bound to matching output and observes native confirmation', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'sidecar-stop-rpc-'));
+  const path = join(root, 'native.sock'), http = createServer(), ws = new WebSocketServer({ server: http });
+  await new Promise<void>(resolve => http.listen(path, resolve));
+  t.after(async () => { for (const client of ws.clients) client.terminate(); ws.close(); await new Promise<void>(resolve => http.close(() => resolve())); await rm(root, { recursive: true, force: true }); });
+  let send: (value: unknown) => void = () => { throw new Error('Not connected'); };
+  const interrupts: unknown[] = [], ended: unknown[] = [];
+  ws.on('connection', socket => {
+    send = value => socket.send(JSON.stringify(value));
+    socket.on('message', data => {
+      const m = JSON.parse(data.toString());
+      if (m.method === 'initialize') send({ id: m.id, result: {} });
+      if (m.method === 'thread/read' || m.method === 'thread/resume') send({ id: m.id, result: { thread: { id: 'original', status: { type: 'active' } } } });
+      if (m.method === 'turn/interrupt') { interrupts.push(m.params); send({ id: m.id, result: {} }); }
+    });
+  });
+  const prefix = '[[sidecar:probe]]\n';
+  const observer = await observeCodex('original', () => {}, () => {}, path, [prefix], (id, status) => ended.push({ id, status }));
+  t.after(() => observer());
+  await assert.rejects(observer.interrupt('ordinary'), /no longer active/);
+  const delta = (turnId: string, text: string) => send({ method: 'item/agentMessage/delta', params: { threadId: 'original', turnId, itemId: turnId, delta: text } });
+  delta('ordinary', 'Unrelated work.'); delta('reply', prefix + 'Partial');
+  for (let i = 0; i < 100 && !observer.canInterrupt('reply'); i++) await delay(5);
+  await assert.rejects(observer.interrupt('ordinary'), /no longer active/);
+  await observer.interrupt('reply');
+  assert.deepEqual(interrupts, [{ threadId: 'original', turnId: 'reply' }]);
+  assert.deepEqual(ended, [], 'RPC acknowledgment is not interruption confirmation');
+  send({ method: 'turn/completed', params: { threadId: 'original', turn: { id: 'reply', status: 'interrupted' } } });
+  for (let i = 0; i < 100 && !ended.length; i++) await delay(5);
+  assert.deepEqual(ended, [{ id: 'reply', status: 'interrupted' }]);
+  await assert.rejects(observer.interrupt('reply'), /no longer active/);
+});
+
 for (const loaded of [true, false]) test(`Codex observer ${loaded ? 'streams only its original loaded thread' : 'refuses to load a replacement session'}`, async t => {
   const root = await mkdtemp(join(tmpdir(), 'sidecar-ws-'));
   const path = join(root, 'native.sock'), http = createServer();
@@ -159,7 +192,7 @@ test('Codex captures a complete retry after the interrupted turn ends', async t 
   t.after(() => stop());
   const delta = (turnId: string, itemId: string, text: string) => send({ method: 'item/agentMessage/delta', params: { threadId: 'original', turnId, itemId, delta: text } });
   delta('interrupted', 'old-message', reply.prefix + 'Partial');
-  send({ method: 'turn/completed', params: { threadId: 'original', turnId: 'interrupted' } });
+  send({ method: 'turn/completed', params: { threadId: 'original', turn: { id: 'interrupted', status: 'interrupted', items: [] } } });
   for (let i = 0; i < 100 && !reply.error; i++) await delay(5);
   assert.match(reply.error ?? '', /turn ended/);
   delta('retry', 'unrelated', 'Ordinary terminal text.');

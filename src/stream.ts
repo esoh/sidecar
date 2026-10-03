@@ -19,6 +19,8 @@ export class ReplyStream {
   metadata: ReplyMetadata = {};
   error: string | null = null;
   done = false;
+  turnId: string | undefined;
+  private endedTurns = new Set<string>();
   private messages = new Map<string, { next: number; raw: string; pending: Map<number, StreamEvent>; ignored: boolean }>();
   private started = false;
   private completedProgress = new Set<string>();
@@ -30,6 +32,12 @@ export class ReplyStream {
     this.progress = { prefix: `[[sidecar-progress:${nonce}]]\n`, suffix: `\n[[/sidecar-progress:${nonce}]]` };
   }
   get hasStarted() { return this.started; }
+  get isTurnActive() { return !!this.turnId && !this.endedTurns.has(this.turnId); }
+  endTurn(turnId: string) { this.endedTurns.add(turnId); }
+  recoverPartial(raw: string) {
+    const prefix = raw.startsWith(this.prefix) ? this.prefix : raw.startsWith(this.progress.prefix) ? this.progress.prefix : undefined;
+    if (prefix) this.render(raw, false, prefix, prefix === this.prefix ? this.suffix : this.progress.suffix);
+  }
   fail(message: string) { if (!this.done) this.error = message; }
   accept(event: StreamEvent): ProgressReply | undefined {
     if (this.done) return;
@@ -58,6 +66,7 @@ export class ReplyStream {
         continue;
       }
       this.started = true;
+      this.turnId = event.turnId;
       const suffix = isProgress ? this.progress.suffix : this.suffix;
       const isComplete = this.render(candidate.raw, next.final, prefix, suffix);
       // A complete native retry can replace an interrupted message, using this request's exact markers.

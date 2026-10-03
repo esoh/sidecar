@@ -6,5 +6,6 @@
     "name": "esoh"
   },
   "repository": "https://github.com/esoh/sidecar",
-  "skills": "./.agents/skills/"
+  "skills": "./.agents/skills/",
+  "hooks": "./hooks/claude-control.json"
 }

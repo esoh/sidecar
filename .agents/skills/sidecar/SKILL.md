@@ -130,6 +130,14 @@ Codex activity is sampled read-only from its existing local daemon while a viewe
 
 A user input has at most one selection. Earlier inputs may refer to different passages; read the thread on demand when its context is missing. An input without a quote does not inherit the preceding selection. Saved selections carry their original document version, visibility, and stable ID. Only the user controls visibility and resolution; reopening keeps previously hidden selections off.
 
+An optional `messageQuote` instead quotes a sent chat message: `{threadId, messageId, exact}` identifies its source and selected rendered text. It is context for the current question, not a document passage or an instruction to edit that text. It is mutually exclusive with `quote`. The source can be another conversation in this document; retrieve context only if needed.
+
+### Stopped replies
+
+The viewer's Stop button interrupts only a native turn identified by this request's reply markers. It preserves progress and partial text with a Stopped status; a missing closing marker is expected. Do not automatically retry, emit a late replacement, or undo edits already made for a stopped request. Continue only from a new user request. This differs from an unexpected capture failure, which retains the recovery path above.
+
+Claude's Stop control requires the native plugin module (Claude Code 2.1.287+) loaded at session startup; re-invoking the skill registers display hooks but cannot load a new plugin module. Older or disconnected control channels offer no Stop button. Normal permissions still apply to requested tool work.
+
 ### Metadata in the final reply
 
 Immediately after the final opening marker, optionally emit one line `[[sidecar-meta {JSON}]]`, then a newline and your ordinary Markdown answer. Use valid JSON, without a code fence. Omit unused fields and omit the line entirely when unnecessary. The app hides this line and saves its effects with the completed reply. Progress messages contain prose only; their markers already record interim updates. Closing the final marker completes the request; no completion command is needed.

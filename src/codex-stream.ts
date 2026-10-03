@@ -5,8 +5,9 @@ import { isObject } from './store.ts';
 import type { StreamEvent } from './stream.ts';
 
 const defaultSocketPath = () => join(process.env.CODEX_HOME ?? homedir() + '/.codex', 'app-server-control/app-server-control.sock');
+export type CodexObserver = (() => void) & { canInterrupt(turnId: string): boolean; interrupt(turnId: string): Promise<void> };
 
-export async function observeCodex(threadId: string, onEvent: (event: StreamEvent) => void, onFailure: (message: string) => void, socketPath = defaultSocketPath(), prefixes?: readonly string[]): Promise<() => void> {
+export async function observeCodex(threadId: string, onEvent: (event: StreamEvent) => void, onFailure: (message: string) => void, socketPath = defaultSocketPath(), prefixes?: readonly string[], onTurnEnd?: (turnId: string, status: string) => void): Promise<CodexObserver> {
   const socket = new WebSocket(`ws+unix://${socketPath}:/`, { maxPayload: 2 * 1024 * 1024, handshakeTimeout: 5000 });
   let stopped = false, ready = false, nextId = 0;
   const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
@@ -26,7 +27,16 @@ export async function observeCodex(threadId: string, onEvent: (event: StreamEven
         return;
       }
       const p = value.params;
-      if (!isObject(p) || p.threadId !== threadId || typeof p.turnId !== 'string') return;
+      if (!isObject(p) || p.threadId !== threadId) return;
+      if (value.method === 'turn/completed' && isObject(p.turn) && typeof p.turn.id === 'string') {
+        if (replyTurnId === p.turn.id) {
+          replyTurnId = undefined;
+          if (onTurnEnd) onTurnEnd(p.turn.id, String(p.turn.status));
+          else onFailure('Agent turn ended before the reply was finalized.');
+        }
+        return;
+      }
+      if (typeof p.turnId !== 'string') return;
       if (value.method === 'item/agentMessage/delta' && typeof p.itemId === 'string' && typeof p.delta === 'string') {
         if (!message || message.id !== p.itemId) message = { id: p.itemId, turnId: p.turnId, index: 0, text: '' };
         if (message.ignored) return;
@@ -45,7 +55,7 @@ export async function observeCodex(threadId: string, onEvent: (event: StreamEven
         if (message.text !== p.item.text) { onFailure('Codex stream was incomplete. Send a complete reply to recover.'); return; }
         onEvent({ messageId: message.id, turnId: message.turnId, index: message.index, delta: '', final: true });
         message = undefined;
-      } else if (value.method === 'turn/completed' && replyTurnId === p.turnId) onFailure('Agent turn ended before the reply was finalized.');
+      }
     } catch { failed(); }
   });
   function request(method: string, params: unknown): Promise<unknown> {
@@ -65,7 +75,11 @@ export async function observeCodex(threadId: string, onEvent: (event: StreamEven
     const result = await request('thread/resume', { threadId, excludeTurns: true });
     if (!isObject(result) || !isObject(result.thread) || result.thread.id !== threadId) throw new Error('Codex observer identity mismatch');
     ready = true;
-    return stop;
+    const canInterrupt = (turnId: string) => ready && !stopped && replyTurnId === turnId;
+    return Object.assign(stop, { canInterrupt, async interrupt(turnId: string) {
+      if (!canInterrupt(turnId)) throw new Error('The Sidecar turn is no longer active');
+      await request('turn/interrupt', { threadId, turnId });
+    } });
   } catch (error) { stop(); throw error; }
 }
 

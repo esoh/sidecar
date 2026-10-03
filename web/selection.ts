@@ -1,12 +1,17 @@
 import type { Quote } from '../src/store.ts';
+// Plannotator smartens prose quotes. These substitutions retain UTF-16 offsets
+// so both saved source anchors and browser selections locate the same DOM range.
+const plainQuotes = (text: string) => text.replace(/[‘’]/g, "'").replace(/[“”]/g, '"');
 export function locateQuote(text: string, quote: Quote) {
   if (!quote.exact) return null;
+  text = plainQuotes(text);
+  const exact = plainQuotes(quote.exact), prefix = plainQuotes(quote.prefix), suffix = plainQuotes(quote.suffix);
   const matches = [];
-  for (let at = text.indexOf(quote.exact); at !== -1; at = text.indexOf(quote.exact, at + 1)) {
-    const end = at + quote.exact.length;
+  for (let at = text.indexOf(exact); at !== -1; at = text.indexOf(exact, at + 1)) {
+    const end = at + exact.length;
     if (
-      text.slice(Math.max(0, at - quote.prefix.length), at) === quote.prefix &&
-      text.slice(end, end + quote.suffix.length) === quote.suffix
+      text.slice(Math.max(0, at - prefix.length), at) === prefix &&
+      text.slice(end, end + suffix.length) === suffix
     )
       matches.push({ start: at, end });
     if (matches.length > 1) return null;

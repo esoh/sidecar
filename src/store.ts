@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename, unlink } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 
-import { isQuote, type Quote } from './quote.ts';
+import { isQuote, isMessageQuote, type MessageQuote, type Quote } from './quote.ts';
 import type { ReplyMetadata } from './reply-metadata.ts';
 import { isPinStyle, type PinStyle } from './pin-style.ts';
 
@@ -11,16 +11,16 @@ export { isQuote, type Quote } from './quote.ts';
 export type RepoInfo = { display: string; branch?: string };
 export type DocumentRecord = { id: string; path: string; generated: boolean; providedTitle?: string; userTitle?: string; repoInfo?: RepoInfo };
 export type MessageSelection = { id: string; slug: string; quote: Quote; isVisible: boolean; label?: string };
-export type Message = { id: string; role: 'user' | 'agent'; text: string; requestId: string; createdAt: number; selections?: MessageSelection[]; isPinned?: boolean; pinStyle?: PinStyle };
+export type Message = { id: string; role: 'user' | 'agent'; text: string; requestId: string; createdAt: number; selections?: MessageSelection[]; messageQuote?: MessageQuote; isPinned?: boolean; pinStyle?: PinStyle };
 export type Thread = { id: string; documentId: string; title?: string; createdAt?: number; isResolved: boolean; messages: Message[] };
 export type RequestRecord = {
   id: string; documentId: string; threadId: string; text: string; clientMessageId: string;
-  quote?: Quote; status: 'queued' | 'claimed' | 'completed' | 'failed' | 'uncertain'; createdAt: number;
+  quote?: Quote; messageQuote?: MessageQuote; status: 'queued' | 'claimed' | 'completed' | 'failed' | 'uncertain' | 'stopped'; createdAt: number;
   submission: string; answer?: { text: string; isError: boolean }; acceptedAt?: number;
 };
 export type State = { version: 3; owner: Owner; documents: Record<string, DocumentRecord>; threads: Record<string, Thread>; requests: Record<string, RequestRecord> };
 export type Store = { read(): State; update<T>(change: (draft: State) => T): Promise<T> };
-export type SubmitInput = { documentId: string; threadId?: string; text: string; quote?: Quote; clientMessageId: string };
+export type SubmitInput = { documentId: string; threadId?: string; text: string; quote?: Quote; messageQuote?: MessageQuote; clientMessageId: string };
 export type ReplyInput = { requestId: string; documentId: string; threadId: string; text: string; isError?: boolean; metadata?: ReplyMetadata; selectionVersion?: string };
 export type ClaimResult = { claimStatus: 'claimed' | 'already-claimed' | 'completed' | 'uncertain'; request: RequestRecord };
 
@@ -47,6 +47,7 @@ function isDocument(v: unknown): v is DocumentRecord {
   return isObject(v) && string(v.id) && string(v.path) && isAbsolute(v.path) && typeof v.generated === 'boolean' && optionalString(v.providedTitle) && optionalString(v.userTitle) && (v.repoInfo === undefined || isRepoInfo(v.repoInfo));
 }
 function isMessage(v: unknown): v is Message {
+  if (isObject(v) && v.messageQuote !== undefined && (!isMessageQuote(v.messageQuote) || v.role !== 'user' || (Array.isArray(v.selections) && v.selections.length > 0))) return false;
   return isMessageFields(v) && !('quote' in v) && (v.selections === undefined || (Array.isArray(v.selections) && v.selections.length <= (v.role === 'user' ? 1 : 20) && v.selections.every(s => isObject(s) && string(s.id) && string(s.slug) && /^selection-[1-9][0-9]*$/.test(s.slug) && isQuote(s.quote) && typeof s.isVisible === 'boolean' && optionalString(s.label)) && new Set(v.selections.map(s => s.id)).size === v.selections.length && new Set(v.selections.map(s => s.slug)).size === v.selections.length));
 }
 function isMessageFields(v: unknown): v is Record<string, unknown> & { id: string } {
@@ -68,7 +69,8 @@ function isOldThread(v: unknown): v is OldThread {
   return isObject(v) && string(v.id) && string(v.documentId) && optionalString(v.title) && (v.createdAt === undefined || number(v.createdAt)) && typeof v.isResolved === 'boolean' && Array.isArray(v.messages) && v.messages.every(m => isMessageFields(m) && !('selections' in m) && (m.quote === undefined || (m.role === 'user' && isQuote(m.quote))));
 }
 function isRequest(v: unknown): v is RequestRecord {
-  return isObject(v) && string(v.id) && string(v.documentId) && string(v.threadId) && string(v.text) && string(v.clientMessageId) && string(v.submission) && number(v.createdAt) && string(v.status) && ['queued','claimed','completed','failed','uncertain'].includes(v.status) && (v.quote === undefined || isQuote(v.quote)) && (v.acceptedAt === undefined || number(v.acceptedAt)) && (v.answer === undefined || (isObject(v.answer) && string(v.answer.text) && typeof v.answer.isError === 'boolean'));
+  if (isObject(v) && v.messageQuote !== undefined && (!isMessageQuote(v.messageQuote) || v.quote !== undefined)) return false;
+  return isObject(v) && string(v.id) && string(v.documentId) && string(v.threadId) && string(v.text) && string(v.clientMessageId) && string(v.submission) && number(v.createdAt) && string(v.status) && ['queued','claimed','completed','failed','uncertain','stopped'].includes(v.status) && (v.quote === undefined || isQuote(v.quote)) && (v.acceptedAt === undefined || number(v.acceptedAt)) && (v.answer === undefined || (isObject(v.answer) && string(v.answer.text) && typeof v.answer.isError === 'boolean'));
 }
 function records<T extends {id: string}>(v: unknown, check: (v: unknown) => v is T): v is Record<string,T> {
   return isObject(v) && Object.entries(v).every(([key, item]) => check(item) && key === item.id && /^[0-9a-f-]{36}$/i.test(key));
@@ -186,7 +188,14 @@ export function submit(state: State, input: SubmitInput): RequestRecord {
   get(state.documents, input.documentId);
   if (!input.text.trim() || !input.clientMessageId || input.clientMessageId.length > 128) throw new DomainError('A question and message ID are required');
   if (input.quote !== undefined && !isQuote(input.quote)) throw new DomainError('Invalid selection');
-  const signature = JSON.stringify([input.documentId, input.threadId ?? null, input.text, input.quote ?? null]);
+  if (input.messageQuote !== undefined) {
+    if (!isMessageQuote(input.messageQuote)) throw new DomainError('Invalid message quote');
+    if (input.quote) throw new DomainError('Attach only one selection per message');
+    const source = get(state.threads, input.messageQuote.threadId);
+    if (source.documentId !== input.documentId) throw new DomainError('Quoted message belongs to another document', 409);
+    if (!source.messages.some(message => message.id === input.messageQuote?.messageId)) throw new DomainError('Message not found', 404);
+  }
+  const signature = JSON.stringify([input.documentId, input.threadId ?? null, input.text, input.quote ?? null, ...(input.messageQuote ? [input.messageQuote] : [])]);
   const previous = Object.values(state.requests).find(r => r.clientMessageId === input.clientMessageId);
   if (previous) {
     if (previous.submission !== signature) throw new DomainError('Message ID was already used for different content', 409);
@@ -201,15 +210,16 @@ export function submit(state: State, input: SubmitInput): RequestRecord {
   }
   const request: RequestRecord = { id: randomUUID(), documentId: input.documentId, threadId: thread.id, text: input.text, clientMessageId: input.clientMessageId, submission: signature, status: 'queued', createdAt: Date.now() };
   if (input.quote) request.quote = structuredClone(input.quote);
+  if (input.messageQuote) request.messageQuote = structuredClone(input.messageQuote);
   state.requests[request.id] = request;
   thread.isResolved = false;
   const id = randomUUID();
-  thread.messages.push({ id, role: 'user', text: input.text, requestId: request.id, createdAt: request.createdAt, ...(input.quote ? { selections: [{ id, slug: 'selection-1', quote: structuredClone(input.quote), isVisible: true }] } : {}) });
+  thread.messages.push({ id, role: 'user', text: input.text, requestId: request.id, createdAt: request.createdAt, ...(input.messageQuote ? { messageQuote: structuredClone(input.messageQuote) } : {}), ...(input.quote ? { selections: [{ id, slug: 'selection-1', quote: structuredClone(input.quote), isVisible: true }] } : {}) });
   return request;
 }
 export function claim(state: State, requestId: string, options: {resume?: boolean}): ClaimResult {
   const request = get(state.requests, requestId);
-  if (request.status === 'completed' || request.status === 'failed') return { claimStatus: 'completed', request };
+  if (request.status === 'completed' || request.status === 'failed' || request.status === 'stopped') return { claimStatus: 'completed', request };
   if (request.status === 'claimed') return { claimStatus: 'already-claimed', request };
   if (request.status === 'uncertain' && !options.resume) return { claimStatus: 'uncertain', request };
   if (Object.values(state.requests).some(r => r.id !== requestId && r.status === 'claimed')) throw new DomainError('Another request is in progress', 409);
@@ -232,6 +242,7 @@ export function recordProgress(state: State, input: ReplyInput & { messageId: st
 }
 export function reply(state: State, input: ReplyInput): void {
   const request = get(state.requests, input.requestId);
+  if (request.status === 'stopped') throw new DomainError('This request was stopped; submit a new message to continue', 409);
   if (request.documentId !== input.documentId || request.threadId !== input.threadId) throw new DomainError('Reply routing does not match the request', 409);
   if (!input.text.trim()) throw new DomainError('Reply text is required');
   const answer = { text: input.text, isError: input.isError === true || input.metadata?.isError === true };
@@ -249,6 +260,15 @@ export function reply(state: State, input: ReplyInput): void {
     return { id: index ? `${id}-${index + 1}` : id, slug: `selection-${index + 1}`, isVisible: !thread.isResolved, ...(h.label ? { label: h.label.trim() } : {}), quote: { exact: h.exact, prefix: h.prefix ?? '', suffix: h.suffix ?? '', start: 0, end: h.exact.length, version: input.selectionVersion } };
   });
   thread.messages.push({ id, role: 'agent', text: answer.text, requestId: request.id, createdAt: Date.now(), ...(selections?.length ? { selections } : {}) });
+}
+export function stopRequest(state: State, requestId: string, partial: string): void {
+  const request = get(state.requests, requestId);
+  if (request.status !== 'claimed') return;
+  request.status = 'stopped';
+  request.answer = { text: partial, isError: false };
+  const thread = get(state.threads, request.threadId), last = thread.messages.at(-1);
+  if (partial.trim() && !(last?.role === 'agent' && last.requestId === requestId && last.text === partial))
+    thread.messages.push({ id: randomUUID(), role: 'agent', text: partial, requestId, createdAt: Date.now() });
 }
 export function resolveThread(state: State, threadId: string, isResolved: boolean): void {
   get(state.threads, threadId).isResolved = isResolved;

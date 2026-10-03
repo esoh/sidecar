@@ -158,4 +158,15 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   assert.equal(unselected.quote, undefined, 'an unselected follow-up must not inherit a previous message selection');
   const latest = await state();
   assert.deepEqual(latest.threads[passage.threadId].messages.filter((m: any) => m.role === 'user').map((m: any) => m.selections?.[0].quote.exact), [exact, 'three', undefined]);
+  await post('/agent/replies', { requestId: general.id, documentId: doc.id, threadId: general.threadId, text: 'Nothing else.' });
+  const source = latest.threads[req.threadId].messages.find((m: any) => m.role === 'agent');
+  const messageQuote = { threadId: req.threadId, messageId: source.id, exact: 'check the retry setting' };
+  const quoted = await (await post('/api/questions', { documentId: doc.id, threadId: passage.threadId, text: 'Clarify that reply?', messageQuote, clientMessageId: 'message-quote' })).json();
+  const quotedEvent = await eventCount(7);
+  assert.equal(quotedEvent.requestId, quoted.id);
+  assert.deepEqual(quotedEvent.messageQuote, messageQuote);
+  assert.equal(quotedEvent.quote, undefined);
+  const savedQuote = JSON.parse(await readFile(join(directory, 'state.json'), 'utf8'));
+  assert.deepEqual(savedQuote.requests[quoted.id].messageQuote, messageQuote);
+  assert.deepEqual(savedQuote.threads[quoted.threadId].messages.at(-1).messageQuote, messageQuote);
 });

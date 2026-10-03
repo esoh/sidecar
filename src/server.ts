@@ -6,7 +6,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFile, writeFile, realpath, mkdir, rename, unlink, rm } from 'node:fs/promises';
 import { basename, join, dirname, relative, isAbsolute, extname } from 'node:path';
 import { notifyCodex } from './agent.ts';
-import { observeCodex, readCodexActivity } from './codex-stream.ts';
+import { observeCodex, readCodexActivity, type CodexObserver } from './codex-stream.ts';
 import { ReplyStream, isStreamEvent } from './stream.ts';
 import { parseReply } from './reply-metadata.ts';
 import { readDocument } from './documents.ts';
@@ -14,6 +14,8 @@ import { readAppVersion } from './version.ts';
 import { libraryDocument, listLibrary, recordDocumentOpen } from './library.ts';
 import { claim, createThread, closeDocument, discardEmptyThread, nameThread, pinMessage, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, setSelectionVisibility, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput, type ReplyInput } from './store.ts';
 import { isPinStyle } from './pin-style.ts';
+import { stopRequest } from './store.ts';
+import { isMessageQuote } from './quote.ts';
 
 const rendererRequire = createRequire(import.meta.resolve('@plannotator/ui/components/BlockRenderer'));
 const rendererFonts = {
@@ -96,9 +98,51 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   let stream: ReplyStream | undefined;
   let directRequestId: string | undefined;
   let streamReady: Promise<void> | undefined;
-  let stopObserver: (() => void) | undefined;
+  let stopObserver: CodexObserver | undefined;
   let streamTimer: NodeJS.Timeout | undefined;
   let finalizing: Promise<void> | undefined;
+  let claudeControl: { turnId: string; seenAt: number; requestId?: string } | undefined;
+  let stopping: { stream: ReplyStream; turnId: string; timer: NodeJS.Timeout } | undefined;
+  let stopAttempt: { stream: ReplyStream; turnId: string } | undefined;
+  let stopError: string | undefined;
+  const controlTurn = (active = stream) => owner.agent === 'codex' ? active?.turnId : active && claudeControl?.requestId === active.route.requestId ? claudeControl.turnId : undefined;
+  function canStop(active = stream) {
+    const turnId = controlTurn(active);
+    return !!active && !!turnId && !active.done && get(store.read().requests, active.route.requestId).status === 'claimed' &&
+      (owner.agent === 'codex' ? active.isTurnActive && !!stopObserver?.canInterrupt(turnId) : !!claudeControl && Date.now() - claudeControl.seenAt < 2500);
+  }
+  function clearStop(forget = false) { clearTimeout(stopping?.timer); stopping = undefined; if (forget) stopAttempt = undefined; }
+  function stopFailed(active: ReplyStream) {
+    if (stream !== active || stopping?.stream !== active) return;
+    clearStop(); stopError = 'Stopping was not confirmed. The request may still be running.'; changed();
+  }
+  async function turnEnded(active: ReplyStream, turnId: string, status: string, answer?: string) {
+    const matches = controlTurn(active) === turnId || (stopAttempt?.stream === active && stopAttempt.turnId === turnId);
+    if (stream !== active || !matches) return;
+    active.endTurn(active.turnId ?? turnId);
+    if (stopAttempt?.stream === active && stopAttempt.turnId === turnId && status === 'interrupted') {
+      // Native completion can beat the last display hook. A fully marked answer
+      // still goes through ordinary completion, including its metadata/snapshot.
+      if (answer?.startsWith(active.prefix) && answer.trimEnd().endsWith(active.suffix)) {
+        await acceptStream({ messageId: `native-final:${turnId}`, turnId, index: 0, delta: answer, final: true });
+        if (active.done) { if (stream === active) stopFailed(active); return; }
+      }
+      // Claude's display hooks can still be in flight; the native turn has the final partial text.
+      if (answer) active.recoverPartial(answer);
+      const partial = active.text;
+      if (finalizing) await finalizing.catch(() => {});
+      if (stream !== active) return;
+      try {
+        await store.update(state => stopRequest(state, active.route.requestId, partial));
+        if (stream === active) { stream = undefined; stopObserver?.(); stopObserver = undefined; }
+        clearStop(true); stopError = undefined;
+      } catch { stopFailed(active); }
+    } else {
+      if (stopping?.stream === active) stopFailed(active);
+      active.fail('Agent turn ended before the reply was finalized. Send a complete reply to recover.');
+    }
+    changed();
+  }
   async function saveVersion(documentId: string, data: DocumentData) {
     const versions = join(directory, 'versions', documentId);
     await mkdir(versions, { recursive: true, mode: 0o700 });
@@ -133,7 +177,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     if (active.done && !finalizing) {
       finalizing = (async () => {
         await saveReply({ ...active.route, text: active.text, metadata: active.metadata });
-        if (stream === active) { stream = undefined; stopObserver?.(); stopObserver = undefined; }
+        if (stream === active) { stream = undefined; stopObserver?.(); stopObserver = undefined; clearStop(true); stopError = undefined; }
       })();
       try { await finalizing; }
       catch { active.error = 'Could not save the streamed reply. Send a complete reply to recover.'; changed(); }
@@ -207,7 +251,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     const delivered = directRequestId && state.requests[directRequestId];
     if (delivered && delivered.status === 'claimed' && !delivered.acceptedAt && !stream?.hasStarted) delivered.status = 'queued';
     for (const request of Object.values(state.requests)) if (request.status === 'queued' && request.acceptedAt) request.status = 'claimed';
-    return { ...state, appVersion, stream: stream?.snapshot() ?? null, lastLifecycle, activity: compacting ? 'compacting' : agentActivity, connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError, documents: Object.fromEntries(Object.values(state.documents).map(document => {
+    return { ...state, appVersion, stream: stream ? { ...stream.snapshot(), turnId: controlTurn(), canStop: canStop(), stopping: stopping?.stream === stream, stopError } : null, lastLifecycle, activity: compacting ? 'compacting' : agentActivity, connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError, documents: Object.fromEntries(Object.values(state.documents).map(document => {
       const cached = cache.get(document.id);
       return [document.id, { ...document, title: title(document), version: cached && 'data' in cached ? cached.data.version : null, error: cached && 'error' in cached ? cached.error : null }];
     })) };
@@ -221,10 +265,11 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     if (current.status !== 'claimed' || current.documentId !== route.documentId || current.threadId !== route.threadId) throw new DomainError('Claim the matching request before streaming', 409);
     if (!stream || stream.route.requestId !== current.id) {
       stopObserver?.(); stopObserver = undefined;
+      clearStop(true); stopError = undefined;
       const created = new ReplyStream(route); stream = created;
       streamReady = owner.agent === 'codex' ? (async () => {
         try {
-          const stop = await observeCodex(owner.sessionId, event => { if (stream === created) void acceptStream(event); }, message => { if (stream === created) { created.fail(message); changed(); } }, undefined, [created.prefix, created.progress.prefix]);
+          const stop = await observeCodex(owner.sessionId, event => { if (stream === created) void acceptStream(event); }, message => { if (stream === created) { created.fail(message); stopFailed(created); changed(); } }, undefined, [created.prefix, created.progress.prefix], (turnId, status) => { void turnEnded(created, turnId, status); });
           if (closed || stream !== created) { stop(); throw new Error('Sidecar stopped'); }
           stopObserver = stop;
         } catch (error) { created.fail('Streaming unavailable. Use a complete reply.'); changed(); throw error; }
@@ -244,7 +289,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     const questions = thread.messages.filter(message => message.role === 'user');
     const previous = questions[questions.findIndex(message => message.requestId === id) - 1];
     const quote = request.quote && { exact: request.quote.exact, ...(request.quote.sentence ? { sentence: request.quote.sentence } : {}) };
-    const context = { documentId: request.documentId, thread: { id: thread.id, lastRequestId: previous?.requestId ?? null, ...(thread.title ? { title: thread.title } : {}) }, text: request.text, ...(quote ? { quote } : {}) };
+    const context = { documentId: request.documentId, thread: { id: thread.id, lastRequestId: previous?.requestId ?? null, ...(thread.title ? { title: thread.title } : {}) }, text: request.text, ...(quote ? { quote } : {}), ...(request.messageQuote ? { messageQuote: request.messageQuote } : {}) };
     // ponytail: large contexts retain the fetch path; avoid OS argument and native watcher output limits.
     if (Buffer.byteLength(JSON.stringify(context)) > 48 * 1024) return notification;
     const result = await store.update(state => claim(state, id, {}));
@@ -422,6 +467,43 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       if (method === 'GET' && path === '/agent/status') { json(response, { ownerKey: ownerKey(owner), instanceId, state: 'running', connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError }); return; }
       if (method === 'POST' && path === '/agent/stop') { json(response, { ok: true }); setImmediate(() => { void close(); }); return; }
       const body = ['POST', 'PATCH'].includes(method) ? await bodyOf(request) : {};
+      const stopPath = path.match(/^\/api\/requests\/([^/]+)\/stop$/);
+      if (method === 'POST' && stopPath) {
+        const active = stream, turnId = text(body, 'turnId');
+        if (!active || active.route.requestId !== stopPath[1] || controlTurn(active) !== turnId || !canStop(active)) throw new DomainError('This Sidecar request has no interruptible active turn', 409);
+        if (!stopping) {
+          stopError = undefined;
+          stopAttempt = { stream: active, turnId };
+          stopping = { stream: active, turnId, timer: setTimeout(() => stopFailed(active), 10000) };
+          if (owner.agent === 'codex') void stopObserver?.interrupt(turnId).catch(() => stopFailed(active));
+        }
+        changed(); json(response, { ok: true }, 202); return;
+      }
+      if (method === 'POST' && path === '/agent/control') {
+        if (owner.agent !== 'claude' || text(body, 'ownerKey') !== ownerKey(owner)) throw new DomainError('Control belongs to another owner', 409);
+        const event = text(body, 'event'), turnId = text(body, 'turnId');
+        if (!turnId || turnId.length > 256 || !['poll', 'started', 'completed', 'interrupted', 'stop-failed'].includes(event)) throw new DomainError('Invalid native control event');
+        if (event === 'poll') {
+          claudeControl = { ...(claudeControl?.turnId === turnId ? claudeControl : {}), turnId, seenAt: Date.now() };
+          const stop = stopping?.turnId === turnId && stream === stopping.stream ? { requestId: stream.route.requestId, turnId } : undefined;
+          changed(); json(response, { ownerKey: ownerKey(owner), instanceId, ...(stop ? { stop } : {}) }); return;
+        }
+        if (event === 'started') {
+          const marker = text(body, 'marker');
+          if (stream && !stream.done && [stream.prefix, stream.progress.prefix].includes(marker)) {
+            claudeControl = { turnId, seenAt: Date.now(), requestId: stream.route.requestId };
+            changed();
+          }
+          json(response, { ok: true }); return;
+        }
+        if (event === 'stop-failed') { if (stream && stopping?.turnId === turnId) stopFailed(stream); }
+        else {
+          if (stream) await turnEnded(stream, turnId, event, optionalText(body, 'answer'));
+          if (claudeControl?.turnId === turnId) claudeControl = undefined;
+          changed();
+        }
+        json(response, { ok: true }); return;
+      }
       if (method === 'POST' && path === '/agent/lifecycle') {
         if (text(body, 'ownerKey') !== ownerKey(owner)) throw new DomainError('Lifecycle belongs to another owner', 409);
         const event = text(body, 'event');
@@ -474,6 +556,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         const input: SubmitInput = { documentId: text(body, 'documentId'), text: text(body, 'text'), clientMessageId: text(body, 'clientMessageId') };
         if (body.threadId !== undefined) input.threadId = text(body, 'threadId');
         if (body.quote !== undefined) { if (!isQuote(body.quote)) throw new DomainError('Invalid selection'); input.quote = body.quote; }
+        if (body.messageQuote !== undefined) { if (!isMessageQuote(body.messageQuote)) throw new DomainError('Invalid message quote'); input.messageQuote = body.messageQuote; }
         const result = await store.update(state => submit(state, input));
         changed(); json(response, result); return;
       }
@@ -540,7 +623,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
           else input.metadata = stream?.metadata;
         } else Object.assign(input, parseReply(text(body, 'text')));
         await saveReply(input);
-        if (stream?.route.requestId === input.requestId) { stream = undefined; stopObserver?.(); stopObserver = undefined; }
+        if (stream?.route.requestId === input.requestId) { stream = undefined; stopObserver?.(); stopObserver = undefined; clearStop(true); stopError = undefined; }
         changed(); json(response, { ok: true }); return;
       }
       throw new DomainError('Not found', 404);
@@ -556,6 +639,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   url = `http://127.0.0.1:${address.port}`;
   await Promise.all(Object.values(store.read().documents).map(refresh));
   const polling = setInterval(() => {
+    if (claudeControl?.seenAt && Date.now() - claudeControl.seenAt >= 2500) { claudeControl.seenAt = 0; changed(); }
     if (closed || refreshing) return;
     refreshing = true;
     void (async () => {
@@ -576,7 +660,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   }, 5000);
   async function close(): Promise<void> {
     if (closePromise) return closePromise;
-    closed = true; stopObserver?.(); clearTimeout(streamTimer); transportAbort.abort(); clearInterval(polling); clearInterval(heartbeat); clearInterval(activityPolling);
+    closed = true; stopObserver?.(); clearStop(); clearTimeout(streamTimer); transportAbort.abort(); clearInterval(polling); clearInterval(heartbeat); clearInterval(activityPolling);
     for (const response of [...viewers, ...agents.keys()]) response.end();
     closePromise = new Promise<void>((resolveClose, reject) => {
       const timer = setTimeout(() => server.closeAllConnections(), 100); timer.unref();

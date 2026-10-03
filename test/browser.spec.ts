@@ -23,6 +23,96 @@ async function answer(text: string) {
   await f.agent('/agent/replies', { requestId: request.id, documentId: request.documentId, threadId: request.threadId, text });
 }
 
+test('Stop requires a matching active turn and preserves partial text without interrupting on Enter', async ({ page }) => {
+  const doc = await f.register('stop.md');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Explain'); await input.press('Enter');
+  const request = await lastRequest();
+  const prepared = await (await f.agent(`/agent/requests/${request.id}/prepare`, {})).json();
+  const stop = page.getByRole('button', { name: 'Stop response', exact: true });
+  const control = (event: string) => f.agent('/agent/control', { ownerKey: ownerKey(f.owner), event, turnId: 'active-turn' });
+  await control('poll');
+  await expect(stop).toHaveCount(0);
+  await f.agent('/agent/stream-events', { ownerKey: ownerKey(f.owner), turnId: 'active-turn', messageId: 'reply', index: 0, delta: prepared.stream.prefix + 'Partial **answer**', final: false });
+  await f.agent('/agent/control', { ownerKey: ownerKey(f.owner), event: 'started', turnId: 'active-turn', marker: prepared.stream.prefix });
+  await expect(stop).toBeEnabled();
+  await input.press('Enter');
+  expect((await state()).stream.stopping).toBe(false);
+  await input.fill('Follow-up'); await expect(stop).toHaveCount(0);
+  await input.fill(''); await control('poll'); await expect(stop).toBeEnabled();
+  await stop.click(); await expect(stop).toBeDisabled();
+  await expect(page.getByText('Stopping…', { exact: true })).toBeVisible();
+  expect((await (await control('poll')).json()).stop).toEqual({ requestId: request.id, turnId: 'active-turn' });
+  await control('interrupted');
+  await expect(page.getByText('Stopped', { exact: true })).toBeVisible();
+  await expect(page.locator('.messages .message.agent')).toContainText('Partial answer');
+  await expect(stop).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByText('Stopped', { exact: true })).toBeVisible();
+});
+
+test('quotes from sent messages, floating windows and the dock keep their source and draft', async ({ page }) => {
+  const doc = await f.register('quotes.md');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Explain'); await input.press('Enter');
+  await expect(page.getByRole('log')).toContainText('Explain');
+  await answer('Alpha **bold** and `code` omega.');
+  const request = await lastRequest(), source = (await state()).threads[request.threadId].messages.at(-1);
+  const bubble = page.locator('.messages .message.agent .message-bubble');
+  const selectMessage = async (selector: string, keyboard = false) => page.locator(selector).evaluate((root, keyboard) => {
+    const range = document.createRange(); range.selectNodeContents(root.querySelector('p')!);
+    const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+    root.dispatchEvent(keyboard ? new KeyboardEvent('keyup', { key: 'Shift', bubbles: true }) : new MouseEvent('mouseup', { bubbles: true }));
+  }, keyboard);
+  await selectMessage('.messages .message.agent .message-bubble');
+  await expect(page.locator('.draft-selection')).toContainText('Alpha bold and code omega.');
+  await input.fill('Clarify'); await page.reload();
+  await expect(input).toHaveValue('Clarify');
+  await expect(page.locator('.draft-selection')).toContainText('Alpha bold and code omega.');
+  await input.press('Enter');
+  await expect(page.getByRole('log')).toContainText('Clarify');
+  const followup = await lastRequest();
+  expect(followup.messageQuote).toEqual({ threadId: request.threadId, messageId: source.id, exact: 'Alpha bold and code omega.' });
+  expect(followup.quote).toBeUndefined();
+  await expect(page.locator('#document mark')).toHaveCount(0);
+  await expect(page.locator('.messages .message-quote')).toContainText('Alpha bold and code omega.');
+  await bubble.hover();
+  await page.locator('.messages .message.agent').getByRole('button', { name: 'Pin message', exact: true }).click();
+  const floating = page.getByRole('dialog', { name: 'Pinned message', exact: true });
+  await expect(floating).toBeVisible();
+  await selectMessage('[aria-label="Pinned message"] .message-bubble');
+  await expect(page.locator('.draft-selection')).toContainText('Alpha bold and code omega.');
+  await page.getByRole('button', { name: 'Remove selection', exact: true }).click();
+  await expect(page.locator('.draft-selection')).toHaveCount(0);
+  await floating.getByRole('button', { name: 'Dock window', exact: true }).click();
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await selectMessage('.pinned-dock .message-bubble', true);
+  await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', request.threadId);
+  await expect(page.locator('.draft-selection')).toContainText('Alpha bold and code omega.');
+  await select(page, 'Hello world.');
+  await expect(page.locator('.draft-selection')).toContainText('Hello world.');
+  await expect(page.locator('.draft-selection')).not.toContainText('Alpha bold');
+  // A hidden conversation must retain its own draft when a different pinned source opens.
+  await answer('Follow-up answer.');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+  await input.fill('Other thread'); await input.press('Enter');
+  await expect(page.getByRole('log')).toContainText('Other thread');
+  await answer('Separate reply.');
+  const other = await lastRequest();
+  await selectMessage('.messages .message.agent .message-bubble');
+  await input.fill('Keep this quote');
+  await page.getByRole('button', { name: 'Hide conversations', exact: true }).click();
+  await selectMessage('.pinned-dock .message-bubble');
+  await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', request.threadId);
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await page.locator(`[data-thread-id="${other.threadId}"]`).click();
+  await expect(input).toHaveValue('Keep this quote');
+  await expect(page.locator('.draft-selection')).toContainText('Separate reply.');
+});
+
 test('pinned references retain selections and dock expansion after the last tab is removed', async ({ page }) => {
   const doc = await f.register('pins.md', '# Pins\n\nA useful passage.');
   await page.goto(`${f.url}/?document=${doc.id}`);
@@ -324,6 +414,25 @@ test('each agent selection has a persistent eye, stable reply link, and independ
   await page.getByRole('button', { name: 'Return to current' }).click();
   await expect(page.locator('#document')).toContainText('Replacement passage.');
   await expect(page.locator('#document mark').filter({ hasText: 'Second' })).toHaveCount(0);
+});
+
+test('agent source apostrophes locate rendered smart quotes and retain genuine passage changes', async ({ page }) => {
+  const first = "Before admission: the transfer chain must identify the same surviving party and referring CallSessions. The admission's recorded route and session destinations must also agree.";
+  const second = "The graph compares the original requested extension or phone number with the admission's recorded dialed address.";
+  const third = 'The requested destination can be a ring group or a location.';
+  const doc = await f.register('smart-quotes.md', '# Checks\n\n' + first.replace('CallSessions', '`CallSession`s') + '\n\n' + second + '\n\n' + third);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByLabel('Message', { exact: true }).fill('Highlight these');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByRole('log')).toContainText('Highlight these');
+  await answer('[[sidecar-meta ' + JSON.stringify({ highlights: [first, second, third].map(exact => ({ exact })) }) + ']]\nHere are the three passages.');
+  await expect(page.locator('.message-selection')).toHaveCount(3);
+  await expect(page.getByText('Passage changed', { exact: true })).toHaveCount(0);
+  await expect(page.locator('#document mark')).toHaveCount(5); // The code span splits the first passage into three marks.
+  await writeFile(join(f.directory, 'smart-quotes.md'), '# Checks\n\nChanged content.');
+  await expect(page.getByText('Passage changed', { exact: true })).toHaveCount(3);
+  await page.getByRole('button', { name: 'View original document' }).first().click();
+  await expect(page.getByRole('region', { name: 'Original document' }).locator('mark')).toHaveCount(3);
 });
 
 test('clicking a later agent highlight scrolls its own selection card into view', async ({ page }) => {

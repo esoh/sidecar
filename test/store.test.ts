@@ -24,6 +24,25 @@ test('retrying a question creates one request and rejects conflicting reuse', ()
   assert.throws(() => submit(state, { ...input, text: 'Different question' }));
 });
 
+test('message quotes retain their source, replace document selections, and deduplicate independently', () => {
+  const { state, input, other } = setup();
+  const original = submit(state, input);
+  claim(state, original.id, {});
+  reply(state, { requestId: original.id, documentId: original.documentId, threadId: original.threadId, text: 'An **important** detail.' });
+  const messageQuote = { threadId: original.threadId, messageId: state.threads[original.threadId]!.messages.at(-1)!.id, exact: 'important detail' };
+  const next = { ...input, text: 'Explain this', clientMessageId: 'quoted', messageQuote };
+  const request = submit(state, next);
+  assert.deepEqual(request.messageQuote, messageQuote);
+  assert.equal(request.quote, undefined);
+  assert.deepEqual(state.threads[request.threadId]!.messages[0]!.messageQuote, messageQuote);
+  assert.equal(state.threads[request.threadId]!.messages[0]!.selections, undefined);
+  assert.equal(submit(state, next).id, request.id);
+  assert.throws(() => submit(state, { ...next, messageQuote: { ...messageQuote, exact: 'Different' } }), /different content/);
+  assert.throws(() => submit(state, { ...next, clientMessageId: 'wrong-doc', documentId: other.id }), /another document/);
+  assert.throws(() => submit(state, { ...next, clientMessageId: 'missing', messageQuote: { ...messageQuote, messageId: 'missing' } }), /Message not found/);
+  assert.throws(() => submit(state, { ...next, clientMessageId: 'both', quote: { exact: 'doc', prefix: '', suffix: '', start: 0, end: 3, version: 'v' } }), /one selection/);
+});
+
 test('new user messages reopen resolved threads, while invalid submissions and retries retain resolution', () => {
   for (const quote of [undefined, { exact: 'hello', prefix: '', suffix: ' world', start: 0, end: 5, version: 'v1' }]) {
     const { state, input } = setup();
