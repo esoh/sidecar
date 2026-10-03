@@ -423,6 +423,7 @@ export function ConversationSidebar({
     [search, setSearch] = useState(''),
     [error, setError] = useState(''),
     [creating, setCreating] = useState(false),
+    [retrying, setRetrying] = useState(false),
     [isLeaving, setLeaving] = useState(false);
   const readKey = 'sidecar-read-reply:';
   const [readReplies, setReadReplies] = useState<Record<string, string>>(() => {
@@ -456,11 +457,13 @@ export function ConversationSidebar({
     atBottom = useRef(true);
   const handledJump = useRef<number | null>(null);
   const active = threads.find((thread) => thread.id === activeId);
+  const recovering = requests.find(request => request.threadId === activeId && request.replyRecovery && ['claimed', 'uncertain'].includes(request.status));
   const requestStatuses = new Map(requests.map((request) => [request.id, request.status]));
   const requestGroups = new Map(requests.map(request => [request.id, request.batchId ?? request.id]));
+  const recoveryStatuses = new Map(requests.map(request => [request.id, request.replyRecovery?.status]));
   const latestMessages = new Map(active?.messages.map(message => [requestGroups.get(message.requestId) ?? message.requestId, message.id]));
   const inProgress = new Set(
-    requests.filter((request) => request.status === 'claimed').map((request) => request.threadId),
+    requests.filter((request) => request.status === 'claimed' && recoveryStatuses.get(request.batchId ?? request.id) !== 'failed').map((request) => request.threadId),
   );
   const queuedThreads = new Set(
     requests.filter((request) => request.status === 'queued').map((request) => request.threadId),
@@ -567,7 +570,7 @@ export function ConversationSidebar({
       ? requests
           .filter(
             (request) =>
-              request.threadId === active.id && (request.status === 'uncertain' || request.status === 'failed'),
+              request.threadId === active.id && !request.replyRecovery && (request.status === 'uncertain' || request.status === 'failed'),
           )
           .map((request) => request.status)
       : [],
@@ -691,7 +694,7 @@ export function ConversationSidebar({
                     <MessageContent message={message} documentId={documentId} threadId={active.id} activeSelectionId={activeSelectionId} passageChanged={passageChanged} showPassage={showPassage} showOriginal={showOriginal} onQuoteMessage={onQuoteMessage} onGoToMessage={onGoToMessage} />
                     <MessageActions message={message} threadId={active.id} onPinned={() => onOpenPin(message.id)} />
                   </div>
-                  {isLatest && !hasStreamedReply && (status === 'queued' || status === 'claimed' || status === 'stopped') && (
+                  {isLatest && requestId !== recovering?.id && !hasStreamedReply && (status === 'queued' || status === 'claimed' || status === 'stopped') && (
                     <div className="message-status" role="status">
                       {status === 'stopped' ? 'Stopped' : status === 'queued' ? 'Queued' : 'Working…'}
                     </div>
@@ -719,7 +722,18 @@ export function ConversationSidebar({
                   .join(' ')}
               </p>
             )}
-            {stream?.threadId === active.id && stream.error && <p role="alert">{stream.error}</p>}
+            {recovering?.replyRecovery && <div className="request-status" role={recovering.replyRecovery.status === 'failed' ? 'alert' : 'status'}>
+              {recovering.replyRecovery.status === 'failed' ? <>
+                <p>Reply couldn’t be saved.</p>
+                <button type="button" disabled={retrying} onClick={async () => {
+                  setRetrying(true); setError('');
+                  try { await api(`/api/requests/${recovering.id}/retry-reply`, { recoveryId: recovering.replyRecovery?.id }); }
+                  catch (reason) { setError(errorText(reason)); }
+                  finally { setRetrying(false); }
+                }}>Retry saving reply</button>
+              </> : 'Reply wasn’t saved; recovering…'}
+            </div>}
+            {!recovering && stream?.threadId === active.id && stream.error && <p role="alert">Reply could not be saved. Check the attached agent’s connection.</p>}
           </div>
           <QuestionForm
             key={active.id}

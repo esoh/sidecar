@@ -66,7 +66,7 @@ export function register(on) {
     if (activeTurn === e.turnId) { timer?.cancel(); activeTurn = undefined; }
     try {
       const post = await connect($);
-      await post?.(e.isAborted ? 'interrupted' : 'completed', e.turnId, e.isAborted ? e.answer : undefined);
+      await post?.(e.isAborted ? 'interrupted' : 'completed', e.turnId, e.answer);
     } catch { /* Closing Sidecar must not interfere with the native turn. */ }
     return next(e);
   });

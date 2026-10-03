@@ -113,6 +113,12 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   let stopObserver: CodexObserver | undefined;
   let streamTimer: NodeJS.Timeout | undefined;
   let finalizing: Promise<void> | undefined;
+  let captureWork: Promise<unknown> = Promise.resolve();
+  function capture<T>(work: () => Promise<T>): Promise<T> {
+    const next = captureWork.then(work);
+    captureWork = next.catch(() => {});
+    return next;
+  }
   let claudeControl: { turnId: string; seenAt: number; requestId?: string } | undefined;
   let stopping: { stream: ReplyStream; turnId: string; timer: NodeJS.Timeout } | undefined;
   let stopAttempt: { stream: ReplyStream; turnId: string } | undefined;
@@ -132,13 +138,13 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     const matches = controlTurn(active) === turnId || (stopAttempt?.stream === active && stopAttempt.turnId === turnId);
     if (stream !== active || !matches) return;
     active.endTurn(active.turnId ?? turnId);
+    // Native completion is authoritative even when display hooks are late.
+    if (answer?.startsWith(active.prefix) && answer.trimEnd().endsWith(active.suffix)) {
+      await acceptStream({ messageId: `native-final:${turnId}`, turnId, index: 0, delta: answer, final: true });
+      if (stream !== active) return;
+    }
     if (stopAttempt?.stream === active && stopAttempt.turnId === turnId && status === 'interrupted') {
-      // Native completion can beat the last display hook. A fully marked answer
-      // still goes through ordinary completion, including its metadata/snapshot.
-      if (answer?.startsWith(active.prefix) && answer.trimEnd().endsWith(active.suffix)) {
-        await acceptStream({ messageId: `native-final:${turnId}`, turnId, index: 0, delta: answer, final: true });
-        if (active.done) { if (stream === active) stopFailed(active); return; }
-      }
+      if (active.done) { stopFailed(active); return; }
       // Claude's display hooks can still be in flight; the native turn has the final partial text.
       if (answer) active.recoverPartial(answer);
       const partial = active.text;
@@ -151,7 +157,13 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       } catch { stopFailed(active); }
     } else {
       if (stopping?.stream === active) stopFailed(active);
-      active.fail('Agent turn ended before the reply was finalized. Send a complete reply to recover.');
+      active.fail('Reply could not be saved.');
+      await store.update(state => {
+        const request = get(state.requests, active.route.requestId);
+        if (request.status !== 'claimed' || request.replyRecovery?.turnId === turnId) return;
+        request.replyRecovery = { id: request.replyRecovery?.id ?? randomUUID(), turnId,
+          status: !request.replyRecovery && status === 'completed' ? 'pending' : 'failed' };
+      });
     }
     changed();
   }
@@ -217,10 +229,26 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   }
   function pending() {
     const requests = Object.values(store.read().requests);
-    if (requests.some(r => r.status === 'claimed')) return;
+    if (requests.some(r => r.status === 'claimed' || (r.status === 'uncertain' && r.replyRecovery))) return;
     return requests.find(r => (!r.batchId || r.batchId === r.id) && ['queued', 'uncertain'].includes(r.status));
   }
+  function pendingRecovery() {
+    return Object.values(store.read().requests).find(r => r.status === 'claimed' && r.replyRecovery?.status === 'pending');
+  }
+  async function recoveryFailed(id: string, recoveryId: string) {
+    await store.update(state => {
+      const request = state.requests[id];
+      if (request?.status === 'claimed' && request.replyRecovery?.id === recoveryId) request.replyRecovery.status = 'failed';
+    });
+    changed();
+  }
   function notifyAgent(response: ServerResponse, sent: Set<string>) {
+    const recovering = pendingRecovery();
+    if (recovering?.replyRecovery && !sent.has(recovering.replyRecovery.id) && !response.destroyed) {
+      response.write(JSON.stringify({ type: 'sidecar.recovery', ownerKey: ownerKey(owner), requestId: recovering.id, recoveryId: recovering.replyRecovery.id }) + '\n');
+      sent.add(recovering.replyRecovery.id);
+      return;
+    }
     const request = pending();
     if (request && !sent.has(request.id) && !response.destroyed) {
       response.write(JSON.stringify({ type: 'sidecar.request', ownerKey: ownerKey(owner), requestId: request.id }) + '\n');
@@ -229,6 +257,18 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   }
   async function dispatchCodex() {
     if (closed || owner.agent !== 'codex' || dispatching) return;
+    const recovering = pendingRecovery();
+    if (recovering?.replyRecovery) {
+      dispatching = true;
+      const { id } = recovering.replyRecovery;
+      try {
+        const event = await prepareRecovery(recovering.id, id);
+        if (event.type && !closed && get(store.read().requests, recovering.id).status === 'claimed') await notifyCodex(owner, event, transportAbort.signal);
+      } catch {
+        await recoveryFailed(recovering.id, id);
+      } finally { dispatching = false; changed(); }
+      return;
+    }
     const request = pending();
     if (!request || announced.has(request.id)) return;
     dispatching = true; announced.add(request.id);
@@ -262,7 +302,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     const state = store.read();
     // Show Working once native delivery succeeds; reserving the request alone is still Queued.
     const delivered = directRequestId && state.requests[directRequestId];
-    if (delivered && delivered.status === 'claimed' && !delivered.acceptedAt && !stream?.hasStarted) for (const member of requestBatch(state, delivered.id)) member.status = 'queued';
+    if (delivered && delivered.status === 'claimed' && !delivered.replyRecovery && !delivered.acceptedAt && !stream?.hasStarted) for (const member of requestBatch(state, delivered.id)) member.status = 'queued';
     for (const request of Object.values(state.requests)) if (request.status === 'queued' && request.acceptedAt) request.status = 'claimed';
     return { ...state, appVersion, stream: stream ? { ...stream.snapshot(), turnId: controlTurn(), canStop: canStop(), stopping: stopping?.stream === stream, stopError } : null, lastLifecycle, activity: compacting ? 'compacting' : agentActivity, connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError, documents: Object.fromEntries(Object.values(state.documents).map(document => {
       const cached = cache.get(document.id);
@@ -283,7 +323,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       const created = new ReplyStream(route); stream = created;
       streamReady = owner.agent === 'codex' ? (async () => {
         try {
-          const stop = await observeCodex(owner.sessionId, event => { if (stream === created) void acceptStream(event); }, message => { if (stream === created) { created.fail(message); stopFailed(created); changed(); } }, undefined, [created.prefix, created.progress.prefix], (turnId, status) => { void turnEnded(created, turnId, status); });
+          const stop = await observeCodex(owner.sessionId, event => { void capture(async () => { if (stream === created) await acceptStream(event); }); }, message => { if (stream === created) { created.fail(message); stopFailed(created); changed(); } }, undefined, [created.prefix, created.progress.prefix], (turnId, status, answer) => { void capture(() => turnEnded(created, turnId, status, answer)); });
           if (closed || stream !== created) { stop(); throw new Error('Sidecar stopped'); }
           stopObserver = stop;
         } catch (error) { created.fail('Streaming unavailable. Use a complete reply.'); changed(); throw error; }
@@ -298,6 +338,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     const notification = { type: 'sidecar.request', ownerKey: ownerKey(owner), requestId: id };
     const prepared = await store.update(state => {
       const request = get(state.requests, id);
+      if (request.replyRecovery && ['claimed', 'uncertain'].includes(request.status)) return { claimStatus: 'reply-recovery' };
       if (request.status === 'uncertain') return {};
       if (request.status !== 'queued') return { claimStatus: request.status === 'claimed' ? 'already-claimed' : 'completed' };
       prepareBatch(state, id);
@@ -318,6 +359,34 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     changed();
     return { ...notification, stream: markers, ...prepared.context,
       instruction: 'Follow the Sidecar skill.' };
+  }
+  function prepareRecovery(id: string, recoveryId: string): Promise<Record<string, unknown>> {
+    // Do not hand off a recovery while an earlier final answer is still saving.
+    return capture(() => reserveRecovery(id, recoveryId));
+  }
+  async function reserveRecovery(id: string, recoveryId: string): Promise<Record<string, unknown>> {
+    const reserved = await store.update(state => {
+      const request = get(state.requests, id);
+      if (!['claimed', 'uncertain'].includes(request.status)) return false;
+      if (request.replyRecovery?.id !== recoveryId) throw new DomainError('This recovery has been replaced', 409);
+      if (request.replyRecovery.status !== 'pending') return false;
+      claim(state, id, { resume: true });
+      request.replyRecovery.status = 'sent';
+      return true;
+    });
+    if (!reserved) return { claimStatus: 'completed-or-delivered' };
+    const request = get(store.read().requests, id);
+    let markers: unknown;
+    try {
+      markers = await startReplyStream({ requestId: id, documentId: request.documentId, threadId: request.threadId });
+      if (stream?.done && stream.error) markers = { error: 'Use the complete-reply command.' };
+    }
+    catch { markers = { error: 'Use the complete-reply command.' }; }
+    if (closed || get(store.read().requests, id).status !== 'claimed') return { claimStatus: 'completed' };
+    changed();
+    return { type: 'sidecar.recovery', ownerKey: ownerKey(owner), requestId: id, recoveryId,
+      documentId: request.documentId, thread: { id: request.threadId }, stream: markers,
+      instruction: 'Follow the Sidecar skill. Reply recovery only: resend the existing answer using these exact markers. Do not repeat the original task, tools, or edits. If you cannot recover the answer, send an isError reply explaining that. Leave later queued messages for their own delivery.' };
   }
   const server = createServer((request, response) => { void handle(request, response); });
   server.requestTimeout = 10000;
@@ -513,7 +582,8 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         }
         if (event === 'stop-failed') { if (stream && stopping?.turnId === turnId) stopFailed(stream); }
         else {
-          if (stream) await turnEnded(stream, turnId, event, optionalText(body, 'answer'));
+          const active = stream;
+          if (active) await capture(() => turnEnded(active, turnId, event, optionalText(body, 'answer')));
           if (claudeControl?.turnId === turnId) claudeControl = undefined;
           changed();
         }
@@ -607,6 +677,26 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       }
       const preparePath = path.match(/^\/agent\/requests\/([^/]+)\/prepare$/);
       if (method === 'POST' && preparePath?.[1]) { json(response, await prepareNotification(preparePath[1])); return; }
+      const recoverPath = path.match(/^\/agent\/requests\/([^/]+)\/recover$/);
+      if (method === 'POST' && recoverPath) { json(response, await prepareRecovery(recoverPath[1], text(body, 'recoveryId'))); return; }
+      const recoveryFailedPath = path.match(/^\/agent\/requests\/([^/]+)\/recovery-failed$/);
+      if (method === 'POST' && recoveryFailedPath) {
+        await recoveryFailed(recoveryFailedPath[1], text(body, 'recoveryId'));
+        json(response, { ok: true }); return;
+      }
+      const retryPath = path.match(/^\/api\/requests\/([^/]+)\/retry-reply$/);
+      if (method === 'POST' && retryPath) {
+        const recoveryId = text(body, 'recoveryId');
+        await capture(async () => {
+          await store.update(state => {
+            const request = get(state.requests, retryPath[1]);
+            if (!['claimed', 'uncertain'].includes(request.status) || request.replyRecovery?.id !== recoveryId || request.replyRecovery.status !== 'failed') throw new DomainError('This reply no longer needs that retry', 409);
+            claim(state, request.id, { resume: true });
+            request.replyRecovery = { id: randomUUID(), turnId: request.replyRecovery.turnId, status: 'pending' };
+          });
+        });
+        changed(); json(response, { ok: true }, 202); return;
+      }
       const claimPath = path.match(/^\/agent\/requests\/([^/]+)\/claim$/);
       if (method === 'POST' && claimPath?.[1]) {
         const id = claimPath[1];
@@ -627,7 +717,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       if (method === 'POST' && path === '/agent/stream-events') {
         if (text(body, 'ownerKey') !== ownerKey(owner) || owner.agent !== 'claude') throw new DomainError('Stream belongs to another owner', 409);
         if (!isStreamEvent(body)) throw new DomainError('Invalid stream event');
-        await acceptStream(body); json(response, { ok: true }); return;
+        await capture(() => acceptStream(body)); json(response, { ok: true }); return;
       }
       if (method === 'POST' && path === '/agent/replies') {
         const input: ReplyInput = { requestId: text(body, 'requestId'), documentId: text(body, 'documentId'), threadId: text(body, 'threadId'), text: '', isError: body.isError === undefined ? false : boolean(body, 'isError') };
@@ -637,8 +727,10 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
           if (previous) input.isError = previous.isError;
           else input.metadata = stream?.metadata;
         } else Object.assign(input, parseReply(text(body, 'text')));
-        await saveReply(input);
-        if (stream?.route.requestId === input.requestId) { stream = undefined; stopObserver?.(); stopObserver = undefined; clearStop(true); stopError = undefined; }
+        await capture(async () => {
+          await saveReply(input);
+          if (stream?.route.requestId === input.requestId) { stream = undefined; stopObserver?.(); stopObserver = undefined; clearStop(true); stopError = undefined; }
+        });
         changed(); json(response, { ok: true }); return;
       }
       throw new DomainError('Not found', 404);
@@ -681,7 +773,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       const timer = setTimeout(() => server.closeAllConnections(), 100); timer.unref();
       server.close(error => { clearTimeout(timer); if (error) reject(error); else resolveClose(); });
     });
-    await closePromise; await dispatchWork; await finalizing; finish();
+    await closePromise; await dispatchWork; await captureWork; await finalizing; finish();
   }
   changed();
   return { url, close, instanceId, done };
