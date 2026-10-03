@@ -147,6 +147,8 @@ export function registerDocument(state: State, input: {path: string; title?: str
     state.documents[document.id] = document;
   }
   if (input.repoInfo !== undefined) document.repoInfo = structuredClone(input.repoInfo);
+  // The badge describes the declared root, so a root without Git metadata clears it.
+  else if (input.workspace !== undefined) delete document.repoInfo;
   if (input.workspace !== undefined) document.workspace = input.workspace;
   ensureGeneralThread(state, document.id);
   if (input.title?.trim()) document.providedTitle = input.title.trim();

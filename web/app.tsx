@@ -146,6 +146,8 @@ function App() {
     try { localStorage.setItem('sidecar-files-open', String(isFilesShown)); } catch { /* per-browser convenience only */ }
   }, [isFilesShown]);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
+  // Reselecting a file reloads it from disk.
+  const [previewNonce, setPreviewNonce] = useState(0);
   const filesResize = useResizablePanel({
     storageKey: 'sidecar-files-width',
     defaultWidth: 280,
@@ -247,6 +249,7 @@ function App() {
     window.getSelection()?.removeAllRanges();
     setOriginalMessageId(null);
     setPreviewPath(path);
+    setPreviewNonce((nonce) => nonce + 1);
     if (innerWidth <= 850) setFilesShown(false);
   };
   const clearSelection = useCallback(() => {
@@ -434,7 +437,8 @@ function App() {
   }, [composing, draftKey, clearSelection]);
   // Use Plannotator's editable-target guards; C only acts while the selection toolbar is open.
   useEffect(() => {
-    if (!selection || composing || choices) return;
+    // A file preview hides the document, so its passage shortcuts stay off.
+    if (!selection || composing || choices || previewPath) return;
     const shortcut = (event: KeyboardEvent) => {
       if (
         event.defaultPrevented ||
@@ -473,7 +477,7 @@ function App() {
       window.removeEventListener('keydown', shortcut);
       document.removeEventListener('copy', copy);
     };
-  }, [selection, composing, choices, openComment]);
+  }, [selection, composing, choices, openComment, previewPath]);
   // Plannotator dismisses the quick menu and pending highlight on an outside press.
   useEffect(() => {
     if (!selection || composing) return;
@@ -518,7 +522,7 @@ function App() {
     return lastRect.current;
   }, [selection, choices]);
   usePosition(composer, composing ? anchor : null, 384);
-  usePosition(toolbar, (selection && !composing) || choices ? anchor : null, choices ? 300 : 76, !choices);
+  usePosition(toolbar, !previewPath && ((selection && !composing) || choices) ? anchor : null, choices ? 300 : 76, !choices);
 
   function captureSelection() {
     if (sendingComment.current) return;
@@ -752,7 +756,7 @@ function App() {
         <main className="canvas">
           <div className="reading-width">
             {previewPath && (
-              <FilePreview key={previewPath} documentId={documentId} path={previewPath} onReturn={() => setPreviewPath(null)} />
+              <FilePreview key={`${current?.workspace}\n${previewPath}\n${previewNonce}`} documentId={documentId} path={previewPath} onReturn={() => setPreviewPath(null)} />
             )}
             {!previewPath && originalMessage?.quote && (
               <OriginalDocument
@@ -839,7 +843,7 @@ function App() {
           messageJump={messageJump}
         />
       </div>
-      {((selection && !composing) || choices) &&
+      {!previewPath && ((selection && !composing) || choices) &&
         createPortal(
           <div
             ref={toolbar}
@@ -883,6 +887,7 @@ function App() {
         )}
       {composing &&
         selection &&
+        !previewPath &&
         createPortal(
           <section ref={composer} className="floating comment-popover" role="dialog" aria-label="Comment on selection">
             <QuestionForm

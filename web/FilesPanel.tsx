@@ -25,7 +25,10 @@ export function FilesPanel({ documentId, root, activePath, onSelect }: {
         <span>Files</span>
         <button aria-label="Refresh files" title="Refresh files" onClick={() => fetchTree(root)}>Refresh</button>
       </div>
-      {isEmpty ? (
+      {/* FileBrowser shows Plannotator's Settings hint until the first fetch registers the root. */}
+      {!dir ? (
+        <p className="files-empty" role="status">Loading files…</p>
+      ) : isEmpty ? (
         <p className="files-empty">No previewable files in this workspace.</p>
       ) : (
         <FileBrowser

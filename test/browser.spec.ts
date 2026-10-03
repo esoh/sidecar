@@ -2488,3 +2488,57 @@ test('files panel handles empty workspaces, its own document and conversation na
   await expect(preview).toHaveCount(0);
   await expect(page.locator('#document')).toBeVisible();
 });
+
+test('files preview keeps passage commenting disabled when the conversation pane toggles', async ({ page }) => {
+  const root = await filesWorkspace({ 'other.md': '# Other\n\nOther text.\n' });
+  const doc = await f.register('main.md', '# Main\n\nAttach this passage please.\n');
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document')).toContainText('Attach this passage');
+  await select(page, 'Attach this passage');
+  await expect(page.locator('.draft-selection')).toContainText('Attach this passage');
+  await page.getByRole('button', { name: 'Show files' }).click();
+  await page.getByRole('complementary', { name: 'Files' }).getByTitle('other.md', { exact: true }).focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('region', { name: 'File preview' })).toBeVisible();
+  await page.getByRole('button', { name: 'Hide conversations' }).click();
+  await page.getByRole('button', { name: 'Show conversations' }).click();
+  await page.waitForTimeout(300);
+  await expect(page.locator('.annotation-toolbar')).toHaveCount(0);
+  await page.keyboard.press('c');
+  await page.waitForTimeout(300);
+  await expect(page.getByLabel('Comment', { exact: true })).toHaveCount(0);
+  await expect(page.locator('.draft-selection')).toContainText('Attach this passage');
+});
+
+test('files preview follows a re-declared workspace and reloads when reselected', async ({ page }) => {
+  const first = await filesWorkspace({ 'a.md': '# From first root\n' });
+  const second = await filesWorkspace({ 'a.md': '# From second root\n' });
+  const doc = await f.register('main.md', '# Main\n\nBody.\n');
+  await f.agent('/agent/documents', { path: doc.path, workspace: first });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Show files' }).click();
+  const panel = page.getByRole('complementary', { name: 'Files' }), preview = page.getByRole('region', { name: 'File preview' });
+  await panel.getByTitle('a.md', { exact: true }).click();
+  await expect(preview.getByRole('heading', { name: 'From first root' })).toBeVisible();
+  await f.agent('/agent/documents', { path: doc.path, workspace: second });
+  await expect(preview.getByRole('heading', { name: 'From second root' })).toBeVisible();
+  await writeFile(join(second, 'a.md'), '# Edited on disk\n');
+  await panel.getByTitle('a.md', { exact: true }).click();
+  await expect(preview.getByRole('heading', { name: 'Edited on disk' })).toBeVisible();
+});
+
+test('files panel never shows Plannotator settings hint while loading', async ({ page }) => {
+  await page.addInitScript(() => {
+    new MutationObserver(() => {
+      if (document.body?.textContent?.includes('No directories configured')) (window as unknown as { sawHint: boolean }).sawHint = true;
+    }).observe(document, { childList: true, subtree: true, characterData: true });
+  });
+  const root = await filesWorkspace({ 'a.md': '# A\n' });
+  const doc = await f.register('main.md', '# Main\n\nBody.\n');
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Show files' }).click();
+  await expect(page.getByRole('complementary', { name: 'Files' }).getByTitle('a.md', { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => (window as unknown as { sawHint?: boolean }).sawHint ?? false)).toBe(false);
+});

@@ -63,3 +63,13 @@ test('documents record the declared or Git workspace and badge it', async t => {
   assert.equal((await (await f.agent('/agent/documents', { path: doc.path })).json()).workspace, linked);
   assert.equal((await (await f.agent('/agent/documents', { path: doc.path, workspace: repo })).json()).workspace, repo);
 });
+
+test('a declared workspace without repository metadata clears the previous badge', async t => {
+  const plain = await realpath(await mkdtemp(join(tmpdir(), 'sidecar-plain-')));
+  t.after(() => rm(plain, { recursive: true, force: true }));
+  const f = await fixture(t), doc = await f.register();
+  await f.agent('/agent/documents', { path: doc.path, workspace: plain, repoInfo: { display: 'example', branch: 'main' } });
+  const moved = await (await f.agent('/agent/documents', { path: doc.path, workspace: plain })).json();
+  assert.equal(moved.workspace, plain);
+  assert.equal(moved.repoInfo, undefined);
+});
