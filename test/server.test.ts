@@ -5,6 +5,59 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fixture } from './support.ts';
 
+async function propose(f: Awaited<ReturnType<typeof fixture>>, documentId: string, before: string, after: string) {
+  const request = await (await f.view('/api/questions', { documentId, text: 'Propose', clientMessageId: `${documentId}-${before}` })).json();
+  await f.agent(`/agent/requests/${request.id}/claim`, {});
+  const response = await f.agent('/agent/replies', { requestId: request.id, documentId, threadId: request.threadId, text: `[[sidecar-meta ${JSON.stringify({ highlights: [{ exact: before, proposal: { before, after } }] })}]]\nReview this.` });
+  assert.equal(response.status, 200);
+  const state = await (await f.view('/api/state')).json(), proposal = Object.values<any>(state.proposals).find(p => p.threadId === request.threadId);
+  return { request, proposal };
+}
+
+test('viewer proposal decisions enforce ownership and leave active native replies independent', async t => {
+  const f = await fixture(t), doc = await f.register('edit.md', '# Original\n');
+  const { request, proposal } = await propose(f, doc.id, '# Original', '# Accepted');
+  const other = await f.register('other.md', '# Other\n'), another = await propose(f, other.id, '# Other', '# Replaced');
+  assert.equal((await f.agent(`/api/proposals/${proposal.id}/decision`, { decision: 'accept' })).status, 403);
+  assert.equal((await f.view(`/api/proposals/${proposal.id}/decision`, { decision: 'write' })).status, 400);
+  assert.equal((await f.view(`/api/proposals/missing/decision`, { decision: 'accept' })).status, 404);
+  assert.equal((await f.view(`/api/threads/${another.request.threadId}/messages/${proposal.messageId}/proposals/accept`, {})).status, 404);
+  const next = await (await f.view('/api/questions', { documentId: doc.id, threadId: request.threadId, text: 'More work', clientMessageId: 'active' })).json();
+  await f.agent(`/agent/requests/${next.id}/claim`, {});
+  const route = { requestId: next.id, documentId: doc.id, threadId: request.threadId };
+  const markers = await (await f.agent('/agent/streams', route)).json();
+  await f.agent('/agent/stream-events', { ownerKey: `claude-${f.owner.sessionId}`, messageId: 'partial', turnId: 'active', index: 0, delta: markers.prefix + 'Still working', final: false });
+  const accepted = await f.view(`/api/proposals/${proposal.id}/decision`, { decision: 'accept', path: other.path, after: 'do not trust this' });
+  assert.equal(accepted.status, 200); assert.deepEqual((await accepted.json()).accepted, [proposal.id]);
+  assert.equal(await readFile(doc.path, 'utf8'), '# Accepted\n'); assert.equal(await readFile(other.path, 'utf8'), '# Other\n');
+  const active = await (await f.view('/api/state')).json();
+  assert.equal(active.requests[next.id].status, 'claimed'); assert.equal(active.stream.text, 'Still working');
+  const completion = await f.agent('/agent/replies', { ...route, text: '[[sidecar-meta {"highlights":[{"exact":"Accepted","proposal":{"before":"# Accepted","after":"# Next"}}]}]]\nNext suggestion.' });
+  assert.equal(completion.status, 200);
+  const saved = await (await f.view('/api/state')).json(); assert.equal(Object.keys(saved.proposals).length, 3);
+  await f.reopen();
+  assert.deepEqual((await (await f.view('/api/state')).json()).proposals, saved.proposals);
+  const context = await (await f.agent(`/agent/requests/${next.id}/claim`, {})).json();
+  assert.equal(context.proposals.find((p: any) => p.id === proposal.id).status, 'accepted');
+});
+
+test('source refresh marks stale proposals once and closing removes their state and shared snapshots', async t => {
+  const f = await fixture(t), doc = await f.register('stale.md', '# Original\n');
+  const { proposal } = await propose(f, doc.id, '# Original', '# Accepted');
+  await writeFile(doc.path, '# External edit\n');
+  await f.view(`/api/documents/${doc.id}`);
+  for (let i = 0; i < 100; i++) {
+    if ((await (await f.view('/api/state')).json()).proposals[proposal.id].status === 'outdated') break;
+    await delay(10);
+  }
+  const stale = await (await f.view('/api/state')).json(); assert.equal(stale.proposals[proposal.id].status, 'outdated');
+  assert.equal((await f.view(`/api/proposals/${proposal.id}/decision`, { decision: 'accept' })).status, 200);
+  assert.equal(await readFile(doc.path, 'utf8'), '# External edit\n');
+  assert.equal((await f.view(`/api/documents/${doc.id}`, undefined, 'DELETE')).status, 200);
+  assert.deepEqual((await (await f.view('/api/state')).json()).proposals, {});
+  await assert.rejects(readFile(join(f.directory, 'versions', doc.id, proposal.baseVersion + '.md')));
+});
+
 test('proposal capture isolates malformed and ambiguous source from a unique source with ambiguous visible text', async t => {
   const f = await fixture(t), markdown = '# Heading\n\nSee Heading.\n\nSame and Same.';
   const doc = await f.register('proposals.md', markdown);

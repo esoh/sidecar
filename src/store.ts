@@ -138,7 +138,7 @@ export function readSavedState(value: unknown): State {
     for (const id of write.proposalIds) {
       const proposal = get(state.proposals, id), range = write.appliedRanges[id];
       if (proposal.documentId !== write.documentId || range.end - range.start !== proposal.after.length ||
-        (write.status === 'prepared' ? proposal.status !== 'pending' : proposal.status !== 'outdated' || proposal.reason !== 'application-unconfirmed')) throw new Error('Malformed proposal write routing');
+        (write.status === 'prepared' ? proposal.status !== 'pending' : !['outdated', 'rejected'].includes(proposal.status) || proposal.reason !== 'application-unconfirmed')) throw new Error('Malformed proposal write routing');
     }
   }
   return state;
@@ -182,6 +182,8 @@ export function closeDocument(state: State, documentId: string): string[] {
   const threadIds = Object.values(state.threads).filter(thread => thread.documentId === documentId).map(thread => thread.id);
   for (const id of threadIds) delete state.threads[id];
   for (const request of requests) delete state.requests[request.id];
+  for (const proposal of Object.values(state.proposals)) if (proposal.documentId === documentId) delete state.proposals[proposal.id];
+  for (const write of Object.values(state.proposalWrites)) if (write.documentId === documentId) delete state.proposalWrites[write.id];
   delete state.documents[documentId];
   return threadIds;
 }
