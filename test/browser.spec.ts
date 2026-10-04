@@ -371,8 +371,9 @@ test('proposal window keeps controls reachable while long content scrolls and th
   await expect(dialog).toContainText('Rejected'); expect(await readFile(doc.path, 'utf8')).toBe(before);
 });
 
-test('proposal text size affects both previews and source diff and persists independently of reading settings', async ({ page }) => {
+test('proposal text size affects both previews and source diff and persists independently of reading settings', async ({ page, context }) => {
   await proposalReply(page);
+  await context.addCookies([{ name: 'sidecar-proposal-text-size', value: '140', url: f.url }]);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('slider', { name: 'Document text size', exact: true }).fill('120');
   await page.getByRole('slider', { name: 'Conversation text size', exact: true }).fill('90');
@@ -382,25 +383,27 @@ test('proposal text size affects both previews and source diff and persists inde
   const dialog = page.getByRole('dialog', { name: 'Proposed change', exact: true });
   const size = dialog.getByRole('slider', { name: 'Proposal text size', exact: true });
   await expect(size).toHaveValue('100');
+  await expect(size).toHaveAttribute('min', '25');
+  await expect(size).toHaveAttribute('max', '100');
   await dialog.locator('summary').click();
   const preview = dialog.locator('.proposal-after strong'), source = dialog.locator('diffs-container');
   await expect(source.locator('[data-code]').first()).toBeVisible();
   const previewBefore = (await preview.boundingBox())!, sourceBefore = (await source.boundingBox())!;
   const closeBefore = (await dialog.getByRole('button', { name: 'Close proposed change' }).boundingBox())!;
-  await size.fill('140');
-  await expect.poll(async () => (await preview.boundingBox())!.height).toBeGreaterThan(previewBefore.height * 1.3);
-  await expect.poll(async () => (await source.boundingBox())!.height).toBeGreaterThan(sourceBefore.height * 1.3);
+  await size.fill('25');
+  await expect.poll(async () => (await preview.boundingBox())!.height).toBeLessThan(previewBefore.height * 0.3);
+  await expect.poll(async () => (await source.boundingBox())!.height).toBeLessThan(sourceBefore.height * 0.3);
   expect((await dialog.getByRole('button', { name: 'Close proposed change' }).boundingBox())!.height).toBe(closeBefore.height);
   await dialog.getByRole('button', { name: 'Close proposed change' }).click(); await expect(review).toBeFocused();
-  await review.click(); await expect(size).toHaveValue('140');
-  await page.reload(); await review.click(); await expect(size).toHaveValue('140');
+  await review.click(); await expect(size).toHaveValue('25');
+  await page.reload(); await review.click(); await expect(size).toHaveValue('25');
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.getByRole('slider', { name: 'Document text size', exact: true })).toHaveValue('120');
   await expect(page.getByRole('slider', { name: 'Conversation text size', exact: true })).toHaveValue('90');
   await page.getByRole('slider', { name: 'Document text size', exact: true }).fill('150');
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
-  await review.click(); await expect(size).toHaveValue('140');
+  await review.click(); await expect(size).toHaveValue('25');
   await dialog.getByRole('button', { name: 'Reset proposal text size', exact: true }).click(); await expect(size).toHaveValue('100');
 });
 
