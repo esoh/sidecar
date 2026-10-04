@@ -5,6 +5,7 @@ import type { Quote } from '../src/store.ts';
 import { api, errorText } from './api.ts';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
 import { excludedSelection, matchQuote, quoteRange, resolveQuote, selectionText, type TextMatch } from './selection.ts';
+import { revealRange } from './reveal-target.ts';
 
 export function OriginalDocument({
   documentId,
@@ -45,21 +46,30 @@ export function OriginalDocument({
       exceptSelectors: [excludedSelection],
       style: { className: 'annotation-highlight' },
     });
-    let frame = 0,
+    let frame = 0, paintedText = '',
       hasScrolled = false;
     const paint = () => {
       painter.removeAll();
-      setRenderedText(selectionText(root));
+      paintedText = selectionText(root);
+      setRenderedText(paintedText);
       const range = quoteRange(root, quote, quote.version);
       if (!range) return;
       painter.fromRange(range);
       for (const mark of painter.getDoms()) mark.setAttribute('data-active', '');
       if (!hasScrolled) {
+        revealRange(range);
         painter.getDoms()[0]?.scrollIntoView({ block: 'center' });
         hasScrolled = true;
       }
     };
     paint();
+    // HTML blocks finish rendering after this layout effect. Recheck their text
+    // without reacting to the highlighter's own wrapping/unwrapping mutations.
+    const observer = new MutationObserver(() => {
+      if (selectionText(root) === paintedText) return;
+      cancelAnimationFrame(frame); frame = requestAnimationFrame(paint);
+    });
+    observer.observe(root, { childList: true, subtree: true, characterData: true });
     const unsubscribe = onCodeHighlightSwap((element) => {
       if (!root.contains(element)) return;
       painter.removeAll();
@@ -68,6 +78,7 @@ export function OriginalDocument({
     });
     return () => {
       unsubscribe();
+      observer.disconnect();
       cancelAnimationFrame(frame);
       painter.dispose();
     };
