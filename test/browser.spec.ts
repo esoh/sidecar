@@ -581,6 +581,58 @@ test('each agent selection has a persistent eye, stable reply link, and independ
   await expect(page.locator('#document mark').filter({ hasText: 'Second' })).toHaveCount(0);
 });
 
+test('ambiguous highlights can be clarified in their original revision without changing the document or draft', async ({ page }) => {
+  const markdown = '# Review\n\n## Author Summary\n\nNew introduction.\n\nSee Author Summary.';
+  const doc = await f.register('duplicate.md', markdown);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Where did you edit?'); await input.press('Enter');
+  await expect(page.getByRole('log')).toContainText('Where did you edit?');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"Author Summary"}]}]]\nUnder [Author Summary](#selection-1).');
+  const badge = page.locator('.message-selection');
+  await expect(badge).toContainText('Multiple matching passages');
+  await expect(badge).not.toContainText('Passage changed');
+  await input.fill('Keep this draft');
+  await badge.getByRole('button', { name: 'Choose passage' }).click();
+  const original = page.getByRole('region', { name: 'Original document', exact: true });
+  await expect(original.getByRole('group', { name: 'Choose matching passage' }).getByRole('button')).toHaveCount(2);
+  await expect(original.locator('mark')).toHaveCount(0);
+  await original.getByRole('button', { name: 'Use passage 1', exact: true }).click();
+  await expect(original.locator('h2 mark')).toHaveText('Author Summary');
+  await expect(original.getByRole('group', { name: 'Choose matching passage' })).toHaveCount(0);
+  await expect(badge).not.toContainText('Multiple matching passages');
+  await page.getByRole('button', { name: 'Return to current' }).click();
+  await expect(page.locator('#document h2 mark')).toHaveText('Author Summary');
+  await expect(input).toHaveValue('Keep this draft');
+  expect(await readFile(join(f.directory, 'duplicate.md'), 'utf8')).toBe(markdown);
+  // Later edits above the passage must use context, not the original offset.
+  await writeFile(join(f.directory, 'duplicate.md'), '# Inserted above\n\n' + markdown);
+  await expect(page.locator('#document')).toContainText('Inserted above');
+  await expect(page.locator('#document h2 mark')).toHaveText('Author Summary');
+  await page.reload();
+  await expect(page.locator('#document h2 mark')).toHaveText('Author Summary');
+  await expect(input).toHaveValue('Keep this draft');
+  // The same words elsewhere must not take over a deleted heading's annotation.
+  await writeFile(join(f.directory, 'duplicate.md'), '# Review\n\nSee Author Summary.');
+  await expect(badge).toContainText('Selection context changed');
+  await expect(page.locator('#document mark')).toHaveCount(0);
+  await badge.getByRole('button', { name: 'View original document' }).click();
+  await expect(original.locator('h2 mark')).toHaveText('Author Summary');
+});
+
+test('agent prefix/suffix context disambiguates headings without a repair and missing originals explain the failure', async ({ page }) => {
+  const doc = await f.register('context.md', '# Review\n\n## Author Summary\n\nNew introduction.\n\nSee Author Summary.');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Point to it'); await input.press('Enter');
+  await expect(page.getByRole('log')).toContainText('Point to it');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"Author Summary","suffix":"\\nNew introduction."},{"exact":"Never existed"}]}]]\nHere.');
+  await expect(page.locator('#document h2 mark')).toHaveText('Author Summary');
+  await expect(page.locator('.message-selection').first()).not.toContainText('Multiple matching passages');
+  await page.locator('.message-selection').last().getByRole('button', { name: 'View original document' }).click();
+  await expect(page.getByRole('region', { name: 'Original document', exact: true })).toContainText('The selection could not be found in this saved version.');
+});
+
 test('agent source apostrophes locate rendered smart quotes and retain genuine passage changes', async ({ page }) => {
   const first = "Before admission: the transfer chain must identify the same surviving party and referring CallSessions. The admission's recorded route and session destinations must also agree.";
   const second = "The graph compares the original requested extension or phone number with the admission's recorded dialed address.";
@@ -761,7 +813,7 @@ test('file replacement preserves draft and focus; ambiguous or missing passages 
   await writeFile(replacement, '# After\n\n' + repeated + '\n\n' + repeated);
   await rename(replacement, join(f.directory, 'a.md'));
   await expect(page.locator('#document h1')).toHaveText('After');
-  await expect(page.locator('#threads').getByText('Passage changed', { exact: true })).toBeVisible();
+  await expect(page.locator('#threads').getByText('Multiple matching passages', { exact: true })).toBeVisible();
   await expect(page.locator('#document mark')).toHaveCount(0);
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Unfinished draft');
   await expect(page.getByLabel('Message', { exact: true })).toBeFocused();

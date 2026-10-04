@@ -5,6 +5,33 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fixture } from './support.ts';
 
+test('selection disambiguation is scoped, preserves the original revision and survives restart', async t => {
+  const f = await fixture(t), markdown = '# Author Summary\n\nSee Author Summary.';
+  const doc = await f.register('duplicate.md', markdown);
+  const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'Where?', clientMessageId: 'duplicate' })).json();
+  await f.agent(`/agent/requests/${request.id}/claim`, {});
+  await f.agent('/agent/replies', { requestId: request.id, documentId: doc.id, threadId: request.threadId, text: '[[sidecar-meta {"highlights":[{"exact":"Author Summary"}]}]]\nHere.' });
+  const before = await (await f.view('/api/state')).json();
+  const message = before.threads[request.threadId].messages.at(-1), selection = message.selections[0];
+  const expectedQuote = selection.quote;
+  const quote = { ...expectedQuote, start: 0, end: 14, suffix: '\nSee ', isPositionVerified: true };
+  const path = `/api/threads/${request.threadId}/selections/${selection.id}/anchor`;
+  const other = await (await f.view('/api/threads', { documentId: doc.id })).json();
+  assert.equal((await f.view(`/api/threads/${other.id}/selections/${selection.id}/anchor`, { expectedQuote, quote })).status, 404);
+  for (const invalid of [{ ...quote, exact: 'Different text' }, { ...quote, version: '0'.repeat(64) }, { ...quote, prefix: 'x'.repeat(513) }, { ...quote, isPositionVerified: 'yes' }]) {
+    assert.equal((await f.view(path, { expectedQuote, quote: invalid })).status, 400);
+  }
+  assert.equal((await f.view(path, { expectedQuote, quote })).status, 200);
+  assert.equal((await f.view(path, { expectedQuote, quote })).status, 200); // Retry is idempotent.
+  assert.equal((await f.view(path, { expectedQuote, quote: { ...quote, prefix: 'See ', suffix: '', start: 19, end: 33 } })).status, 409);
+  await f.reopen();
+  const after = await (await f.view('/api/state')).json();
+  assert.deepEqual(after.threads[request.threadId].messages, before.threads[request.threadId].messages.map((m: any) => m.id === message.id ? { ...m, selections: [{ ...selection, quote }] } : m));
+  assert.deepEqual(after.requests, before.requests);
+  assert.equal(await readFile(join(f.directory, 'duplicate.md'), 'utf8'), markdown);
+  assert.equal(await readFile(join(f.directory, 'versions', doc.id, `${quote.version}.md`), 'utf8'), markdown);
+});
+
 test('message annotation visibility is scoped, validated, and saved across restart', async t => {
   const f = await fixture(t), doc = await f.register();
   const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'Show both', clientMessageId: 'annotations' })).json();

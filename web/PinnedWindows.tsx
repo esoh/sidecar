@@ -27,7 +27,7 @@ export function PinnedWindows({ workspace, threads, files, root, documentId, ope
   onRevealFile: (path: string) => void;
   openRequests: string[]; onOpened: (ids: string[]) => void;
   onGoToMessage: (id: string) => void;
-} & Pick<MessageContentProps, 'activeSelectionId' | 'passageChanged' | 'showPassage' | 'showOriginal' | 'onQuoteMessage' | 'onOpenFileQuote'>) {
+} & Pick<MessageContentProps, 'activeSelectionId' | 'passageIssue' | 'showPassage' | 'showOriginal' | 'onQuoteMessage' | 'onOpenFileQuote'>) {
   // Array order records when a window was opened; docking, focus and tab order are independent.
   const [windows, setWindows] = useState<WindowPosition[]>([]);
   const [docked, setDocked] = useState<string[]>([]), [activeDock, setActiveDock] = useState<string | null>(null);

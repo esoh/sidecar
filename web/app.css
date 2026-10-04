@@ -1121,6 +1121,28 @@ pre code.pn-code[data-keep-layout] {
   padding: 0;
   color: var(--primary);
 }
+.original-selection-issue {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  font-size: 12px;
+}
+.original-selection-issue p { margin: 0 0 8px; }
+.original-selection-issue p:last-child { margin-bottom: 0; }
+.passage-candidates { display: grid; gap: 6px; max-height: 240px; overflow: auto; }
+.passage-candidates button {
+  display: flex; align-items: baseline; gap: 10px;
+  text-align: left; padding: 8px; border-radius: 6px;
+  border: 1px solid var(--border); background: transparent;
+  color: var(--subtle); font: inherit; line-height: 1.5; cursor: pointer;
+}
+.passage-candidates button > span:last-child { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+.passage-candidates button:disabled { opacity: .6; cursor: wait; }
+.passage-candidates button:hover, .passage-candidates button:focus-visible { background: var(--muted); }
+.passage-candidates strong { color: var(--foreground); font-weight: 600; }
+.passage-number { flex: none; color: var(--primary); font-variant-numeric: tabular-nums; }
 .original-banner {
   position: sticky;
   top: -1px;

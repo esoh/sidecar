@@ -1,6 +1,34 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { locateQuote, surroundingSentence } from '../web/selection.ts';
+import { locateQuote, matchQuote, resolveQuote, surroundingSentence } from '../web/selection.ts';
+
+test('duplicate agent quotes are ambiguous, not changed, and need explicit disambiguation', () => {
+  const text = 'Review\nAuthor Summary\nNew introduction.\nSee Author Summary.';
+  const quote = { exact: 'Author Summary', prefix: '', suffix: '', start: 0, end: 14, version: 'original' };
+  const result = matchQuote(text, quote, 'original');
+  assert.equal(result.status, 'ambiguous');
+  assert.equal(result.matches.length, 2);
+  assert.equal(matchQuote(text, { ...quote, suffix: '\nNew introduction.' }).status, 'found');
+  const resolved = resolveQuote(text, quote, result.matches[0]!);
+  assert.equal(resolved.isPositionVerified, true);
+  assert.equal(resolved.version, 'original');
+  assert.deepEqual(locateQuote(text, resolved, 'original'), result.matches[0]);
+  const shifted = 'Added above.\n' + text;
+  assert.deepEqual(locateQuote(shifted, resolved, 'later'), { start: 20, end: 34 });
+  assert.equal(matchQuote('No heading here.', resolved).status, 'missing');
+  assert.equal(matchQuote('Author Summary\nA different introduction.', resolved).status, 'context-changed');
+});
+
+test('verified positions disambiguate only their own immutable version', () => {
+  const text = ('x'.repeat(600) + 'same' + 'x'.repeat(600)).repeat(2);
+  const quote = { exact: 'same', prefix: '', suffix: '', start: 0, end: 4, version: 'original' };
+  const result = matchQuote(text, quote);
+  const resolved = resolveQuote(text, quote, result.matches[1]!);
+  assert.deepEqual(locateQuote(text, resolved, 'original'), result.matches[1]);
+  assert.equal(locateQuote(text, resolved, 'later'), null);
+  assert.equal(locateQuote(text, { ...resolved, isPositionVerified: undefined }, 'original'), null);
+  assert.throws(() => resolveQuote(text, quote, { start: 0, end: 4 }));
+});
 
 test('selection anchors use UTF-16 context and reject ambiguous matches', () => {
   const quote = { exact: '😀 code', prefix: 'prefix ', suffix: ' suffix', start: 7, end: 14, version: 'old' };

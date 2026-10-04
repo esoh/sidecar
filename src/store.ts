@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename, unlink } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 
 import { isQuote, isMessageQuote, isFileQuote, type FileQuote, type MessageQuote, type Quote } from './quote.ts';
 import type { ReplyMetadata } from './reply-metadata.ts';
@@ -322,6 +323,14 @@ export function setSelectionVisibility(state: State, threadId: string, isVisible
   const selections = get(state.threads, threadId).messages.flatMap(message => message.selections ?? []);
   if (selectionId && !selections.some(selection => selection.id === selectionId)) throw new DomainError('Selection not found', 404);
   for (const selection of selections) if (!selectionId || selection.id === selectionId) selection.isVisible = isVisible;
+}
+export function reanchorSelection(state: State, threadId: string, selectionId: string, expected: Quote, quote: Quote): void {
+  const selection = get(state.threads, threadId).messages.flatMap(message => message.selections ?? []).find(selection => selection.id === selectionId);
+  if (!selection) throw new DomainError('Selection not found', 404);
+  if (quote.exact !== selection.quote.exact || quote.version !== selection.quote.version || quote.prefix.length > 512 || quote.suffix.length > 512 || quote.isPositionVerified !== true || quote.sentence !== selection.quote.sentence) throw new DomainError('Only the original selection location can be clarified');
+  if (isDeepStrictEqual(selection.quote, quote)) return;
+  if (!isDeepStrictEqual(selection.quote, expected)) throw new DomainError('This selection was clarified in another view. Reopen it to use the saved location.', 409);
+  selection.quote = quote;
 }
 export function setMessageSelectionVisibility(state: State, threadId: string, messageId: string, isVisible: boolean): void {
   const message = get(state.threads, threadId).messages.find(message => message.id === messageId);

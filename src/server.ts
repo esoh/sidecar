@@ -13,7 +13,7 @@ import { readDocument } from './documents.ts';
 import { readAppVersion } from './version.ts';
 import { libraryDocument, listLibrary, recordDocumentOpen } from './library.ts';
 import { listFiles, readCode, readPreview } from './files.ts';
-import { claim, createThread, closeDocument, discardEmptyThread, nameThread, pinMessage, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, setSelectionVisibility, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput, type ReplyInput } from './store.ts';
+import { claim, createThread, closeDocument, discardEmptyThread, nameThread, pinMessage, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, reanchorSelection, setSelectionVisibility, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput, type ReplyInput } from './store.ts';
 import { isPinStyle } from './pin-style.ts';
 import { stopRequest, prepareBatch, requestBatch, setMessageSelectionVisibility, type State } from './store.ts';
 import { isMessageQuote, isFileQuote } from './quote.ts';
@@ -764,6 +764,23 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       if (method === 'POST' && resolution?.[1]) {
         const id = resolution[1], isResolved = boolean(body, 'isResolved');
         await store.update(state => resolveThread(state, id, isResolved)); changed(); json(response, { ok: true }); return;
+      }
+      const anchor = path.match(/^\/api\/threads\/([^/]+)\/selections\/([^/]+)\/anchor$/);
+      if (method === 'POST' && anchor) {
+        const expectedQuote = body.expectedQuote, quote = body.quote;
+        if (!isQuote(expectedQuote) || !isQuote(quote)) throw new DomainError('Invalid selection');
+        // Validate routing and the immutable version before accepting browser-confirmed offsets.
+        const preview = structuredClone(store.read());
+        reanchorSelection(preview, anchor[1], anchor[2], expectedQuote, quote);
+        if (!/^[a-f0-9]{64}$/.test(quote.version)) throw new DomainError('Original document unavailable', 404);
+        const documentId = get(preview.threads, anchor[1]).documentId;
+        try { await readDocument(join(directory, 'versions', documentId, `${quote.version}.md`)); }
+        catch (error) {
+          if (error instanceof Error && 'code' in error && error.code === 'ENOENT') throw new DomainError('Original document unavailable', 404);
+          throw error;
+        }
+        await store.update(state => reanchorSelection(state, anchor[1], anchor[2], expectedQuote, quote));
+        changed(); json(response, { ok: true }); return;
       }
       const visibility = path.match(/^\/api\/threads\/([^/]+)\/selections(?:\/([^/]+))?$/);
       if (method === 'POST' && visibility) {
