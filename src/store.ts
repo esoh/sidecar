@@ -323,6 +323,11 @@ export function setSelectionVisibility(state: State, threadId: string, isVisible
   if (selectionId && !selections.some(selection => selection.id === selectionId)) throw new DomainError('Selection not found', 404);
   for (const selection of selections) if (!selectionId || selection.id === selectionId) selection.isVisible = isVisible;
 }
+export function setMessageSelectionVisibility(state: State, threadId: string, messageId: string, isVisible: boolean): void {
+  const message = get(state.threads, threadId).messages.find(message => message.id === messageId);
+  if (!message) throw new DomainError('Message not found', 404);
+  for (const selection of message.selections ?? []) selection.isVisible = isVisible;
+}
 export function setTitle(state: State, documentId: string, title: string): void {
   const document = get(state.documents, documentId);
   if (title.trim()) document.userTitle = title.trim();

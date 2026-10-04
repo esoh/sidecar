@@ -15,7 +15,7 @@ import { libraryDocument, listLibrary, recordDocumentOpen } from './library.ts';
 import { listFiles, readCode, readPreview } from './files.ts';
 import { claim, createThread, closeDocument, discardEmptyThread, nameThread, pinMessage, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, setSelectionVisibility, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput, type ReplyInput } from './store.ts';
 import { isPinStyle } from './pin-style.ts';
-import { stopRequest, prepareBatch, requestBatch, type State } from './store.ts';
+import { stopRequest, prepareBatch, requestBatch, setMessageSelectionVisibility, type State } from './store.ts';
 import { isMessageQuote, isFileQuote } from './quote.ts';
 
 const rendererRequire = createRequire(import.meta.resolve('@plannotator/ui/components/BlockRenderer'));
@@ -769,6 +769,12 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       if (method === 'POST' && visibility) {
         const isVisible = boolean(body, 'isVisible');
         await store.update(state => setSelectionVisibility(state, visibility[1], isVisible, visibility[2]));
+        changed(); json(response, { ok: true }); return;
+      }
+      const messageVisibility = path.match(/^\/api\/threads\/([^/]+)\/messages\/([^/]+)\/selections$/);
+      if (method === 'POST' && messageVisibility) {
+        const isVisible = boolean(body, 'isVisible');
+        await store.update(state => setMessageSelectionVisibility(state, messageVisibility[1], messageVisibility[2], isVisible));
         changed(); json(response, { ok: true }); return;
       }
       const pin = path.match(/^\/api\/threads\/([^/]+)\/messages\/([^/]+)\/pin$/);
