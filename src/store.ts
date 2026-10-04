@@ -6,12 +6,13 @@ import { isDeepStrictEqual } from 'node:util';
 import { isQuote, isMessageQuote, isFileQuote, type FileQuote, type MessageQuote, type Quote } from './quote.ts';
 import type { ReplyMetadata } from './reply-metadata.ts';
 import { isPinStyle, type PinStyle } from './pin-style.ts';
+import { isPreparedProposal, isProposal, isProposalWrite, type PreparedProposal, type Proposal, type ProposalWrite } from './proposals.ts';
 
 export type Owner = { agent: 'codex' | 'claude'; sessionId: string };
 export { isQuote, type Quote } from './quote.ts';
 export type RepoInfo = { display: string; branch?: string };
 export type DocumentRecord = { id: string; path: string; generated: boolean; providedTitle?: string; userTitle?: string; repoInfo?: RepoInfo; workspace?: string };
-export type MessageSelection = { id: string; slug: string; quote: Quote; isVisible: boolean; label?: string };
+export type MessageSelection = { id: string; slug: string; quote: Quote; isVisible: boolean; label?: string; proposalError?: string };
 export type Message = { id: string; role: 'user' | 'agent'; text: string; requestId: string; createdAt: number; selections?: MessageSelection[]; messageQuote?: MessageQuote; fileQuote?: FileQuote; isPinned?: boolean; pinStyle?: PinStyle };
 export type Thread = { id: string; documentId: string; title?: string; createdAt?: number; isResolved: boolean; messages: Message[] };
 export type RequestRecord = {
@@ -20,10 +21,10 @@ export type RequestRecord = {
   submission: string; answer?: { text: string; isError: boolean }; acceptedAt?: number; batchId?: string;
   replyRecovery?: { id: string; turnId: string; status: 'pending' | 'sent' | 'failed' };
 };
-export type State = { version: 3; owner: Owner; documents: Record<string, DocumentRecord>; threads: Record<string, Thread>; requests: Record<string, RequestRecord> };
+export type State = { version: 4; owner: Owner; documents: Record<string, DocumentRecord>; threads: Record<string, Thread>; requests: Record<string, RequestRecord>; proposals: Record<string, Proposal>; proposalWrites: Record<string, ProposalWrite> };
 export type Store = { read(): State; update<T>(change: (draft: State) => T): Promise<T> };
 export type SubmitInput = { documentId: string; threadId?: string; text: string; quote?: Quote; messageQuote?: MessageQuote; fileQuote?: FileQuote; clientMessageId: string };
-export type ReplyInput = { requestId: string; documentId: string; threadId: string; text: string; isError?: boolean; metadata?: ReplyMetadata; selectionVersion?: string };
+export type ReplyInput = { requestId: string; documentId: string; threadId: string; text: string; isError?: boolean; metadata?: ReplyMetadata; selectionVersion?: string; proposalTargets?: Array<PreparedProposal | null> };
 export type ClaimResult = { claimStatus: 'claimed' | 'already-claimed' | 'completed' | 'uncertain'; request: RequestRecord };
 
 export class DomainError extends Error {
@@ -51,7 +52,7 @@ function isDocument(v: unknown): v is DocumentRecord {
 function isMessage(v: unknown): v is Message {
   if (isObject(v) && v.fileQuote !== undefined && (!isFileQuote(v.fileQuote) || v.role !== 'user' || v.messageQuote !== undefined || (Array.isArray(v.selections) && v.selections.length > 0))) return false;
   if (isObject(v) && v.messageQuote !== undefined && (!isMessageQuote(v.messageQuote) || v.role !== 'user' || (Array.isArray(v.selections) && v.selections.length > 0))) return false;
-  return isMessageFields(v) && !('quote' in v) && (v.selections === undefined || (Array.isArray(v.selections) && v.selections.length <= (v.role === 'user' ? 1 : 20) && v.selections.every(s => isObject(s) && string(s.id) && string(s.slug) && /^selection-[1-9][0-9]*$/.test(s.slug) && isQuote(s.quote) && typeof s.isVisible === 'boolean' && optionalString(s.label)) && new Set(v.selections.map(s => s.id)).size === v.selections.length && new Set(v.selections.map(s => s.slug)).size === v.selections.length));
+  return isMessageFields(v) && !('quote' in v) && (v.selections === undefined || (Array.isArray(v.selections) && v.selections.length <= (v.role === 'user' ? 1 : 20) && v.selections.every(s => isObject(s) && string(s.id) && string(s.slug) && /^selection-[1-9][0-9]*$/.test(s.slug) && isQuote(s.quote) && typeof s.isVisible === 'boolean' && optionalString(s.label) && (s.proposalError === undefined || (string(s.proposalError) && s.proposalError.length <= 160))) && new Set(v.selections.map(s => s.id)).size === v.selections.length && new Set(v.selections.map(s => s.slug)).size === v.selections.length));
 }
 function isMessageFields(v: unknown): v is Record<string, unknown> & { id: string } {
   return isObject(v) && string(v.id) && (v.role === 'user' || v.role === 'agent') && string(v.text) && string(v.requestId) && number(v.createdAt) && (v.isPinned === undefined || typeof v.isPinned === 'boolean') && (v.pinStyle === undefined || isPinStyle(v.pinStyle));
@@ -82,9 +83,9 @@ function records<T extends {id: string}>(v: unknown, check: (v: unknown) => v is
   return isObject(v) && Object.entries(v).every(([key, item]) => check(item) && key === item.id && /^[0-9a-f-]{36}$/i.test(key));
 }
 export function isState(v: unknown): v is State {
-  return isObject(v) && v.version === 3 && isOwner(v.owner) && records(v.documents, isDocument) && records(v.threads, isThread) && records(v.requests, isRequest);
+  return isObject(v) && v.version === 4 && isOwner(v.owner) && records(v.documents, isDocument) && records(v.threads, isThread) && records(v.requests, isRequest) && records(v.proposals, isProposal) && records(v.proposalWrites, isProposalWrite);
 }
-type LegacyState = Omit<State, 'version' | 'threads'> & { version: 1; threads: Record<string, LegacyThread> };
+type LegacyState = Omit<State, 'version' | 'threads' | 'proposals' | 'proposalWrites'> & { version: 1; threads: Record<string, LegacyThread> };
 function isLegacyState(v: unknown): v is LegacyState {
   return isObject(v) && v.version === 1 && isOwner(v.owner) && records(v.documents, isDocument) && records(v.threads, isLegacyThread) && records(v.requests, isRequest);
 }
@@ -101,9 +102,11 @@ export function readSavedState(value: unknown): State {
       }
       threads[thread.id] = migrateSelections(plain);
     }
-    state = { version: 3, owner: structuredClone(value.owner), documents: structuredClone(value.documents), requests: structuredClone(value.requests), threads };
+    state = { version: 4, owner: structuredClone(value.owner), documents: structuredClone(value.documents), requests: structuredClone(value.requests), threads, proposals: {}, proposalWrites: {} };
   } else if (isObject(value) && value.version === 2 && isOwner(value.owner) && records(value.documents, isDocument) && records(value.threads, isOldThread) && records(value.requests, isRequest)) {
-    state = { version: 3, owner: structuredClone(value.owner), documents: structuredClone(value.documents), requests: structuredClone(value.requests), threads: Object.fromEntries(Object.entries(value.threads).map(([id, thread]) => [id, migrateSelections(thread)])) };
+    state = { version: 4, owner: structuredClone(value.owner), documents: structuredClone(value.documents), requests: structuredClone(value.requests), threads: Object.fromEntries(Object.entries(value.threads).map(([id, thread]) => [id, migrateSelections(thread)])), proposals: {}, proposalWrites: {} };
+  } else if (isObject(value) && value.version === 3 && isOwner(value.owner) && records(value.documents, isDocument) && records(value.threads, isThread) && records(value.requests, isRequest)) {
+    state = { version: 4, owner: structuredClone(value.owner), documents: structuredClone(value.documents), requests: structuredClone(value.requests), threads: structuredClone(value.threads), proposals: {}, proposalWrites: {} };
   } else if (isState(value)) state = structuredClone(value);
   else throw new Error('Malformed Sidecar state; the existing file was preserved');
   const selectionIds = new Set<string>();
@@ -124,6 +127,20 @@ export function readSavedState(value: unknown): State {
       if (leader.batchId !== leader.id || leader.threadId !== request.threadId || leader.documentId !== request.documentId || leader.status !== request.status) throw new Error('Malformed request batch');
     }
   }
+  const proposedSelections = new Set<string>();
+  for (const proposal of Object.values(state.proposals)) {
+    const thread = get(state.threads, proposal.threadId), message = thread.messages.find(m => m.id === proposal.messageId);
+    if (thread.documentId !== proposal.documentId || message?.role !== 'agent' || !message.selections?.some(s => s.id === proposal.selectionId && !s.proposalError) || proposedSelections.has(proposal.selectionId)) throw new Error('Malformed proposal routing');
+    proposedSelections.add(proposal.selectionId);
+  }
+  for (const write of Object.values(state.proposalWrites)) {
+    get(state.documents, write.documentId);
+    for (const id of write.proposalIds) {
+      const proposal = get(state.proposals, id), range = write.appliedRanges[id];
+      if (proposal.documentId !== write.documentId || range.end - range.start !== proposal.after.length ||
+        (write.status === 'prepared' ? proposal.status !== 'pending' : proposal.status !== 'outdated' || proposal.reason !== 'application-unconfirmed')) throw new Error('Malformed proposal write routing');
+    }
+  }
   return state;
 }
 function migrateSelections(thread: OldThread): Thread {
@@ -138,7 +155,7 @@ export function get<T>(items: Record<string,T>, id: string): T {
 }
 export function createState(owner: Owner): State {
   ownerKey(owner);
-  return { version: 3, owner: structuredClone(owner), documents: {}, threads: {}, requests: {} };
+  return { version: 4, owner: structuredClone(owner), documents: {}, threads: {}, requests: {}, proposals: {}, proposalWrites: {} };
 }
 export function registerDocument(state: State, input: {path: string; title?: string; generated: boolean; repoInfo?: RepoInfo; workspace?: string}): DocumentRecord {
   if (!isAbsolute(input.path)) throw new DomainError('Document path must be absolute');
@@ -292,10 +309,18 @@ export function reply(state: State, input: ReplyInput): void {
   const thread = get(state.threads, request.threadId), id = randomUUID();
   if (!thread.title && input.metadata?.threadTitle) nameThread(state, thread.id, input.metadata.threadTitle);
   const selections = input.metadata?.highlights?.map((h, index): MessageSelection => {
-    if (!input.selectionVersion) throw new DomainError('Document version required for highlights');
-    return { id: index ? `${id}-${index + 1}` : id, slug: `selection-${index + 1}`, isVisible: !thread.isResolved, ...(h.label ? { label: h.label.trim() } : {}), quote: { exact: h.exact, prefix: h.prefix ?? '', suffix: h.suffix ?? '', start: 0, end: h.exact.length, version: input.selectionVersion } };
+    if (input.selectionVersion === undefined) throw new DomainError('Document version required for highlights');
+    return { id: index ? `${id}-${index + 1}` : id, slug: `selection-${index + 1}`, isVisible: !thread.isResolved, ...(h.label ? { label: h.label.trim() } : {}), ...(h.proposalError ? { proposalError: h.proposalError } : {}), quote: { exact: h.exact, prefix: h.prefix ?? '', suffix: h.suffix ?? '', start: 0, end: h.exact.length, version: input.selectionVersion } };
   });
-  thread.messages.push({ id, role: 'agent', text: answer.text, requestId: request.id, createdAt: Date.now(), ...(selections?.length ? { selections } : {}) });
+  const createdAt = Date.now();
+  for (const [index, target] of (input.proposalTargets ?? []).entries()) {
+    if (!target) continue;
+    const selection = selections?.[index], original = input.metadata?.highlights?.[index].proposal;
+    if (!selection || selection.proposalError || !original || target.before !== original.before || target.after !== original.after || !isPreparedProposal(target)) throw new DomainError('Invalid prepared proposal');
+    const proposalId = randomUUID();
+    state.proposals[proposalId] = { ...structuredClone(target), id: proposalId, documentId: request.documentId, threadId: thread.id, messageId: id, selectionId: selection.id, status: target.reason ? 'outdated' : 'pending', createdAt };
+  }
+  thread.messages.push({ id, role: 'agent', text: answer.text, requestId: request.id, createdAt, ...(selections?.length ? { selections } : {}) });
 }
 export function stopRequest(state: State, requestId: string, partial: string): void {
   const batch = requestBatch(state, requestId);
@@ -354,7 +379,7 @@ export async function openStore(directory: string, owner: Owner): Promise<Store>
     const value: unknown = JSON.parse(raw);
     const parsed = readSavedState(value);
     if (ownerKey(parsed.owner) !== ownerKey(owner)) throw new Error('State belongs to another owner');
-    if (isObject(value) && (value.version === 1 || value.version === 2)) {
+    if (isObject(value) && (value.version === 1 || value.version === 2 || value.version === 3)) {
       const backup = join(directory, `state.v${value.version}.backup.json`);
       try { await writeFile(backup, raw, { flag: 'wx', mode: 0o600 }); }
       catch (error) {

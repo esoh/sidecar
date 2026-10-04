@@ -1,4 +1,6 @@
-export type HighlightInput = { exact: string; prefix?: string; suffix?: string; label?: string };
+import { isProposalInput, type ProposalInput } from './proposals.ts';
+
+export type HighlightInput = { exact: string; prefix?: string; suffix?: string; label?: string; proposal?: ProposalInput; proposalError?: string };
 export type ReplyMetadata = { threadTitle?: string; highlights?: HighlightInput[]; isError?: boolean };
 
 const prefix = '[[sidecar-meta ';
@@ -23,7 +25,15 @@ export function parseReply(text: string): { text: string; metadata: ReplyMetadat
       if (shortLabel(value.threadTitle)) metadata.threadTitle = value.threadTitle.trim();
       if (typeof value.isError === 'boolean') metadata.isError = value.isError;
       // Preserve array positions: selection-N links must never slide onto another passage.
-      if (Array.isArray(value.highlights) && value.highlights.length <= 20 && value.highlights.every(highlight)) metadata.highlights = value.highlights;
+      if (Array.isArray(value.highlights) && value.highlights.length <= 20 && value.highlights.every(highlight)) metadata.highlights = value.highlights.map(h => ({
+        exact: h.exact,
+        ...(h.prefix !== undefined ? { prefix: h.prefix } : {}), ...(h.suffix !== undefined ? { suffix: h.suffix } : {}),
+        ...(h.label !== undefined ? { label: h.label } : {}),
+        ...(h.proposal === undefined ? {} : isProposalInput(h.proposal) ? { proposal: {
+          before: h.proposal.before, after: h.proposal.after,
+          ...(h.proposal.prefix !== undefined ? { prefix: h.proposal.prefix } : {}), ...(h.proposal.suffix !== undefined ? { suffix: h.proposal.suffix } : {}),
+        } } : { proposalError: 'This proposed change could not be prepared.' }),
+      }));
     }
   } catch { /* Invalid optional metadata must not prevent saving the answer. */ }
   return { text: text.slice(newline + 1), metadata };
