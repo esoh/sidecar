@@ -30,6 +30,7 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
       const m = JSON.parse(String(raw));
       if (m.method === 'initialize') socket.send(JSON.stringify({ id: m.id, result: {} }));
       if (m.method === 'thread/read' || m.method === 'thread/resume') socket.send(JSON.stringify({ id: m.id, result: { thread: { id: owner.sessionId, status: { type: 'active' } } } }));
+      if (m.method === 'thread/queue/list') socket.send(JSON.stringify({ id: m.id, result: { data: [], nextCursor: null } }));
     });
   });
   const server = await startServer({ owner, directory });

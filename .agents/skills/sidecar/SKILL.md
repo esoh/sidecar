@@ -122,7 +122,7 @@ While it works, continue independent terminal work if useful. Keep this request 
 
 Claude Monitor expires after at most 30 minutes. On expiry or stream exit, run `status --owner KEY`; re-arm Monitor only while state is running. The watcher prepares queued requests before printing them. Reconnecting does not redeliver an already prepared request. After an app restart, interrupted requests use the ID-only recovery path. Keep the terminal available for ordinary user work.
 
-Codex receives native `codex queue` notifications. The viewer shows Working after native delivery is accepted; this is a handoff indicator, not proof the model has started processing. A busy conversation answers when its client delivers the event. A notification error is visible in app status; fix native queue availability, then stop/reopen Sidecar.
+Codex receives native `codex queue` notifications. The viewer shows Working after native delivery is accepted; this is a handoff indicator, not proof the model has started processing. Sidecar starts its exact queued submission when the original session becomes idle, preserving the order of unrelated terminal messages. Explicit Reset withdraws stopped Sidecar submissions from the native queue before releasing later requests. Queue reconciliation belongs to the app; it requires no diagnostic agent turn or extra request-fetch command. A notification or queue-start error is visible in app status; reconnect the original session and use Reset when needed. Never re-enqueue a request merely because the agent appears idle.
 
 `stop --owner KEY` ends that app and watcher, preserving documents and threads. Browser close alone does not stop it. Never stop the agent conversation.
 
