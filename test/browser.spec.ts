@@ -1548,8 +1548,10 @@ test('composer stays in a narrow viewport and cancels without submitting', async
 });
 
 // Clicking a link's annotation must open its thread, not follow the underlying URL.
-test('link highlights stay in the viewer and overlapping threads can each be opened', async ({ page }) => {
-  const a = await f.register('a.md', '# Links\n\nRead [the docs](https://example.com) carefully.');
+for (const padded of [false, true]) test(`${padded ? 'Padded code' : 'External'} link highlights stay in the viewer and overlapping threads can each be opened`, async ({ page, context }) => {
+  const root = await filesWorkspace({ 'source.ts': 'export const value = 1;\n' });
+  const href = padded ? ` ${root}/source.ts:1 ` : 'https://example.com';
+  const a = await f.register('a.md', `# Links\n\nRead [the docs](${href}) carefully.`);
   await page.goto(`${f.url}/?document=${a.id}`);
   await expect(page.locator('#document')).toContainText('the docs');
   await select(page, 'the docs');
@@ -1565,13 +1567,15 @@ test('link highlights stay in the viewer and overlapping threads can each be ope
   await expect(page.locator('#document mark').filter({ hasText: /^docs$/ })).toBeVisible();
   for (const [text, id] of [['First question', first.threadId], ['Second question', second.threadId]]) {
     await page.locator('#document mark').filter({ hasText: /^docs$/ }).click();
-    await page.getByRole('button', { name: text, exact: true }).click();
+    await page.getByRole('button', { name: `Unnamed ${text}`, exact: true }).click();
     await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', id);
   }
   await page.reload();
   await page.locator('#document mark').filter({ hasText: /^docs$/ }).click();
-  await expect(page.getByRole('button', { name: 'First question', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Second question', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Unnamed First question', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Unnamed Second question', exact: true })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: /^File:/ })).toHaveCount(0);
+  expect(context.pages()).toHaveLength(1);
 });
 
 // Floating annotation controls must preserve reading position and the current conversation draft.
@@ -3067,6 +3071,46 @@ test('selection draft survives thread switches and reload, then each message own
   await expect.poll(() => page.locator('#document mark[data-active]').allTextContents().then(t => t.join(''))).toBe('Second passage.');
 });
 
+test('overlapping highlight choices identify their threads and bound long message previews', async ({ page }) => {
+  const doc = await f.register('overlap.md', '# Shared passage\n\nAlpha bravo charlie.');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const message = page.getByLabel('Message', { exact: true });
+  await expect(page.locator('#document')).toContainText('Alpha bravo charlie.');
+  const ids: string[] = [];
+  for (const title of ['First discussion', 'Second discussion']) {
+    if (ids.length) {
+      await page.getByRole('button', { name: 'Threads', exact: true }).click();
+      await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+      await expect(page.getByRole('heading', { name: 'Unnamed', exact: true })).toBeVisible();
+    }
+    await select(page, 'Alpha bravo');
+    await expect(page.locator('.sidebar .draft-selection')).toContainText('Alpha bravo');
+    await message.fill(`Question for **${title}**. ` + 'Long detail about this passage. '.repeat(80));
+    await message.press('Enter'); await expect(message).toHaveValue('');
+    const request = await lastRequest(); ids.push(request.threadId);
+    await f.agent(`/agent/threads/${request.threadId}/title`, { title });
+    await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible();
+  }
+  await page.locator('#document mark').filter({ hasText: 'Alpha bravo' }).click();
+  const choices = page.locator('.selection-actions');
+  await expect(choices.getByRole('button')).toHaveCount(2);
+  expect((await choices.locator('.highlight-choice-thread').allTextContents()).sort()).toEqual(['First discussion', 'Second discussion']);
+  for (const preview of await choices.locator('.highlight-choice-preview').all()) {
+    const text = await preview.textContent();
+    expect(text!.length).toBeLessThanOrEqual(241);
+    expect(text).not.toContain('**');
+    expect(text).toContain('…');
+    const size = await preview.evaluate(el => ({ height: el.getBoundingClientRect().height, lineHeight: parseFloat(getComputedStyle(el).lineHeight) }));
+    expect(size.height).toBeLessThanOrEqual(size.lineHeight * 2 + 1);
+  }
+  await page.screenshot({ path: '/private/tmp/sidecar-highlight-choices.png' });
+  await choices.getByRole('button', { name: /^First discussion / }).click();
+  await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', ids[0]);
+  await page.locator('#document mark').filter({ hasText: 'Alpha bravo' }).click();
+  await choices.getByRole('button', { name: /^Second discussion / }).click();
+  await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', ids[1]);
+});
+
 test('message history navigates identical selections within one thread and preserves per-message old versions', async ({ page }) => {
   const doc = await f.register('history.md', '# History\n\nAlpha bravo charlie.');
   await page.goto(`${f.url}/?document=${doc.id}`);
@@ -3080,11 +3124,11 @@ test('message history navigates identical selections within one thread and prese
   }
   const saved = (await state()).threads[id!].messages;
   await page.locator('#document mark').filter({ hasText: 'Alpha bravo' }).click();
-  await expect(page.locator('.selection-actions').getByRole('button', { name: 'First reference', exact: true })).toBeVisible();
-  await page.locator('.selection-actions').getByRole('button', { name: 'First reference', exact: true }).click();
+  await expect(page.locator('.selection-actions').getByRole('button', { name: 'Unnamed First reference', exact: true })).toBeVisible();
+  await page.locator('.selection-actions').getByRole('button', { name: 'Unnamed First reference', exact: true }).click();
   await expect(page.locator(`[data-message-id="${saved[0].id}"]`)).toHaveAttribute('data-active', 'true');
   await page.locator('#document mark').filter({ hasText: 'Alpha bravo' }).click();
-  await page.locator('.selection-actions').getByRole('button', { name: 'Second reference', exact: true }).click();
+  await page.locator('.selection-actions').getByRole('button', { name: 'Unnamed Second reference', exact: true }).click();
   await expect(page.locator(`[data-message-id="${saved[1].id}"]`)).toHaveAttribute('data-active', 'true');
   await writeFile(join(f.directory, 'history.md'), '# Changed\n\nDifferent passage.');
   await expect(page.locator('#document h1')).toHaveText('Changed');
@@ -3330,6 +3374,52 @@ test('file windows share the dock with pinned replies and reopen without duplica
   }).toBe(true);
 });
 
+test('typing a draft does not traverse an unchanged file tree', async ({ page }) => {
+  // Count real tree-data reads rather than timing the machine or depending on React internals.
+  await page.addInitScript(() => {
+    const json = Response.prototype.json;
+    let reads = 0;
+    Object.defineProperty(window, 'fileTreeReads', { get: () => reads });
+    Response.prototype.json = async function () {
+      const data = await json.call(this);
+      if (new URL(this.url).pathname === '/api/files' && Array.isArray(data.tree)) {
+        type FileNode = { name: string; children?: FileNode[] };
+        const observe = (nodes: FileNode[]) => {
+          for (const node of nodes) {
+            const name = node.name;
+            Object.defineProperty(node, 'name', { get: () => { reads++; return name; }, enumerable: true });
+            if (node.children) observe(node.children);
+          }
+        };
+        observe(data.tree);
+      }
+      return data;
+    };
+  });
+  const root = await filesWorkspace(Object.fromEntries(Array.from({ length: 1000 }, (_, i) => [`file-${i}.md`, `# File ${i}\n`])));
+  const doc = await f.register();
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true });
+  await input.pressSequentially('closed tree ');
+  await page.getByRole('button', { name: 'Show files' }).click();
+  const panel = page.getByRole('complementary', { name: 'Files' });
+  await expect(panel.locator('.file-tree-item')).toHaveCount(1000);
+  const reads = await page.evaluate(() => Reflect.get(window, 'fileTreeReads'));
+  expect(reads).toBeGreaterThan(0);
+  await input.pressSequentially('opened tree ');
+  const after = await page.evaluate(() => Reflect.get(window, 'fileTreeReads'));
+  expect(after).toBe(reads);
+  await expect(input).toHaveValue('closed tree opened tree ');
+  await expect.poll(() => page.evaluate(id => {
+    const draft = Object.keys(localStorage).find(key => key.startsWith(`sidecar-draft:${id}:`));
+    return draft && JSON.parse(localStorage.getItem(draft)!).text;
+  }, doc.id)).toBe('closed tree opened tree ');
+  await panel.getByTitle('file-0.md', { exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'File: file-0.md', exact: true })).toBeVisible();
+  await expect(panel.getByTitle('file-0.md', { exact: true })).toHaveClass(/active/);
+});
+
 test('files panel previews workspace files read-only and keeps drafts', async ({ page }) => {
   const root = await filesWorkspace({
     'docs/plan.md': '# Plan heading\n\nPlan body text.\n\n![chart](a.png)\n',
@@ -3503,6 +3593,26 @@ test('files panel never shows Plannotator settings hint while loading', async ({
   await page.getByRole('button', { name: 'Show files' }).click();
   await expect(page.getByRole('complementary', { name: 'Files' }).getByTitle('a.md', { exact: true })).toBeVisible();
   expect(await page.evaluate(() => (window as unknown as { sawHint?: boolean }).sawHint ?? false)).toBe(false);
+});
+
+test('whitespace-padded code links in replies open a file window and preserve the draft', async ({ page, context }) => {
+  const root = await filesWorkspace({ 'src/evidence.ts': 'export function readQueueAdmissionIdentity() {\n  return true;\n}\n' });
+  const doc = await f.register();
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Where is the reader?'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer(`See [readQueueAdmissionIdentity]( ${root}/src/evidence.ts:2 ).`);
+  const link = page.getByRole('log').getByRole('link', { name: 'readQueueAdmissionIdentity', exact: true });
+  await expect(link).toBeVisible();
+  await input.fill('Keep this question');
+  await link.click();
+  const file = page.getByRole('dialog', { name: 'File: src/evidence.ts', exact: true });
+  await expect(file.locator('pre code')).toContainText('return true;');
+  await expect(input).toHaveValue('Keep this question');
+  expect(page.url()).toContain(`document=${doc.id}`);
+  expect(context.pages()).toHaveLength(1);
 });
 
 test('file links in documents and replies open explicitly chosen files beyond the workspace too', async ({ page, context }) => {

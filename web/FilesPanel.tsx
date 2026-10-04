@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { FileBrowser } from '@plannotator/ui/components/sidebar/FileBrowser';
 import { setFileTreeBackend, useFileBrowser } from '@plannotator/ui/hooks/useFileBrowser';
 
 // Plannotator's file browser (MIT) over Sidecar's document-scoped listing; see THIRD_PARTY_NOTICES.md.
-export function FilesPanel({ documentId, root, workspace, activePath, reveal, onSelect, onRootChange }: {
+// Draft edits in the viewer must not traverse the unchanged file tree.
+export const FilesPanel = memo(function FilesPanel({ documentId, root, workspace, activePath, reveal, onSelect, onRootChange }: {
   documentId: string; root: string; workspace: string; activePath: string | null;
   reveal: { path: string; id: number } | null;
   onSelect: (absolutePath: string) => void; onRootChange: (path: string, revealPath?: string) => void;
@@ -80,7 +81,7 @@ export function FilesPanel({ documentId, root, workspace, activePath, reveal, on
           onToggleFolder={browser.toggleFolder}
           collapsedDirs={browser.collapsedDirs}
           onToggleCollapse={browser.toggleCollapse}
-          onSelectFile={onSelect}
+          onSelectFile={path => onSelect(path)}
           activeFile={root === '/' && activePath ? `/${activePath}` : activePath}
           onFetchAll={() => fetchAll([root])}
         />
@@ -88,4 +89,4 @@ export function FilesPanel({ documentId, root, workspace, activePath, reveal, on
       </div>
     </aside>
   );
-}
+});

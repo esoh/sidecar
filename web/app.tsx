@@ -31,9 +31,11 @@ import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
 import { ResizeHandle } from '@plannotator/ui/components/ResizeHandle';
 import { onCodeHighlightSwap } from '@plannotator/ui/utils/codeHighlight';
 import { usePosition } from './usePosition.ts';
+import { messagePreview } from './message-copy.ts';
 import { ProposalReviewContext, useProposalReview } from './ProposalReview.tsx';
 
 type Content = { html: string; markdown: string; version: string };
+const insideRoot = (path: string, root: string) => path.startsWith(`${root.replace(/\/$/, '')}/`);
 
 function keepsAttachment(target: EventTarget | null) {
   return target instanceof Element && !!target.closest('.sidebar .composer, .sidebar-header, .thread-row, .sidebar-toggle, .files-edge-toggle, .files-panel, .file-preview');
@@ -207,7 +209,7 @@ function App() {
     setComposing(false);
     setChoices(null);
   }, []);
-  const openPreview = (path: string, refusal?: string, kind: OpenFile['kind'] = 'doc', root = current?.workspace) => {
+  const openPreview = useCallback((path: string, refusal?: string, kind: OpenFile['kind'] = 'doc', root = current?.workspace) => {
     // Keep passage drafts; file windows cannot attach selections to the main document.
     clearPendingSelection();
     window.getSelection()?.removeAllRanges();
@@ -221,13 +223,12 @@ function App() {
     });
     setOpenPins(previous => [...previous, id]);
     if (innerWidth <= 850) setFilesShown(false);
-  };
-  const insideRoot = (path: string, root: string) => path.startsWith(`${root.replace(/\/$/, '')}/`);
-  async function allowRoot(directory: string) {
+  }, [clearPendingSelection, current?.workspace]);
+  const allowRoot = useCallback(async (directory: string) => {
     if (directory === current?.workspace) return directory;
     return (await api<{ root: string }>('/api/files/root', { documentId, directory })).root;
-  }
-  async function changeVisibleRoot(directory: string, revealPath?: string) {
+  }, [documentId, current?.workspace]);
+  const changeVisibleRoot = useCallback(async (directory: string, revealPath?: string) => {
     const visit = ++rootVisit.current;
     try {
       const root = await allowRoot(directory);
@@ -236,12 +237,12 @@ function App() {
       if (revealPath) { setPreviewPath(revealPath); setFileReveal(previous => ({ path: revealPath, id: (previous?.id ?? 0) + 1 })); }
       else setFileReveal(null);
     } catch (reason) { if (visit === rootVisit.current) setError(errorText(reason)); }
-  }
+  }, [allowRoot]);
   function revealFile(path: string) {
     const root = browserRoot && insideRoot(path, browserRoot) ? browserRoot : path.slice(0, path.lastIndexOf('/')) || '/';
     void changeVisibleRoot(root, path);
   }
-  async function openAbsoluteFile(absolutePath: string, kind?: OpenFile['kind']) {
+  const openAbsoluteFile = useCallback(async (absolutePath: string, kind?: OpenFile['kind']) => {
     const path = absolutePath.replace(/^\/\/+/, '/');
     const sourceRoot = browserRoot && insideRoot(path, browserRoot) ? browserRoot
       : current?.workspace && insideRoot(path, current.workspace) ? current.workspace : path.slice(0, path.lastIndexOf('/')) || '/';
@@ -249,7 +250,7 @@ function App() {
       const root = await allowRoot(sourceRoot);
       openPreview(path.slice(sourceRoot.replace(/\/$/, '').length + 1), undefined, kind ?? (isAnnotatableDocPath(path) ? 'doc' : 'code'), root);
     } catch (reason) { setError(errorText(reason)); }
-  }
+  }, [browserRoot, current?.workspace, allowRoot, openPreview]);
   const workspaceRoot = useRef<string | undefined>(undefined);
   workspaceRoot.current = current?.workspace;
   const resolveLink = (kind: 'doc' | 'code', target: string, baseDir?: string) => {
@@ -803,7 +804,7 @@ function App() {
         {isFilesShown && current?.workspace && (
           <>
             <FilesPanel key={`${documentId}:${browserRoot}`} documentId={documentId} root={browserRoot ?? current.workspace} workspace={current.workspace}
-              activePath={previewPath} reveal={fileReveal} onSelect={path => { void openAbsoluteFile(path); }} onRootChange={(path, revealPath) => { void changeVisibleRoot(path, revealPath); }} />
+              activePath={previewPath} reveal={fileReveal} onSelect={openAbsoluteFile} onRootChange={changeVisibleRoot} />
             <ResizeHandle
               {...filesResize.handleProps}
               className="files-resize"
@@ -917,17 +918,21 @@ function App() {
             }}
           >
             {choices ? (
-              choices.ids.map((id) => (
-                <button
+              choices.ids.map((id) => {
+                const entry = selectedMessages.find(({ selection }) => selection.id === id);
+                const preview = entry?.selection.label ?? (entry ? messagePreview(entry.message.text) : 'Open message');
+                return <button
                   key={id}
+                  className="highlight-choice"
                   onClick={(event) => {
                     clearSelection();
                     if (!proposalReview.open(id, event.currentTarget)) openMessage(id);
                   }}
                 >
-                  {(() => { const entry = selectedMessages.find(({ selection }) => selection.id === id); return entry?.selection.label ?? entry?.message.text ?? 'Open message'; })()}
-                </button>
-              ))
+                  <span className="highlight-choice-thread" title={entry?.thread.title ?? 'Unnamed'}>{entry?.thread.title ?? 'Unnamed'}</span>
+                  <span className="highlight-choice-preview">{preview.length > 240 ? `${preview.slice(0, 240)}…` : preview}</span>
+                </button>;
+              })
             ) : (
               <>
                 <button
