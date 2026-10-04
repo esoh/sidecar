@@ -2,7 +2,7 @@
 
 Date: 2026-10-03. Base: PR27, `ad3e4b55569b`.
 
-Status: the user approved the browser layout; this written design is for review before an implementation plan.
+The user approved the browser layout and then this written design on 2026-10-03. The [implementation plan](../plans/2026-10-03-proposed-document-edits.md) carries the task breakdown and verification gates.
 
 ## Intent and scope
 
