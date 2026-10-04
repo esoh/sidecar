@@ -2,21 +2,47 @@ import type { Quote } from '../src/store.ts';
 // Plannotator smartens prose quotes. These substitutions retain UTF-16 offsets
 // so both saved source anchors and browser selections locate the same DOM range.
 const plainQuotes = (text: string) => text.replace(/[‘’]/g, "'").replace(/[“”]/g, '"');
-export function locateQuote(text: string, quote: Quote) {
-  if (!quote.exact) return null;
+export type TextMatch = { start: number; end: number };
+export type QuoteMatch = { status: 'found' | 'missing' | 'ambiguous' | 'context-changed'; matches: TextMatch[] };
+export function matchQuote(text: string, quote: Quote, version?: string): QuoteMatch {
+  if (!quote.exact) return { status: 'missing', matches: [] };
   text = plainQuotes(text);
   const exact = plainQuotes(quote.exact), prefix = plainQuotes(quote.prefix), suffix = plainQuotes(quote.suffix);
-  const matches = [];
+  const matches: TextMatch[] = [], occurrences: TextMatch[] = [];
   for (let at = text.indexOf(exact); at !== -1; at = text.indexOf(exact, at + 1)) {
     const end = at + exact.length;
+    occurrences.push({ start: at, end });
     if (
       text.slice(Math.max(0, at - prefix.length), at) === prefix &&
       text.slice(end, end + suffix.length) === suffix
     )
       matches.push({ start: at, end });
-    if (matches.length > 1) return null;
   }
-  return matches[0] ?? null;
+  // Browser-confirmed offsets are meaningful only in the exact saved revision.
+  // Agent-supplied legacy offsets are placeholders and must never break ties.
+  const position = quote.isPositionVerified && version === quote.version && matches.find(match => match.start === quote.start && match.end === quote.end);
+  if (position) return { status: 'found', matches: [position] };
+  return matches.length ? { status: matches.length === 1 ? 'found' : 'ambiguous', matches }
+    : { status: occurrences.length ? 'context-changed' : 'missing', matches: occurrences };
+}
+export function locateQuote(text: string, quote: Quote, version?: string) {
+  const result = matchQuote(text, quote, version);
+  return result.status === 'found' ? result.matches[0] : null;
+}
+export function quoteIssue(text: string, quote: Quote, version?: string): string | null {
+  const result = matchQuote(text, quote, version);
+  if (result.status === 'ambiguous') return 'Multiple matching passages';
+  if (result.status === 'context-changed') return 'Selection context changed';
+  return result.status === 'missing' ? 'Passage changed' : null;
+}
+export function resolveQuote(text: string, quote: Quote, match: TextMatch): Quote {
+  if (match.start < 0 || match.end - match.start !== quote.exact.length || plainQuotes(text.slice(match.start, match.end)) !== plainQuotes(quote.exact)) throw new Error('Selection no longer matches');
+  let resolved = quote;
+  for (let length = 32; length <= 512; length *= 2) {
+    resolved = { ...quote, ...match, prefix: text.slice(Math.max(0, match.start - length), match.start), suffix: text.slice(match.end, match.end + length), isPositionVerified: true };
+    if (matchQuote(text, resolved).status === 'found') break;
+  }
+  return resolved;
 }
 
 export const excludedSelection =
@@ -63,8 +89,8 @@ export function selectionSentence(range: Range): string | undefined {
 }
 
 // Convert our UTF-16 text anchors to text-node endpoints for web-highlighter.
-export function quoteRange(article: HTMLElement, quote: Quote): Range | null {
-  const match = locateQuote(selectionText(article), quote);
+export function quoteRange(article: HTMLElement, quote: Quote, version?: string): Range | null {
+  const match = locateQuote(selectionText(article), quote, version);
   if (!match) return null;
   const range = document.createRange();
   let at = 0,

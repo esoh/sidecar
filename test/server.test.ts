@@ -5,6 +5,118 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fixture } from './support.ts';
 
+async function propose(f: Awaited<ReturnType<typeof fixture>>, documentId: string, before: string, after: string) {
+  const request = await (await f.view('/api/questions', { documentId, text: 'Propose', clientMessageId: `${documentId}-${before}` })).json();
+  await f.agent(`/agent/requests/${request.id}/claim`, {});
+  const response = await f.agent('/agent/replies', { requestId: request.id, documentId, threadId: request.threadId, text: `[[sidecar-meta ${JSON.stringify({ highlights: [{ exact: before, proposal: { before, after } }] })}]]\nReview this.` });
+  assert.equal(response.status, 200);
+  const state = await (await f.view('/api/state')).json(), proposal = Object.values<any>(state.proposals).find(p => p.threadId === request.threadId);
+  return { request, proposal };
+}
+
+test('viewer proposal decisions enforce ownership and leave active native replies independent', async t => {
+  const f = await fixture(t), doc = await f.register('edit.md', '# Original\n');
+  const { request, proposal } = await propose(f, doc.id, '# Original', '# Accepted');
+  const other = await f.register('other.md', '# Other\n'), another = await propose(f, other.id, '# Other', '# Replaced');
+  assert.equal((await f.agent(`/api/proposals/${proposal.id}/decision`, { decision: 'accept' })).status, 403);
+  assert.equal((await f.view(`/api/proposals/${proposal.id}/decision`, { decision: 'write' })).status, 400);
+  assert.equal((await f.view(`/api/proposals/missing/decision`, { decision: 'accept' })).status, 404);
+  assert.equal((await f.view(`/api/threads/${another.request.threadId}/messages/${proposal.messageId}/proposals/accept`, {})).status, 404);
+  const next = await (await f.view('/api/questions', { documentId: doc.id, threadId: request.threadId, text: 'More work', clientMessageId: 'active' })).json();
+  await f.agent(`/agent/requests/${next.id}/claim`, {});
+  const route = { requestId: next.id, documentId: doc.id, threadId: request.threadId };
+  const markers = await (await f.agent('/agent/streams', route)).json();
+  await f.agent('/agent/stream-events', { ownerKey: `claude-${f.owner.sessionId}`, messageId: 'partial', turnId: 'active', index: 0, delta: markers.prefix + 'Still working', final: false });
+  const accepted = await f.view(`/api/proposals/${proposal.id}/decision`, { decision: 'accept', path: other.path, after: 'do not trust this' });
+  assert.equal(accepted.status, 200); assert.deepEqual((await accepted.json()).accepted, [proposal.id]);
+  assert.equal(await readFile(doc.path, 'utf8'), '# Accepted\n'); assert.equal(await readFile(other.path, 'utf8'), '# Other\n');
+  const active = await (await f.view('/api/state')).json();
+  assert.equal(active.requests[next.id].status, 'claimed'); assert.equal(active.stream.text, 'Still working');
+  const completion = await f.agent('/agent/replies', { ...route, text: '[[sidecar-meta {"highlights":[{"exact":"Accepted","proposal":{"before":"# Accepted","after":"# Next"}}]}]]\nNext suggestion.' });
+  assert.equal(completion.status, 200);
+  const saved = await (await f.view('/api/state')).json(); assert.equal(Object.keys(saved.proposals).length, 3);
+  await f.reopen();
+  assert.deepEqual((await (await f.view('/api/state')).json()).proposals, saved.proposals);
+  const context = await (await f.agent(`/agent/requests/${next.id}/claim`, {})).json();
+  assert.equal(context.proposals.find((p: any) => p.id === proposal.id).status, 'accepted');
+});
+
+test('source refresh marks stale proposals once and closing removes their state and shared snapshots', async t => {
+  const f = await fixture(t), doc = await f.register('stale.md', '# Original\n');
+  const { proposal } = await propose(f, doc.id, '# Original', '# Accepted');
+  await writeFile(doc.path, '# External edit\n');
+  await f.view(`/api/documents/${doc.id}`);
+  for (let i = 0; i < 100; i++) {
+    if ((await (await f.view('/api/state')).json()).proposals[proposal.id].status === 'outdated') break;
+    await delay(10);
+  }
+  const stale = await (await f.view('/api/state')).json(); assert.equal(stale.proposals[proposal.id].status, 'outdated');
+  assert.equal((await f.view(`/api/proposals/${proposal.id}/decision`, { decision: 'accept' })).status, 200);
+  assert.equal(await readFile(doc.path, 'utf8'), '# External edit\n');
+  assert.equal((await f.view(`/api/documents/${doc.id}`, undefined, 'DELETE')).status, 200);
+  assert.deepEqual((await (await f.view('/api/state')).json()).proposals, {});
+  await assert.rejects(readFile(join(f.directory, 'versions', doc.id, proposal.baseVersion + '.md')));
+});
+
+test('proposal capture isolates malformed and ambiguous source from a unique source with ambiguous visible text', async t => {
+  const f = await fixture(t), markdown = '# Heading\n\nSee Heading.\n\nSame and Same.';
+  const doc = await f.register('proposals.md', markdown);
+  const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'Propose edits', clientMessageId: 'proposal' })).json();
+  await f.agent(`/agent/requests/${request.id}/claim`, {});
+  const highlights = [
+    { exact: 'Heading', proposal: { before: '# Heading', after: '# New heading' } },
+    { exact: 'Same', proposal: { before: 'Same', after: 'Different' } },
+    { exact: 'See Heading.', proposal: { before: '', after: 'Invalid' } },
+    { exact: 'Same and Same.' },
+  ];
+  assert.equal((await f.agent('/agent/replies', { requestId: request.id, documentId: doc.id, threadId: request.threadId, text: `[[sidecar-meta ${JSON.stringify({ highlights })}]]\nReview these.` })).status, 200);
+  const saved = await (await f.view('/api/state')).json(), proposals = Object.values<any>(saved.proposals), message = saved.threads[request.threadId].messages.at(-1);
+  assert.equal(proposals.length, 2); assert.deepEqual(proposals.map(p => p.status), ['pending', 'outdated']);
+  assert.equal(proposals[1].reason, 'ambiguous'); assert.equal(proposals[1].baseRange, null);
+  assert.equal(proposals[0].baseVersion, proposals[1].baseVersion);
+  assert.equal(message.selections.length, 4); assert.ok(message.selections[2].proposalError);
+  assert.equal(message.selections[3].slug, 'selection-4');
+  assert.equal(await readFile(doc.path, 'utf8'), markdown);
+});
+
+test('missing proposal source completes the answer without inventing a document revision', async t => {
+  const f = await fixture(t), doc = await f.register();
+  const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'Propose edit', clientMessageId: 'missing' })).json();
+  await f.agent(`/agent/requests/${request.id}/claim`, {}); await unlink(doc.path);
+  assert.equal((await f.agent('/agent/replies', { requestId: request.id, documentId: doc.id, threadId: request.threadId, text: '[[sidecar-meta {"highlights":[{"exact":"Hello world.","proposal":{"before":"Hello **world**.","after":"New wording"}}]}]]\nReview this.' })).status, 200);
+  const saved = await (await f.view('/api/state')).json(), proposed = Object.values<any>(saved.proposals)[0];
+  assert.equal(saved.requests[request.id].status, 'completed'); assert.equal(proposed.status, 'outdated');
+  assert.equal(proposed.reason, 'source-unavailable'); assert.equal(proposed.baseVersion, null);
+  assert.equal(saved.threads[request.threadId].messages.at(-1).selections[0].quote.version, '');
+});
+
+test('selection disambiguation is scoped, preserves the original revision and survives restart', async t => {
+  const f = await fixture(t), markdown = '# Author Summary\n\nSee Author Summary.';
+  const doc = await f.register('duplicate.md', markdown);
+  const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'Where?', clientMessageId: 'duplicate' })).json();
+  await f.agent(`/agent/requests/${request.id}/claim`, {});
+  await f.agent('/agent/replies', { requestId: request.id, documentId: doc.id, threadId: request.threadId, text: '[[sidecar-meta {"highlights":[{"exact":"Author Summary"}]}]]\nHere.' });
+  const before = await (await f.view('/api/state')).json();
+  const message = before.threads[request.threadId].messages.at(-1), selection = message.selections[0];
+  const expectedQuote = selection.quote;
+  const quote = { ...expectedQuote, start: 0, end: 14, suffix: '\nSee ', isPositionVerified: true };
+  const path = `/api/threads/${request.threadId}/selections/${selection.id}/anchor`;
+  const other = await (await f.view('/api/threads', { documentId: doc.id })).json();
+  assert.equal((await f.view(`/api/threads/${other.id}/selections/${selection.id}/anchor`, { expectedQuote, quote })).status, 404);
+  for (const invalid of [{ ...quote, exact: 'Different text' }, { ...quote, version: '0'.repeat(64) }, { ...quote, prefix: 'x'.repeat(513) }, { ...quote, isPositionVerified: 'yes' }]) {
+    assert.equal((await f.view(path, { expectedQuote, quote: invalid })).status, 400);
+  }
+  assert.equal((await f.view(path, { expectedQuote, quote })).status, 200);
+  assert.equal((await f.view(path, { expectedQuote, quote })).status, 200); // Retry is idempotent.
+  assert.equal((await f.view(path, { expectedQuote, quote: { ...quote, prefix: 'See ', suffix: '', start: 19, end: 33 } })).status, 409);
+  await f.reopen();
+  const after = await (await f.view('/api/state')).json();
+  assert.deepEqual(after.threads[request.threadId].messages, before.threads[request.threadId].messages.map((m: any) => m.id === message.id ? { ...m, selections: [{ ...selection, quote }] } : m));
+  assert.deepEqual(after.requests, before.requests);
+  assert.equal(await readFile(join(f.directory, 'duplicate.md'), 'utf8'), markdown);
+  assert.equal(await readFile(join(f.directory, 'versions', doc.id, `${quote.version}.md`), 'utf8'), markdown);
+});
+
 test('message annotation visibility is scoped, validated, and saved across restart', async t => {
   const f = await fixture(t), doc = await f.register();
   const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'Show both', clientMessageId: 'annotations' })).json();

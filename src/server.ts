@@ -3,17 +3,20 @@ import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readFile, writeFile, realpath, mkdir, rename, unlink, rm, stat } from 'node:fs/promises';
+import { readFile, writeFile, realpath, mkdir, rm, stat } from 'node:fs/promises';
 import { basename, join, dirname, relative, isAbsolute, extname } from 'node:path';
 import { notifyCodex } from './agent.ts';
 import { observeCodex, readCodexActivity, resetCodexSession, type CodexObserver, type NativeResetResult } from './codex-stream.ts';
 import { ReplyStream, isStreamEvent } from './stream.ts';
 import { parseReply } from './reply-metadata.ts';
 import { readDocument } from './documents.ts';
+import { prepareProposal } from './proposals.ts';
+import { createProposalService } from './proposal-service.ts';
+import { saveDocumentVersion } from './snapshots.ts';
 import { readAppVersion } from './version.ts';
 import { libraryDocument, listLibrary, recordDocumentOpen } from './library.ts';
 import { listFiles, readCode, readPreview } from './files.ts';
-import { claim, createThread, closeDocument, discardEmptyThread, nameThread, pinMessage, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, setSelectionVisibility, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput, type ReplyInput } from './store.ts';
+import { claim, createThread, closeDocument, discardEmptyThread, nameThread, pinMessage, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, reanchorSelection, setSelectionVisibility, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput, type ReplyInput } from './store.ts';
 import { isPinStyle } from './pin-style.ts';
 import { stopRequest, prepareBatch, requestBatch, setMessageSelectionVisibility, type State } from './store.ts';
 import { isMessageQuote, isFileQuote } from './quote.ts';
@@ -120,6 +123,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   let streamTimer: NodeJS.Timeout | undefined;
   let finalizing: Promise<void> | undefined;
   let captureWork: Promise<unknown> = Promise.resolve();
+  const proposalService = createProposalService({ store, directory, changed: () => { if (url) changed(); } });
   function capture<T>(work: () => Promise<T>): Promise<T> {
     const next = captureWork.then(work);
     captureWork = next.catch(() => {});
@@ -225,21 +229,25 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     changed();
   }
   async function saveVersion(documentId: string, data: DocumentData) {
-    const versions = join(directory, 'versions', documentId);
-    await mkdir(versions, { recursive: true, mode: 0o700 });
-    const temporary = join(versions, `${randomUUID()}.tmp`);
-    try {
-      await writeFile(temporary, data.markdown, { flag: 'wx', mode: 0o600 });
-      await rename(temporary, join(versions, `${data.version}.md`));
-    } finally { await unlink(temporary).catch(() => {}); }
+    await saveDocumentVersion(directory, documentId, data);
   }
   async function saveReply(input: ReplyInput) {
+    return proposalService.withDocument(input.documentId, () => saveReplyLocked(input));
+  }
+  async function saveReplyLocked(input: ReplyInput) {
     const state = store.read(), request = get(state.requests, input.requestId);
     if (request.documentId !== input.documentId || request.threadId !== input.threadId) throw new DomainError('Reply routing does not match the request', 409);
     if (!request.answer && input.metadata?.highlights?.length) {
-      const data = await readDocument(get(state.documents, input.documentId).path);
-      await saveVersion(input.documentId, data);
-      input.selectionVersion = data.version;
+      const highlights = input.metadata.highlights;
+      let data: DocumentData | undefined;
+      try { data = await readDocument(get(state.documents, input.documentId).path); }
+      catch (error) {
+        // A proposal that cannot be prepared still belongs to a valid answer.
+        if (!highlights.some(h => h.proposal || h.proposalError)) throw error;
+      }
+      if (data) await saveVersion(input.documentId, data);
+      input.selectionVersion = data?.version ?? '';
+      input.proposalTargets = highlights.map(h => h.proposal ? prepareProposal(data?.markdown ?? null, data?.version ?? null, h.proposal) : null);
     }
     await store.update(state => reply(state, input));
   }
@@ -285,7 +293,12 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     const newKey = 'data' in result ? result.data.version : result.error;
     if (!Object.hasOwn(store.read().documents, document.id)) return result;
     cache.set(document.id, result);
-    if (oldKey !== newKey) changed();
+    if (oldKey !== newKey) {
+      changed();
+      // Keep tracked viewer reads outside the document queue: close waits for
+      // those reads before removing snapshots, so awaiting this here deadlocks.
+      if ('data' in result) void proposalService.revalidate(document.id).catch(() => {});
+    }
     return result;
   }
   function pending() {
@@ -600,20 +613,22 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       const closingDocument = path.match(/^\/api\/documents\/([^/]+)$/);
       if (method === 'DELETE' && closingDocument) {
         const id = closingDocument[1];
-        const threadIds = await store.update(state => closeDocument(state, id));
-        // Finish reads that started before deletion so none can recreate a removed snapshot.
-        await Promise.allSettled([...documentReads].filter(reading => reading.documentId === id).map(reading => reading.done));
-        let cleanupError: string | undefined;
-        try {
-          await rm(join(directory, 'versions', id), { recursive: true, force: true });
-          await rm(join(directory, 'opened', id), { force: true });
-        }
-        catch { cleanupError = 'Conversations were deleted, but saved document metadata could not be completely removed from disk.'; }
-        cache.delete(id);
-        browsingRoots.delete(id);
-        const result = { documentId: id, threadIds, nextDocumentId: Object.keys(store.read().documents)[0] ?? null, ...(cleanupError ? { cleanupError } : {}) };
-        for (const viewer of viewers) if (!viewer.destroyed) viewer.write(`event: document-closed\ndata: ${JSON.stringify(result)}\n\n`);
-        changed(); json(response, result);
+        await proposalService.withDocument(id, async () => {
+          const threadIds = await store.update(state => closeDocument(state, id));
+          // Finish reads that started before deletion so none can recreate a removed snapshot.
+          await Promise.allSettled([...documentReads].filter(reading => reading.documentId === id).map(reading => reading.done));
+          let cleanupError: string | undefined;
+          try {
+            await rm(join(directory, 'versions', id), { recursive: true, force: true });
+            await rm(join(directory, 'opened', id), { force: true });
+          }
+          catch { cleanupError = 'Conversations were deleted, but saved document metadata could not be completely removed from disk.'; }
+          cache.delete(id);
+          browsingRoots.delete(id);
+          const result = { documentId: id, threadIds, nextDocumentId: Object.keys(store.read().documents)[0] ?? null, ...(cleanupError ? { cleanupError } : {}) };
+          for (const viewer of viewers) if (!viewer.destroyed) viewer.write(`event: document-closed\ndata: ${JSON.stringify(result)}\n\n`);
+          changed(); json(response, result);
+        });
         return;
       }
 
@@ -629,6 +644,15 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       if (method === 'GET' && path === '/agent/status') { json(response, { ownerKey: ownerKey(owner), instanceId, state: 'running', connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError }); return; }
       if (method === 'POST' && path === '/agent/stop') { json(response, { ok: true }); setImmediate(() => { void close(); }); return; }
       const body = ['POST', 'PATCH'].includes(method) ? await bodyOf(request) : {};
+      const proposalDecision = path.match(/^\/api\/proposals\/([^/]+)\/decision$/);
+      if (method === 'POST' && proposalDecision) {
+        if (body.decision !== 'accept' && body.decision !== 'reject') throw new DomainError('Expected accept or reject');
+        json(response, await proposalService.decide(proposalDecision[1], body.decision)); return;
+      }
+      const acceptProposals = path.match(/^\/api\/threads\/([^/]+)\/messages\/([^/]+)\/proposals\/accept$/);
+      if (method === 'POST' && acceptProposals) {
+        json(response, await proposalService.acceptReply(acceptProposals[1], acceptProposals[2])); return;
+      }
       if (method === 'POST' && path === '/api/files/root') {
         // Only explicit local viewer actions call this; previews/hover discovery cannot grant access.
         const document = get(store.read().documents, text(body, 'documentId'));
@@ -765,6 +789,23 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         const id = resolution[1], isResolved = boolean(body, 'isResolved');
         await store.update(state => resolveThread(state, id, isResolved)); changed(); json(response, { ok: true }); return;
       }
+      const anchor = path.match(/^\/api\/threads\/([^/]+)\/selections\/([^/]+)\/anchor$/);
+      if (method === 'POST' && anchor) {
+        const expectedQuote = body.expectedQuote, quote = body.quote;
+        if (!isQuote(expectedQuote) || !isQuote(quote)) throw new DomainError('Invalid selection');
+        // Validate routing and the immutable version before accepting browser-confirmed offsets.
+        const preview = structuredClone(store.read());
+        reanchorSelection(preview, anchor[1], anchor[2], expectedQuote, quote);
+        if (!/^[a-f0-9]{64}$/.test(quote.version)) throw new DomainError('Original document unavailable', 404);
+        const documentId = get(preview.threads, anchor[1]).documentId;
+        try { await readDocument(join(directory, 'versions', documentId, `${quote.version}.md`)); }
+        catch (error) {
+          if (error instanceof Error && 'code' in error && error.code === 'ENOENT') throw new DomainError('Original document unavailable', 404);
+          throw error;
+        }
+        await store.update(state => reanchorSelection(state, anchor[1], anchor[2], expectedQuote, quote));
+        changed(); json(response, { ok: true }); return;
+      }
       const visibility = path.match(/^\/api\/threads\/([^/]+)\/selections(?:\/([^/]+))?$/);
       if (method === 'POST' && visibility) {
         const isVisible = boolean(body, 'isVisible');
@@ -834,7 +875,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         const markers = result.claimStatus === 'already-claimed' && stream?.route.requestId === id
           ? stream.error ? { error: stream.error } : { prefix: stream.prefix, suffix: stream.suffix, progress: stream.progress }
           : undefined;
-        changed(); json(response, { ...result, ...requestContext(state, id), ...(markers ? { stream: markers } : {}), document, thread: get(state.threads, result.request.threadId) }); return;
+        changed(); json(response, { ...result, ...requestContext(state, id), ...(markers ? { stream: markers } : {}), document, thread: get(state.threads, result.request.threadId), proposals: Object.values(state.proposals).filter(p => p.threadId === result.request.threadId) }); return;
       }
       if (method === 'POST' && path === '/agent/streams') {
         const route = { requestId: text(body, 'requestId'), documentId: text(body, 'documentId'), threadId: text(body, 'threadId') };
@@ -867,6 +908,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       else response.end();
     }
   }
+  await proposalService.recover();
   await new Promise<void>((resolveListen, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolveListen(); }); });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('No listening address');
@@ -900,7 +942,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       const timer = setTimeout(() => server.closeAllConnections(), 100); timer.unref();
       server.close(error => { clearTimeout(timer); if (error) reject(error); else resolveClose(); });
     });
-    await closePromise; await dispatchWork; await resetWork; await captureWork; await finalizing; finish();
+    await closePromise; await dispatchWork; await resetWork; await captureWork; await finalizing; await proposalService.drain(); finish();
   }
   changed();
   return { url, close, instanceId, done };

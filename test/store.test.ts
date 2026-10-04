@@ -1,12 +1,45 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rename, rm, writeFile, chmod } from 'node:fs/promises';
+import { mkdtemp, readFile, rename, rm, writeFile, chmod, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createState, registerDocument, submit, claim, reply, resolveThread, setTitle, openStore, readSavedState } from '../src/store.ts';
 
 const owner = { agent: 'codex' as const, sessionId: '11111111-1111-4111-8111-111111111111' };
+
+test('v3 upgrade preserves history and snapshot bytes, including older migration backups', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'sidecar-v3-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { state, input } = setup(), request = submit(state, input);
+  claim(state, request.id, {});
+  reply(state, { requestId: request.id, documentId: request.documentId, threadId: request.threadId, text: 'Existing answer' });
+  const { proposals, proposalWrites, ...existing } = state;
+  const v3 = { ...existing, version: 3 }, raw = JSON.stringify(v3, null, 2) + '\n';
+  const older = JSON.stringify({ ...v3, requests: {}, threads: {} });
+  await writeFile(join(directory, 'state.json'), raw);
+  await writeFile(join(directory, 'state.v3.backup.json'), older);
+  const snapshots = join(directory, 'versions', request.documentId); await mkdir(snapshots, { recursive: true });
+  const bytes = Buffer.from('\uFEFF# Snapshot\r\noriginal\r\n'); await writeFile(join(snapshots, 'original.md'), bytes);
+  const migrated = (await openStore(directory, owner)).read();
+  assert.equal(migrated.version, 4);
+  assert.deepEqual(migrated.documents, state.documents); assert.deepEqual(migrated.threads, state.threads); assert.deepEqual(migrated.requests, state.requests);
+  assert.deepEqual(migrated.proposals, {}); assert.deepEqual(migrated.proposalWrites, {});
+  assert.equal(await readFile(join(directory, 'state.v3.backup.json'), 'utf8'), older);
+  assert.equal(await readFile(join(directory, `state.v3.${createHash('sha256').update(raw).digest('hex')}.backup.json`), 'utf8'), raw);
+  assert.deepEqual(await readFile(join(snapshots, 'original.md')), bytes);
+  assert.deepEqual((await openStore(directory, owner)).read(), migrated);
+});
+
+test('invalid v4 proposal state and unknown versions never overwrite the saved input', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'sidecar-invalid-proposals-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  for (const saved of [{ ...createState(owner), version: 99 }, { ...createState(owner), version: 4, proposals: { bad: {} } }]) {
+    const raw = JSON.stringify(saved); await writeFile(join(directory, 'state.json'), raw);
+    await assert.rejects(openStore(directory, owner));
+    assert.equal(await readFile(join(directory, 'state.json'), 'utf8'), raw);
+  }
+});
 function setup() {
   const state = createState(owner);
   const doc = registerDocument(state, { path: '/tmp/a.md', title: 'A', generated: false });
@@ -249,7 +282,8 @@ test('v1 selections migrate once to the first user message with a byte-exact bac
   const old = legacySelectionState(), raw = JSON.stringify(old, null, 2) + '\n';
   await writeFile(join(directory, 'state.json'), raw);
   const result = (await openStore(directory, owner)).read();
-  assert.equal(result.version, 3);
+  assert.equal(result.version, 4);
+  assert.deepEqual(result.proposals, {}); assert.deepEqual(result.proposalWrites, {});
   const previous = Object.values(old.threads)[0], thread = result.threads[previous.id];
   assert.deepEqual(thread.messages[0].selections, [{ id: 'first-message', slug: 'selection-1', quote: previous.quote, isVisible: false }]);
   assert.deepEqual(thread.messages.slice(1), previous.messages.slice(1));
@@ -279,7 +313,7 @@ test('ambiguous migration and failed publication preserve the original state', a
   assert.equal(await readFile(join(directory, 'state.json'), 'utf8'), raw);
   assert.equal(await readFile(join(directory, 'state.v1.backup.json'), 'utf8'), raw);
   await chmod(directory, 0o700);
-  assert.equal((await openStore(directory, owner)).read().version, 3);
+  assert.equal((await openStore(directory, owner)).read().version, 4);
 });
 
 test('v2 migration preserves each message selection, visibility, and version with an exact backup', async t => {
@@ -294,6 +328,7 @@ test('v2 migration preserves each message selection, visibility, and version wit
   const raw = JSON.stringify(v2, null, 2) + '\n';
   await writeFile(join(directory, 'state.json'), raw);
   const migrated = (await openStore(directory, owner)).read();
+  assert.deepEqual(migrated.proposals, {}); assert.deepEqual(migrated.proposalWrites, {});
   const thread = Object.values(migrated.threads)[0];
   assert.equal(thread.messages[0].selections?.[0].isVisible, false);
   assert.deepEqual(thread.messages[0].selections?.[0].quote, Object.values(old.threads)[0].quote);

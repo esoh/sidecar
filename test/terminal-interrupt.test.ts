@@ -89,9 +89,11 @@ for (const agent of ['codex', 'claude'] as const) {
       const doc = await (await post('/agent/documents', { path: file })).json();
       const request = await (await post('/api/questions', { documentId: doc.id, text: 'Explain', clientMessageId: 'first' })).json();
       const event = await eventCount(1);
-      const first = event.stream.progress.prefix + 'Message one is complete.' + event.stream.progress.suffix;
+      const metadata = '[[sidecar-meta {"highlights":[{"exact":"Scratch document","proposal":{"before":"# Scratch document","after":"# Revised document"}}]}]]\n';
+      const first = event.stream.progress.prefix + metadata + 'Message one is complete.' + event.stream.progress.suffix;
       await emit('first-turn', 'progress', first);
       await waitFor(s => s.threads[request.threadId].messages.some((m: any) => m.text === 'Message one is complete.'));
+      assert.deepEqual((await state()).proposals, {});
       const next = await (await post('/api/questions', { documentId: doc.id, threadId: request.threadId, text: 'Next request', clientMessageId: 'next' })).json();
 
       // Idle/disconnected badges and another native turn are not cancellation evidence.
@@ -101,16 +103,19 @@ for (const agent of ['codex', 'claude'] as const) {
       assert.equal((await state()).requests[next.id].status, 'queued');
       let answer = first;
       if (phase !== 'between messages') {
-        answer = event.stream.prefix + 'Message two is partly written';
+        answer = event.stream.prefix + metadata + 'Message two is partly written';
         await emit('first-turn', 'second-message', answer, false);
         await waitFor(s => s.stream?.text === 'Message two is partly written');
-        if (phase === 'with a complete final snapshot') answer = event.stream.prefix + 'Message two is complete.' + event.stream.suffix;
+        assert.deepEqual((await state()).proposals, {});
+        if (phase === 'with a complete final snapshot') answer = event.stream.prefix + metadata + 'Message two is complete.' + event.stream.suffix;
       }
       // Never call /api/requests/:id/stop: this interruption came from the terminal.
       await interrupt('first-turn', answer);
       const ended = await waitFor(s => s.requests[request.id].status !== 'claimed' || s.requests[request.id].replyRecovery?.status === 'failed');
       assert.equal(ended.requests[request.id].status, phase === 'with a complete final snapshot' ? 'completed' : 'stopped');
       assert.equal(ended.requests[request.id].replyRecovery, undefined);
+      assert.equal(Object.keys(ended.proposals).length, phase === 'with a complete final snapshot' ? 1 : 0);
+      assert.equal(await readFile(file, 'utf8'), '# Scratch document\n');
       const expected = ['Message one is complete.'];
       if (phase === 'during the second message') expected.push('Message two is partly written');
       if (phase === 'with a complete final snapshot') expected.push('Message two is complete.');

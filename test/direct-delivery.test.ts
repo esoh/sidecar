@@ -83,7 +83,8 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
     for (let i = 0; i < 70; i++) await forwardHook('claude', { session_id: owner.sessionId, hook_event_name: 'MessageDisplay', message_id: `unrelated-${i}`, turn_id: 'ordinary', index: 0, delta: 'Unrelated terminal answer.', final: true });
   }
   assert.ok(event.stream.progress?.prefix && event.stream.progress?.suffix);
-  const update = event.stream.progress.prefix + 'I’ll check the retry setting.' + event.stream.progress.suffix;
+  const proposalHeader = '[[sidecar-meta {"threadTitle":"Widget retry behavior","highlights":[{"exact":"The widget retries three times.","label":"Retry limit","proposal":{"before":"The widget retries three times.","after":"The widget retries four times."}}]}]]\n';
+  const update = event.stream.progress.prefix + proposalHeader + 'I’ll check the retry setting.' + event.stream.progress.suffix;
   if (agent === 'codex') {
     for (const socket of sockets) {
       socket.send(JSON.stringify({ method: 'item/agentMessage/delta', params: { threadId: owner.sessionId, turnId: 'reply', itemId: 'progress', delta: update } }));
@@ -96,7 +97,8 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   assert.equal(working.requests[req.id].answer, undefined, 'progress must not complete the request');
   assert.equal(working.threads[req.threadId].messages.at(-1).text, 'I’ll check the retry setting.');
   assert.equal(working.requests[next.id].status, 'queued', 'progress must not release the next request');
-  const answer = event.stream.prefix + '[[sidecar-meta {"threadTitle":"Widget retry behavior","highlights":[{"exact":"The widget retries three times.","label":"Retry limit"}]}]]\nThree retries.' + event.stream.suffix;
+  assert.deepEqual(working.proposals, {}, 'even complete progress metadata cannot create a proposal');
+  const answer = event.stream.prefix + proposalHeader + 'Three retries.' + event.stream.suffix;
   if (agent === 'codex') {
     for (const socket of sockets) {
       socket.send(JSON.stringify({ method: 'item/agentMessage/delta', params: { threadId: owner.sessionId, turnId: 'reply', itemId: 'answer', delta: answer } }));
@@ -118,16 +120,40 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   assert.equal(saved.threads[req.threadId].messages.at(-1).text, 'Three retries.');
   assert.equal(saved.threads[req.threadId].messages.at(-1).selections[0].label, 'Retry limit');
   assert.equal(saved.threads[req.threadId].messages.at(-1).selections[0].quote.version, version);
+  const proposed = Object.values<any>(saved.proposals);
+  assert.equal(proposed.length, 1);
+  assert.equal(proposed[0].status, 'pending');
+  assert.equal(proposed[0].before, 'The widget retries three times.');
+  assert.equal(proposed[0].baseVersion, version);
+  assert.equal(await readFile(file, 'utf8'), markdown, 'capturing a proposal must not edit the file');
+  assert.equal((await post('/agent/replies', { requestId: req.id, documentId: doc.id, threadId: req.threadId, text: proposalHeader + 'Three retries.' })).status, 200);
+  assert.deepEqual((await state()).proposals, saved.proposals, 'complete-reply replay must keep proposal identities');
   assert.notEqual(event.stream.prefix, second.stream.prefix);
+
+  const partialAnswer = second.stream.prefix + 'Because the retry limit is three';
+  if (agent === 'codex') for (const socket of sockets) socket.send(JSON.stringify({ method: 'item/agentMessage/delta', params: { threadId: owner.sessionId, turnId: 'batch-reply', itemId: 'combined', delta: partialAnswer } }));
+  else await forwardHook('claude', { session_id: owner.sessionId, hook_event_name: 'MessageDisplay', message_id: 'combined', turn_id: 'batch-reply', index: 0, delta: partialAnswer, final: false });
+  for (let i = 0; i < 100 && (await state()).stream?.text !== 'Because the retry limit is three'; i++) await delay(10);
+  assert.equal((await state()).stream.text, 'Because the retry limit is three');
+  const decision = await post(`/api/proposals/${proposed[0].id}/decision`, { decision: 'accept' });
+  assert.equal(decision.status, 200);
+  const accepted = await state(), acceptedProposals = Object.values<any>(accepted.proposals);
+  assert.equal(acceptedProposals[0].status, 'accepted');
+  assert.equal(accepted.requests[next.id].status, 'claimed');
+  assert.equal(accepted.stream.text, 'Because the retry limit is three', 'acceptance preserves a separate native reply in progress');
+  assert.equal(await readFile(file, 'utf8'), markdown.replace('three times', 'four times'));
+  await post(`/api/proposals/${proposed[0].id}/decision`, { decision: 'accept' });
+  assert.deepEqual((await state()).proposals, accepted.proposals, 'duplicate acceptance preserves its first decision');
+  assert.equal((agent === 'codex' ? await readFile(deliveries, 'utf8') : watched).trim().split('\n').filter(Boolean).length, 2, 'acceptance must not deliver another native request');
 
   const afterDelivery = await (await post('/api/questions', { documentId: doc.id, threadId: req.threadId, text: 'Arrived after delivery', clientMessageId: 'after-delivery' })).json();
   const combined = second.stream.prefix + 'Because the retry limit is three, then it stops.' + second.stream.suffix;
   if (agent === 'codex') {
     for (const socket of sockets) {
-      socket.send(JSON.stringify({ method: 'item/agentMessage/delta', params: { threadId: owner.sessionId, turnId: 'batch-reply', itemId: 'combined', delta: combined } }));
+      socket.send(JSON.stringify({ method: 'item/agentMessage/delta', params: { threadId: owner.sessionId, turnId: 'batch-reply', itemId: 'combined', delta: combined.slice(partialAnswer.length) } }));
       socket.send(JSON.stringify({ method: 'item/completed', params: { threadId: owner.sessionId, turnId: 'batch-reply', item: { id: 'combined', type: 'agentMessage', text: combined } } }));
     }
-  } else await forwardHook('claude', { session_id: owner.sessionId, hook_event_name: 'MessageDisplay', message_id: 'combined', turn_id: 'batch-reply', index: 0, delta: combined, final: true });
+  } else await forwardHook('claude', { session_id: owner.sessionId, hook_event_name: 'MessageDisplay', message_id: 'combined', turn_id: 'batch-reply', index: 1, delta: combined.slice(partialAnswer.length), final: true });
   const third = await eventCount(3);
   assert.equal(third.requestId, afterDelivery.id);
   assert.equal(third.thread.lastRequestId, later.id, 'use the last batched input, never a later queued request');
@@ -135,6 +161,7 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   assert.equal(history.claimStatus, 'already-claimed');
   assert.deepEqual(history.stream, third.stream, 'context recovery retains the same progress and final markers');
   assert.equal(history.thread.messages.filter((m: any) => m.role === 'agent').length, 3);
+  assert.deepEqual(history.proposals, acceptedProposals, 'full context includes proposal decisions without enlarging native events');
   const afterBatch = await state();
   assert.equal(afterBatch.requests[next.id].status, 'completed');
   assert.equal(afterBatch.requests[later.id].status, 'completed');

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { fixture } from './support.ts';
-import { writeFile } from 'node:fs/promises';
+import { writeFile, mkdir, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 
 async function setup(t: Parameters<typeof fixture>[0]) {
   const f = await fixture(t);
@@ -16,6 +17,35 @@ async function setup(t: Parameters<typeof fixture>[0]) {
   const snapshot = async () => (await f.view('/api/state')).json();
   return { f, request, route, markers, emit, snapshot };
 }
+
+test('proposal capture waits for a complete final reply and recovery reuses its identities', async t => {
+  const { f, request, route, markers, emit, snapshot } = await setup(t);
+  const header = '[[sidecar-meta {"highlights":[{"exact":"Hello world.","proposal":{"before":"Hello **world**.","after":"Goodbye **world**."}}]}]]\n';
+  await emit(0, markers.prefix + header + 'Review this.');
+  assert.deepEqual((await snapshot()).proposals, {});
+  await emit(1, markers.suffix, true);
+  const saved = await snapshot(); assert.equal(Object.keys(saved.proposals).length, 1);
+  await emit(1, markers.suffix, true);
+  assert.equal((await f.agent('/agent/replies', { ...route, stream: true })).status, 200);
+  assert.deepEqual((await snapshot()).proposals, saved.proposals);
+  assert.equal(saved.requests[request.id].status, 'completed');
+});
+
+test('failed snapshot publication remains recoverable without losing or duplicating proposals', async t => {
+  const { f, route, markers, emit, snapshot } = await setup(t);
+  await mkdir(join(f.directory, 'versions'), { recursive: true });
+  await writeFile(join(f.directory, 'versions', route.documentId), 'blocks snapshot directory');
+  const text = '[[sidecar-meta {"highlights":[{"exact":"Hello world.","proposal":{"before":"Hello **world**.","after":"Goodbye **world**."}}]}]]\nReview this.';
+  await emit(0, markers.prefix + text + markers.suffix, true);
+  assert.equal((await snapshot()).requests[route.requestId].status, 'claimed');
+  assert.deepEqual((await snapshot()).proposals, {});
+  assert.match((await snapshot()).stream.error, /save/);
+  await rm(join(f.directory, 'versions', route.documentId));
+  assert.equal((await f.agent('/agent/replies', { ...route, text })).status, 200);
+  const saved = await snapshot(); assert.equal(Object.keys(saved.proposals).length, 1);
+  assert.equal((await f.agent('/agent/replies', { ...route, text })).status, 200);
+  assert.deepEqual((await snapshot()).proposals, saved.proposals);
+});
 
 test('Stop targets a live marked turn, preserves partial output, and rejects stale or late work', async t => {
   const { f, request, route, markers, emit, snapshot } = await setup(t);

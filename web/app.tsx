@@ -12,7 +12,7 @@ import {
   TitleForm,
 } from './conversations.tsx';
 import { useQuestionDrafts, forgetDocument, type QuestionDraft, type QuestionDrafts } from './useQuestionDrafts.ts';
-import { locateQuote, quoteRange, selectionText, selectionSentence, excludedSelection } from './selection.ts';
+import { quoteIssue, quoteRange, selectionText, selectionSentence, excludedSelection } from './selection.ts';
 import { MarkdownDocument, WorkspaceLinks, type OpenWorkspaceLink } from './MarkdownDocument.tsx';
 import { resolveWorkspaceLink, splitLineSuffix } from './links.ts';
 import { setDocPreviewFetcher } from '@plannotator/ui/components/InlineMarkdown';
@@ -28,59 +28,10 @@ import type { FileQuote } from '../src/quote.ts';
 import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
 import { ResizeHandle } from '@plannotator/ui/components/ResizeHandle';
 import { onCodeHighlightSwap } from '@plannotator/ui/utils/codeHighlight';
+import { usePosition } from './usePosition.ts';
+import { ProposalReviewContext, useProposalReview } from './ProposalReview.tsx';
 
 type Content = { html: string; markdown: string; version: string };
-
-// Placement adapted from Plannotator's CommentPopover (MIT); see THIRD_PARTY_NOTICES.md.
-function usePosition(
-  ref: RefObject<HTMLElement | null>,
-  anchor: (() => DOMRect | undefined) | null,
-  width: number,
-  preferAbove = false,
-) {
-  useLayoutEffect(() => {
-    const node = ref.current;
-    if (!node || !anchor) return;
-    const update = () => {
-      const rect = anchor();
-      if (!rect) return;
-      const viewport = window.visualViewport;
-      const leftEdge = (viewport?.offsetLeft ?? 0) + 8,
-        topEdge = (viewport?.offsetTop ?? 0) + 8;
-      const rightEdge = leftEdge + (viewport?.width ?? innerWidth) - 16,
-        bottomEdge = topEdge + (viewport?.height ?? innerHeight) - 16;
-      const size = Math.min(width, rightEdge - leftEdge);
-      node.style.width = `${size}px`;
-      node.style.maxHeight = `${bottomEdge - topEdge}px`;
-      const height = node.offsetHeight;
-      const gap = preferAbove ? 10 : 8;
-      const below = bottomEdge - rect.bottom - gap,
-        above = rect.top - topEdge - gap;
-      const placeAbove = preferAbove ? above >= height || above > below : below < height && above > below;
-      const top = placeAbove ? rect.top - height - gap : rect.bottom + gap;
-      node.style.left = `${Math.max(leftEdge, Math.min(rect.left + rect.width / 2 - size / 2, rightEdge - size))}px`;
-      node.dataset.placement = placeAbove ? 'above' : 'below';
-      node.style.top = `${Math.max(topEdge, Math.min(top, bottomEdge - height))}px`;
-    };
-    update();
-    const observer = new ResizeObserver(update);
-    observer.observe(node);
-    // Sidebar resizing changes the passage position without resizing the window.
-    const canvas = document.querySelector('.canvas');
-    if (canvas) observer.observe(canvas);
-    window.addEventListener('scroll', update, true);
-    window.addEventListener('resize', update);
-    window.visualViewport?.addEventListener('resize', update);
-    window.visualViewport?.addEventListener('scroll', update);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener('scroll', update, true);
-      window.removeEventListener('resize', update);
-      window.visualViewport?.removeEventListener('resize', update);
-      window.visualViewport?.removeEventListener('scroll', update);
-    };
-  }, [ref, anchor, width, preferAbove]);
-}
 
 function keepsAttachment(target: EventTarget | null) {
   return target instanceof Element && !!target.closest('.sidebar .composer, .sidebar-header, .thread-row, .sidebar-toggle, .files-edge-toggle, .files-panel, .file-preview');
@@ -472,7 +423,7 @@ function App() {
       // Exact overlaps leave empty text nodes inside the library's marks. A later
       // partial overlap detaches those nodes while wrapping; normalize only marks.
       for (const mark of painter.getDoms()) mark.normalize();
-      const range = quoteRange(root, target.quote);
+      const range = quoteRange(root, target.quote, content.version);
       if (!range) continue;
       paintingId = target.id;
       painter.fromRange(range);
@@ -597,10 +548,10 @@ function App() {
   const anchor = useCallback(() => {
     if (choices) return highlighter.current?.getDoms(choices.ids[0])[0]?.getBoundingClientRect() ?? choices.rect;
     const root = article.current;
-    const range = root && selection && quoteRange(root, selection);
+    const range = root && selection && quoteRange(root, selection, content.version);
     if (range) lastRect.current = range.getBoundingClientRect();
     return lastRect.current;
-  }, [selection, choices]);
+  }, [selection, choices, content.version]);
   usePosition(composer, composing ? anchor : null, 384);
   usePosition(toolbar, (selection && !composing) || choices ? anchor : null, choices ? 300 : 76, !choices);
 
@@ -641,6 +592,7 @@ function App() {
       start,
       end,
       version: content.version,
+      isPositionVerified: true,
       ...(sentence ? { sentence } : {}),
     };
     fileSelectionVisit.current++;
@@ -671,7 +623,7 @@ function App() {
     if (ids.length) setSidebarShown(true);
     if (ids.length === 1) {
       clearSelection();
-      openMessage(ids[0]);
+      if (!proposalReview.open(ids[0], mark)) openMessage(ids[0]);
     } else if (ids.length > 1) {
       setComposing(false);
       setSelection(undefined);
@@ -679,7 +631,7 @@ function App() {
     }
     return ids.length > 0;
   }
-  const passageChanged = (quote: Quote) => !!documentError || !locateQuote(documentText, quote);
+  const passageIssue = (quote: Quote) => documentError ? 'Document unavailable' : quoteIssue(documentText, quote, content.version);
   async function quoteFile(fileQuote: FileQuote) {
     const visit = ++fileSelectionVisit.current;
     clearPendingSelection();
@@ -712,7 +664,7 @@ function App() {
       requestAnimationFrame(() => { ignoreClick.current = false; });
     },
     activeSelectionId: activeMessageId,
-    passageChanged,
+    passageIssue,
     showOriginal: (selectionId: string) => {
       const entry = selectedMessages.find(({ selection }) => selection.id === selectionId);
       if (entry) setActiveThreadId(entry.thread.id);
@@ -730,7 +682,7 @@ function App() {
       setOriginalMessageId(null);
       setPreviewPath(null);
       requestAnimationFrame(() => {
-        const root = article.current, range = root && quoteRange(root, selection.quote);
+        const root = article.current, range = root && quoteRange(root, selection.quote, content.version);
         if (!range) return;
         const node = range.startContainer.parentElement;
         node?.scrollIntoView({ block: 'center', behavior: 'smooth' });
@@ -743,6 +695,13 @@ function App() {
       });
     },
   };
+  const proposalReview = useProposalReview({
+    documentId, proposals: Object.values(state?.proposals ?? {}).filter(p => p.documentId === documentId),
+    selections: selectedMessages.map(item => item.selection), article, version: content.version,
+    isHistorical: !!originalMessageId || !!previewPath,
+    onShowSelection: selectionActions.showPassage, onShowOriginal: selectionActions.showOriginal,
+    onReturnToCurrent: () => { setOriginalMessageId(null); setPreviewPath(null); },
+  });
   const cancel = () => {
     if (!sendingComment.current) {
       clearSelection();
@@ -782,6 +741,8 @@ function App() {
   );
   return (
     <WorkspaceLinks.Provider value={openLink}>
+      <ProposalReviewContext.Provider value={proposalReview.context}>
+      {proposalReview.popover}
       <header className="topbar">
         <div className="brand">
           <Icon name="logo" />
@@ -852,11 +813,12 @@ function App() {
         <div className="document-workspace" ref={workspace}>
         <main className="canvas">
           <div className="reading-width">
-            {originalMessage?.quote && (
+            {originalMessage?.quote && activeThreadId && (
               <OriginalDocument
                 key={originalMessage.id}
                 documentId={documentId}
-                messageId={originalMessage.id}
+                threadId={activeThreadId}
+                selectionId={originalMessage.id}
                 quote={originalMessage.quote}
                 onReturn={() => setOriginalMessageId(null)}
               />
@@ -954,9 +916,9 @@ function App() {
               choices.ids.map((id) => (
                 <button
                   key={id}
-                  onClick={() => {
+                  onClick={(event) => {
                     clearSelection();
-                    openMessage(id);
+                    if (!proposalReview.open(id, event.currentTarget)) openMessage(id);
                   }}
                 >
                   {(() => { const entry = selectedMessages.find(({ selection }) => selection.id === id); return entry?.selection.label ?? entry?.message.text ?? 'Open message'; })()}
@@ -990,7 +952,7 @@ function App() {
               key={draftKey}
               documentId={documentId}
               quote={selection}
-              quoteChanged={passageChanged(selection)}
+              quoteIssue={passageIssue(selection)}
               disabled={!current}
               floating
               onCancel={cancel}
@@ -1004,6 +966,7 @@ function App() {
           </section>,
           document.body,
         )}
+      </ProposalReviewContext.Provider>
     </WorkspaceLinks.Provider>
   );
 }
