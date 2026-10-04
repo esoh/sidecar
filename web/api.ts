@@ -1,6 +1,6 @@
 import type { DocumentRecord, State } from '../src/store.ts';
 
-export type ClosedDocument = { documentId: string; threadIds: string[]; nextDocumentId: string | null; cleanupError?: string };
+export type { ClosedDocument } from '../src/library.ts';
 
 export type ViewerState = Omit<State, 'documents'> & {
   appVersion: string;

@@ -2359,6 +2359,55 @@ test('Settings opens the all-agent library and session popovers copy original ID
   await expect(library.getByRole('link', { name: /Saved document/ }).locator('time')).toHaveCount(1);
 });
 
+test('library close confirms before removing live or stopped documents and preserves other documents', async ({ page, context }) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'sidecar-library-close-browser-')));
+  cleanup.push(() => rm(root, { recursive: true, force: true }));
+  f = await fixture({ after: fn => cleanup.unshift(fn) }, 20, root);
+  const original = await fixture({ after: fn => cleanup.unshift(fn) }, 20, root);
+  const doc = await original.register('live.md', '# Live review'), keep = await f.register('keep.md', '# Keep this review');
+  const old = createState({ agent: 'codex', sessionId: randomUUID() }), directory = join(root, ownerKey(old.owner));
+  await mkdir(directory);
+  const path = join(directory, 'stopped.md'); await writeFile(path, '# Stopped review');
+  const saved = registerDocument(old, { path, generated: true });
+  await writeFile(join(directory, 'state.json'), JSON.stringify(old));
+  const viewer = await context.newPage(); await viewer.goto(`${original.url}/?document=${doc.id}`);
+  await viewer.getByLabel('Message', { exact: true }).fill('Unsent draft');
+  await page.goto(`${f.url}/?library=1`);
+  const closeLive = page.getByRole('button', { name: 'Close “Live review”', exact: true });
+  await expect(closeLive).toBeVisible();
+  page.once('dialog', async dialog => {
+    expect(dialog.type()).toBe('confirm');
+    expect(dialog.message()).toContain('Live review');
+    expect(dialog.message()).toContain('permanently deletes all threads');
+    expect(dialog.message()).toContain('Markdown file stays untouched');
+    await dialog.dismiss();
+  });
+  await closeLive.click();
+  await expect(page.getByRole('link', { name: /Live review/ })).toBeVisible();
+  await expect(viewer.getByLabel('Message', { exact: true })).toHaveValue('Unsent draft');
+  page.once('dialog', dialog => dialog.accept());
+  await closeLive.focus(); await closeLive.press('Enter');
+  await expect(page.getByRole('link', { name: /Live review/ })).toHaveCount(0);
+  await expect(viewer.getByRole('heading', { name: 'Document closed', exact: true })).toBeVisible();
+  expect(await viewer.evaluate(id => Object.keys(localStorage).filter(key => key.startsWith(`sidecar-draft:${id}:`)), doc.id)).toEqual([]);
+  expect(await readFile(doc.path, 'utf8')).toBe('# Live review');
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: 'Close “Stopped review”', exact: true }).click();
+  await expect(page.getByRole('link', { name: /Stopped review/ })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Documents', exact: true })).toBeVisible();
+  expect(JSON.parse(await readFile(join(directory, 'state.json'), 'utf8')).documents[saved.id]).toBeUndefined();
+  expect(await readFile(path, 'utf8')).toBe('# Stopped review');
+  await page.reload();
+  await expect(page.locator('.library-session')).toHaveCount(1);
+  await expect(page.getByRole('link', { name: /Keep this review/ })).toBeVisible();
+  const pending = await (await f.view('/api/questions', { documentId: keep.id, text: 'Wait for me', clientMessageId: randomUUID() })).json();
+  expect(pending.id).toBeTruthy();
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: 'Close “Keep this review”', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('pending agent requests');
+  await expect(page.getByRole('link', { name: /Keep this review/ })).toBeVisible();
+});
+
 test('close confirmation preserves cancel, blocks pending work, and clears drafts in every open tab', async ({ page, context }) => {
   const doc = await f.register();
   await page.goto(`${f.url}/?document=${doc.id}`);

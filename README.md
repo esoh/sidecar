@@ -118,7 +118,9 @@ Click **View original document** on a changed passage to temporarily show the sa
 
 ## Closing a document
 
-The **Close document** button in the top bar asks for confirmation before permanently deleting that document’s threads, messages, highlights, browser drafts, and saved revisions. The Markdown file (including agent-generated files), other documents, text sizes, and panel settings remain. There is no undo. Browser cleanup applies to the current local origin; a small closed-document marker prevents suspended tabs from saving an old draft again.
+The **Close document** button in the top bar asks for confirmation before permanently deleting that document’s threads, messages, highlights, proposals, and saved revisions. The Markdown file (including agent-generated files), other documents, text sizes, and panel settings remain. There is no undo. Browser drafts are cleared on the current local origin; a small closed-document marker prevents suspended tabs from saving an old draft again.
+
+You can also close a document from its row in **Browse all documents**, after the same confirmation. This works for the current agent and other Codex or Claude sessions, whether their Sidecar app is running or stopped; closing never restarts the app or coding agent.
 
 Queued, running, or interrupted requests must finish or be reconciled before closing; the agent-label popover's **Reset** can release stuck in-progress work after native verification. The viewer shows **Document closed** with **Browse all documents**. The app remains available for browsing even after closing its last document; use `sidecar stop --owner KEY` to stop it explicitly. The coding agent keeps running. Last-opened metadata for the closed document is removed. Other open viewers receive the closure. A disk or browser cleanup failure is reported explicitly.
 

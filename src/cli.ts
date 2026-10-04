@@ -7,6 +7,7 @@ import { parseArgs, promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { agentCall, appStatus, ownerDirectory, parseOwner, readRuntime, selectOwner, watchClaude } from './agent.ts';
 import { isObject, isOwner, ownerKey } from './store.ts';
+import { acquireLock, isAlive } from './owner-lock.ts';
 import { startServer } from './server.ts';
 import { readAppVersion } from './version.ts';
 const cliPath = fileURLToPath(import.meta.url);
@@ -36,34 +37,6 @@ async function stdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
   return Buffer.concat(chunks).toString('utf8');
-}
-function isAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid < 1) return true;
-  try { process.kill(pid, 0); return true; }
-  catch (error) { return !(error instanceof Error && 'code' in error && error.code === 'ESRCH'); }
-}
-async function acquireLock(directory: string): Promise<(() => Promise<void>) | null> {
-  const lock = join(directory, 'owner.lock'), reclaim = join(directory, 'reclaim.lock');
-  async function create() {
-    const file = await open(lock, 'wx', 0o600);
-    try { await file.writeFile(String(process.pid)); } finally { await file.close(); }
-    return async () => { if (Number(await readFile(lock, 'utf8').catch(() => '0')) === process.pid) await rm(lock, { force: true }); };
-  }
-  try { return await create(); }
-  catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error; }
-  const pid = Number(await readFile(lock, 'utf8').catch(() => '0'));
-  if (isAlive(pid)) return null;
-  // Serialize stale-lock recovery. A crashed recovery fails closed until this tiny marker is removed.
-  try { await mkdir(reclaim, { mode: 0o700 }); } catch { return null; }
-  try {
-    const current = Number(await readFile(lock, 'utf8').catch(() => '0'));
-    if (isAlive(current)) return null;
-    await rm(lock, { force: true });
-    try { return await create(); } catch (error) {
-      if (error instanceof Error && 'code' in error && error.code === 'EEXIST') return null;
-      throw error;
-    }
-  } finally { await rm(reclaim, { recursive: true, force: true }); }
 }
 async function serve(key: string) {
   const directory = ownerDirectory(key);
