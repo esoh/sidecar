@@ -381,23 +381,7 @@ export async function openStore(directory: string, owner: Owner): Promise<Store>
     const value: unknown = JSON.parse(raw);
     const parsed = readSavedState(value);
     if (ownerKey(parsed.owner) !== ownerKey(owner)) throw new Error('State belongs to another owner');
-    if (isObject(value) && (value.version === 1 || value.version === 2 || value.version === 3)) {
-      const backup = join(directory, `state.v${value.version}.backup.json`);
-      try { await writeFile(backup, raw, { flag: 'wx', mode: 0o600 }); }
-      catch (error) {
-        if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
-        const savedRaw = await readFile(backup, 'utf8'), saved: unknown = JSON.parse(savedRaw);
-        if (!isObject(saved) || saved.version !== value.version || ownerKey(readSavedState(saved).owner) !== ownerKey(owner)) throw new Error('Invalid migration backup; the existing state was preserved');
-        if (savedRaw !== raw) {
-          const exactBackup = join(directory, `state.v${value.version}.${createHash('sha256').update(raw).digest('hex')}.backup.json`);
-          try { await writeFile(exactBackup, raw, { flag: 'wx', mode: 0o600 }); }
-          catch (error) {
-            if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
-            if (await readFile(exactBackup, 'utf8') !== raw) throw new Error('Migration backup differs; the existing state was preserved');
-          }
-        }
-      }
-    }
+    await backupSavedState(directory, owner, raw);
     for (const request of Object.values(parsed.requests)) if (request.status === 'claimed') {
       request.status = 'uncertain';
       // A handoff may already have reached the agent. Restart never repeats it.
@@ -407,15 +391,7 @@ export async function openStore(directory: string, owner: Owner): Promise<Store>
     for (const document of Object.values(parsed.documents)) ensureGeneralThread(parsed, document.id);
     state = parsed;
   }
-  async function persist(next: State): Promise<void> {
-    const temporary = join(directory, `state-${randomUUID()}.tmp`);
-    try {
-      await writeFile(temporary, JSON.stringify(next) + '\n', { mode: 0o600, flag: 'wx' });
-      await rename(temporary, path);
-    } finally {
-      await unlink(temporary).catch(() => {});
-    }
-  }
+  const persist = (next: State) => persistState(directory, next);
   await persist(state);
   let pending: Promise<void> = Promise.resolve();
   return {
@@ -432,4 +408,48 @@ export async function openStore(directory: string, owner: Owner): Promise<Store>
       return operation;
     },
   };
+}
+
+async function backupSavedState(directory: string, owner: Owner, raw: string): Promise<void> {
+  const value: unknown = JSON.parse(raw);
+  if (isObject(value) && (value.version === 1 || value.version === 2 || value.version === 3)) {
+    const backup = join(directory, `state.v${value.version}.backup.json`);
+    try { await writeFile(backup, raw, { flag: 'wx', mode: 0o600 }); }
+    catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
+      const savedRaw = await readFile(backup, 'utf8'), saved: unknown = JSON.parse(savedRaw);
+      if (!isObject(saved) || saved.version !== value.version || ownerKey(readSavedState(saved).owner) !== ownerKey(owner)) throw new Error('Invalid migration backup; the existing state was preserved');
+      if (savedRaw !== raw) {
+        const exactBackup = join(directory, `state.v${value.version}.${createHash('sha256').update(raw).digest('hex')}.backup.json`);
+        try { await writeFile(exactBackup, raw, { flag: 'wx', mode: 0o600 }); }
+        catch (error) {
+          if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
+          if (await readFile(exactBackup, 'utf8') !== raw) throw new Error('Migration backup differs; the existing state was preserved');
+        }
+      }
+    }
+  }
+}
+
+async function persistState(directory: string, next: State): Promise<void> {
+  const path = join(directory, 'state.json');
+  const temporary = join(directory, `state-${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, JSON.stringify(next) + '\n', { mode: 0o600, flag: 'wx' });
+    await rename(temporary, path);
+  } finally {
+    await unlink(temporary).catch(() => {});
+  }
+}
+
+// The caller must hold the owner lock. Unlike starting a viewer, maintenance must
+// not recover requests or create conversations in other documents.
+export async function updateSavedState<T>(directory: string, owner: Owner, change: (state: State) => T): Promise<T> {
+  const raw = await readFile(join(directory, 'state.json'), 'utf8');
+  const state = readSavedState(JSON.parse(raw));
+  if (ownerKey(state.owner) !== ownerKey(owner)) throw new DomainError('Saved Sidecar session is unavailable', 404);
+  const result = change(state);
+  await backupSavedState(directory, owner, raw);
+  await persistState(directory, state);
+  return result;
 }

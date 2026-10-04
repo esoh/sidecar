@@ -1,12 +1,46 @@
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
-import { appStatus, parseOwner, readRuntime } from './agent.ts';
+import { agentFetch, appStatus, parseOwner, readRuntime } from './agent.ts';
+import { acquireLock } from './owner-lock.ts';
 import { readDocument } from './documents.ts';
-import { DomainError, get, readSavedState, ownerKey, type Owner } from './store.ts';
+import { closeDocument, DomainError, get, readSavedState, updateSavedState, ownerKey, type Owner } from './store.ts';
 
 export type LibraryDocument = { id: string; title: string; path: string; updatedAt: number; lastOpenedAt: number | null; threadCount: number };
 export type LibrarySession = { owner: Owner; ownerKey: string; url: string | null; documents: LibraryDocument[] };
 export type LibraryState = { sessions: LibrarySession[]; unavailable: number };
+export type ClosedDocument = { documentId: string; threadIds: string[]; nextDocumentId: string | null; cleanupError?: string };
+
+export async function cleanupClosedDocument(directory: string, id: string): Promise<{ cleanupError?: string }> {
+  try {
+    await rm(join(directory, 'versions', id), { recursive: true, force: true });
+    await rm(join(directory, 'opened', id), { force: true });
+    return {};
+  } catch { return { cleanupError: 'Conversations were deleted, but saved document metadata could not be completely removed from disk.' }; }
+}
+
+export async function closeLibraryDocument(root: string, key: string, id: string): Promise<ClosedDocument> {
+  const owner = parseOwner(key), directory = join(root, ownerKey(owner));
+  const forward = async (instanceId: string): Promise<ClosedDocument> => {
+    const response = await agentFetch(key, `/agent/documents/${encodeURIComponent(id)}/close`, { instanceId }, undefined, directory);
+    const result = await response.json();
+    if (!response.ok) throw new DomainError(response.status === 404 ? 'The original viewer could not close this document. Refresh the list; if it is still present, update that viewer.' : result.error ?? 'The original viewer could not close this document.', response.status);
+    return result;
+  };
+  const status = await appStatus(key, directory);
+  if (status.state === 'running') return forward(status.instanceId);
+  const release = await acquireLock(directory);
+  if (!release) throw new DomainError('The original viewer is starting or unavailable. Retry when it is ready.', 409);
+  try {
+    // Recheck after taking the lock; never write behind a running viewer.
+    const current = await appStatus(key, directory);
+    if (current.state === 'running') return await forward(current.instanceId);
+    const result = await updateSavedState(directory, owner, state => {
+      const threadIds = closeDocument(state, id);
+      return { documentId: id, threadIds, nextDocumentId: Object.keys(state.documents)[0] ?? null };
+    });
+    return { ...result, ...await cleanupClosedDocument(directory, id) };
+  } finally { await release(); }
+}
 
 export async function readLibrarySession(root: string, key: string) {
   const owner = parseOwner(key);

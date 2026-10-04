@@ -14,7 +14,7 @@ import { prepareProposal } from './proposals.ts';
 import { createProposalService } from './proposal-service.ts';
 import { saveDocumentVersion } from './snapshots.ts';
 import { readAppVersion } from './version.ts';
-import { libraryDocument, listLibrary, recordDocumentOpen } from './library.ts';
+import { libraryDocument, listLibrary, recordDocumentOpen, closeLibraryDocument, cleanupClosedDocument } from './library.ts';
 import { listFiles, readCode, readPreview } from './files.ts';
 import { claim, createThread, closeDocument, discardEmptyThread, nameThread, pinMessage, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, reanchorSelection, setSelectionVisibility, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput, type ReplyInput } from './store.ts';
 import { isPinStyle } from './pin-style.ts';
@@ -465,6 +465,20 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       documentId: request.documentId, thread: { id: request.threadId }, stream: markers,
       instruction: 'Follow the Sidecar skill. Reply recovery only: resend the existing answer using these exact markers. Do not repeat the original task, tools, or edits. If you cannot recover the answer, send an isError reply explaining that. Leave later queued messages for their own delivery.' };
   }
+  async function closeRegisteredDocument(id: string) {
+    return proposalService.withDocument(id, async () => {
+      const threadIds = await store.update(state => closeDocument(state, id));
+      // Finish reads that started before deletion so none can recreate a removed snapshot.
+      await Promise.allSettled([...documentReads].filter(reading => reading.documentId === id).map(reading => reading.done));
+      const cleanup = await cleanupClosedDocument(directory, id);
+      cache.delete(id);
+      browsingRoots.delete(id);
+      const result = { documentId: id, threadIds, nextDocumentId: Object.keys(store.read().documents)[0] ?? null, ...cleanup };
+      for (const viewer of viewers) if (!viewer.destroyed) viewer.write(`event: document-closed\ndata: ${JSON.stringify(result)}\n\n`);
+      changed(); return result;
+    });
+  }
+
   const server = createServer((request, response) => { void handle(request, response); });
   server.requestTimeout = 10000;
   server.headersTimeout = 10000;
@@ -567,6 +581,12 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         return;
       }
       const libraryRead = path.match(/^\/api\/library\/([^/]+)\/documents\/([^/]+)$/);
+      if (method === 'DELETE' && libraryRead) {
+        json(response, libraryRead[1] === ownerKey(owner)
+          ? await closeRegisteredDocument(libraryRead[2])
+          : await closeLibraryDocument(dirname(directory), libraryRead[1], libraryRead[2]));
+        return;
+      }
       if (method === 'GET' && libraryRead) {
         const document = await libraryDocument(dirname(directory), libraryRead[1], libraryRead[2]);
         const content = await readDocument(document.path);
@@ -612,24 +632,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       }
       const closingDocument = path.match(/^\/api\/documents\/([^/]+)$/);
       if (method === 'DELETE' && closingDocument) {
-        const id = closingDocument[1];
-        await proposalService.withDocument(id, async () => {
-          const threadIds = await store.update(state => closeDocument(state, id));
-          // Finish reads that started before deletion so none can recreate a removed snapshot.
-          await Promise.allSettled([...documentReads].filter(reading => reading.documentId === id).map(reading => reading.done));
-          let cleanupError: string | undefined;
-          try {
-            await rm(join(directory, 'versions', id), { recursive: true, force: true });
-            await rm(join(directory, 'opened', id), { force: true });
-          }
-          catch { cleanupError = 'Conversations were deleted, but saved document metadata could not be completely removed from disk.'; }
-          cache.delete(id);
-          browsingRoots.delete(id);
-          const result = { documentId: id, threadIds, nextDocumentId: Object.keys(store.read().documents)[0] ?? null, ...(cleanupError ? { cleanupError } : {}) };
-          for (const viewer of viewers) if (!viewer.destroyed) viewer.write(`event: document-closed\ndata: ${JSON.stringify(result)}\n\n`);
-          changed(); json(response, result);
-        });
-        return;
+        json(response, await closeRegisteredDocument(closingDocument[1])); return;
       }
 
       if (method === 'GET' && (path === '/api/events' || path === '/agent/events')) {
@@ -644,6 +647,11 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       if (method === 'GET' && path === '/agent/status') { json(response, { ownerKey: ownerKey(owner), instanceId, state: 'running', connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError }); return; }
       if (method === 'POST' && path === '/agent/stop') { json(response, { ok: true }); setImmediate(() => { void close(); }); return; }
       const body = ['POST', 'PATCH'].includes(method) ? await bodyOf(request) : {};
+      const agentClose = path.match(/^\/agent\/documents\/([^/]+)\/close$/);
+      if (method === 'POST' && agentClose) {
+        if (body.instanceId !== instanceId) throw new DomainError('The original viewer changed. Refresh the list and try again.', 409);
+        json(response, await closeRegisteredDocument(agentClose[1])); return;
+      }
       const proposalDecision = path.match(/^\/api\/proposals\/([^/]+)\/decision$/);
       if (method === 'POST' && proposalDecision) {
         if (body.decision !== 'accept' && body.decision !== 'reject') throw new DomainError('Expected accept or reject');

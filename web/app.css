@@ -1187,7 +1187,9 @@ pre code.pn-code[data-keep-layout] {
 .library-session { margin: 24px 0; }
 .library-session > header { display: flex; align-items: center; gap: 9px; margin-bottom: 8px; }
 .library-session-id, .library-note, .library-document-meta { color: var(--subtle); font-size: 12px; }
-.library-document { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px; margin-bottom: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); text-decoration: none; }
+.library-document-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.library-document { display: flex; flex: 1; min-width: 0; align-items: center; justify-content: space-between; gap: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); text-decoration: none; }
+.library-document-close { flex-shrink: 0; }
 .library-document:hover { border-color: var(--primary); }
 .library-document > span:first-child { min-width: 0; }
 .library-document small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--subtle); margin-top: 4px; }

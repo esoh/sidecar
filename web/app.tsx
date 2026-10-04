@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import Highlighter from '@plannotator/web-highlighter';
 import type { Quote, RequestRecord, Thread } from '../src/store.ts';
 import { api, errorText, type ViewerState, type ClosedDocument } from './api.ts';
+import { confirmCloseDocument } from './close-document.ts';
 import {
   AgentStatus,
   ConversationSidebar,
@@ -719,7 +720,7 @@ function App() {
       setError('Wait for this document’s pending agent requests to finish before closing it.');
       return;
     }
-    if (!window.confirm(`Close “${current.title}”?\n\nThis permanently deletes all threads, messages, highlights, drafts, and saved revisions for this document. Your Markdown file stays untouched. This cannot be undone.`)) return;
+    if (!confirmCloseDocument(current.title)) return;
     setClosing(true);
     try {
       documentClosed(await api<ClosedDocument>(`/api/documents/${documentId}`, undefined, 'DELETE'));

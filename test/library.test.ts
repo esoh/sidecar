@@ -8,7 +8,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readLibrarySession } from '../src/library.ts';
 import { startServer } from '../src/server.ts';
-import { createState, registerDocument, ownerKey } from '../src/store.ts';
+import { createState, registerDocument, ownerKey, submit, claim } from '../src/store.ts';
+import { fixture } from './support.ts';
 const exec = promisify(execFile), cliPath = new URL('../src/cli.ts', import.meta.url).pathname, tsx = import.meta.resolve('tsx');
 
 test('all-agent library verifies original viewers and previews stopped sessions without altering saved state', async t => {
@@ -43,9 +44,91 @@ test('all-agent library verifies original viewers and previews stopped sessions 
   assert.equal((await get(`/api/image?owner=${key}&document=${doc.id}&path=../outside.svg`)).status, 403);
   assert.equal((await get(`/api/library/${key}/documents/__proto__`)).status, 404);
   assert.equal((await get(`/api/library/not-an-owner/documents/${doc.id}`)).status, 400);
-  assert.equal((await fetch(host.url + `/api/library/${key}/documents/${doc.id}`, { method: 'DELETE', headers: { Cookie: cookie, Origin: host.url } })).status, 404);
   assert.equal(await readFile(join(directory, 'state.json'), 'utf8'), saved);
   await assert.rejects(readFile(join(directory, 'runtime.json')), { code: 'ENOENT' });
+});
+
+for (const agent of ['codex', 'claude'] as const) test(`library closes a stopped ${agent} document without touching its file or other requests`, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'sidecar-library-close-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const host = await fixture(t, 20, root);
+  const state = createState({ agent, sessionId: randomUUID() }), key = ownerKey(state.owner), directory = join(root, key);
+  await mkdir(directory);
+  const path = join(directory, 'close.md'); await writeFile(path, '# Keep the file\n');
+  const doc = registerDocument(state, { path, generated: true });
+  const other = registerDocument(state, { path: join(directory, 'other.md'), generated: false });
+  await writeFile(other.path, '# Other');
+  const otherRequest = submit(state, { clientMessageId: randomUUID(), documentId: other.id, threadId: Object.values(state.threads).find(thread => thread.documentId === other.id)!.id, text: 'Still working elsewhere' });
+  claim(state, otherRequest.id, {});
+  const retainedThread = structuredClone(state.threads[otherRequest.threadId]);
+  const retainedRequest = structuredClone(state.requests[otherRequest.id]);
+  await mkdir(join(directory, 'versions', doc.id), { recursive: true });
+  await writeFile(join(directory, 'versions', doc.id, 'snapshot.md'), '# Old');
+  await mkdir(join(directory, 'opened')); await writeFile(join(directory, 'opened', doc.id), '');
+  await writeFile(join(directory, 'state.json'), JSON.stringify(state));
+  const response = await host.view(`/api/library/${key}/documents/${doc.id}`, undefined, 'DELETE');
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal((await response.json()).documentId, doc.id);
+  const saved = JSON.parse(await readFile(join(directory, 'state.json'), 'utf8'));
+  assert.deepEqual(Object.keys(saved.documents), [other.id]);
+  assert.deepEqual(saved.threads, { [otherRequest.threadId]: retainedThread });
+  assert.deepEqual(saved.requests, { [otherRequest.id]: retainedRequest });
+  assert.equal(await readFile(path, 'utf8'), '# Keep the file\n');
+  await assert.rejects(readFile(join(directory, 'versions', doc.id, 'snapshot.md')), { code: 'ENOENT' });
+  await assert.rejects(readFile(join(directory, 'opened', doc.id)), { code: 'ENOENT' });
+  await assert.rejects(readFile(join(directory, 'owner.lock')), { code: 'ENOENT' });
+  await assert.rejects(readFile(join(directory, 'runtime.json')), { code: 'ENOENT' });
+});
+
+test('library closes through the original live viewer so its in-memory state cannot resurrect a document', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'sidecar-library-live-close-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const host = await fixture(t, 20, root), original = await fixture(t, 20, root);
+  const doc = await original.register(), other = await original.register('other.md', '# Keep me');
+  const key = ownerKey(original.owner), route = `/api/library/${key}/documents/${doc.id}`;
+  await writeFile(join(original.directory, 'owner.lock'), String(process.pid));
+  const queued = await (await original.view('/api/questions', { clientMessageId: randomUUID(), documentId: doc.id, text: 'Pending work' })).json();
+  const before = await readFile(join(original.directory, 'state.json'), 'utf8');
+  assert.equal((await host.view(route, undefined, 'DELETE')).status, 409);
+  assert.equal(await readFile(join(original.directory, 'state.json'), 'utf8'), before);
+  await original.agent(`/agent/requests/${queued.id}/claim`, {});
+  await original.agent('/agent/replies', { requestId: queued.id, documentId: doc.id, threadId: queued.threadId, text: 'Done' });
+  assert.equal((await host.view(route, undefined, 'DELETE')).status, 200);
+  const state = await (await original.view('/api/state')).json();
+  assert.deepEqual(Object.keys(state.documents), [other.id]);
+  assert.equal(state.requests[queued.id], undefined);
+  assert.ok(await readFile(doc.path, 'utf8'));
+  await original.register('third.md', '# Third');
+  assert.equal(JSON.parse(await readFile(join(original.directory, 'state.json'), 'utf8')).documents[doc.id], undefined);
+  // The same library action works for its own owner without trying to take its own lock.
+  const own = await host.register();
+  assert.equal((await host.view(`/api/library/${ownerKey(host.owner)}/documents/${own.id}`, undefined, 'DELETE')).status, 200);
+  assert.deepEqual((await (await host.view('/api/state')).json()).documents, {});
+});
+
+test('library close refuses pending, locked, malformed and unauthenticated targets without modifying their state', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'sidecar-library-refuse-close-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const host = await fixture(t, 20, root), state = createState({ agent: 'codex', sessionId: randomUUID() });
+  const key = ownerKey(state.owner), directory = join(root, key); await mkdir(directory);
+  const doc = registerDocument(state, { path: join(directory, 'review.md'), generated: false });
+  const route = `/api/library/${key}/documents/${doc.id}`, file = join(directory, 'state.json');
+  const bytes = JSON.stringify(state); await writeFile(file, bytes);
+  for (const headers of [new Headers(), new Headers({ Cookie: host.cookie, Origin: 'http://evil.example' })])
+    assert.equal((await fetch(host.url + route, { method: 'DELETE', headers })).status, 403);
+  await writeFile(join(directory, 'owner.lock'), String(process.pid));
+  assert.equal((await host.view(route, undefined, 'DELETE')).status, 409);
+  assert.equal(await readFile(file, 'utf8'), bytes);
+  await rm(join(directory, 'owner.lock'));
+  submit(state, { clientMessageId: randomUUID(), documentId: doc.id, text: 'Pending' });
+  const pending = JSON.stringify(state); await writeFile(file, pending);
+  assert.equal((await host.view(route, undefined, 'DELETE')).status, 409);
+  assert.equal(await readFile(file, 'utf8'), pending);
+  await writeFile(file, '{broken');
+  assert.equal((await host.view(route, undefined, 'DELETE')).ok, false);
+  assert.equal(await readFile(file, 'utf8'), '{broken');
+  await assert.rejects(readFile(join(directory, 'owner.lock')), { code: 'ENOENT' });
+  assert.equal((await host.view(`/api/library/not-an-owner/documents/${doc.id}`, undefined, 'DELETE')).status, 400);
 });
 
 for (const agent of ['codex', 'claude'] as const) test(`browse infers the ${agent} session without registering a document`, async t => {
