@@ -14,7 +14,7 @@ export function forgetDocument(documentId: string, threadIds: string[]): string 
   closedDocuments.add(documentId);
   try {
     for (const key of Object.keys(localStorage)) {
-      if (key.startsWith(`sidecar-draft:${documentId}:`) || threadIds.some(id => key === `sidecar-read-reply:${id}`)) localStorage.removeItem(key);
+      if (key === `sidecar-folds:${documentId}` || key.startsWith(`sidecar-draft:${documentId}:`) || threadIds.some(id => key === `sidecar-read-reply:${id}`)) localStorage.removeItem(key);
     }
     localStorage.setItem(`sidecar-closed-document:${documentId}`, '1');
     sessionStorage.removeItem(`sidecar-thread:${documentId}`);

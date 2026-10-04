@@ -88,6 +88,104 @@ test('main document headings fold their section and retain nested folds without 
   await expect(page.locator('.sidebar details.document-section')).toHaveCount(0);
 });
 
+test('heading folds persist per document through reloads and body edits while new headings start open', async ({ page }) => {
+  const markdown = '## Outer\n\nOuter body.\n\n### Inner\n\nInner body.\n\n## Other\n\nOther body.\n';
+  const doc = await f.register('saved-folds.md', markdown);
+  const other = await f.register('separate-folds.md', markdown);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const article = page.locator('#document');
+  const toggle = (name: string) => article.locator('summary').filter({ has: page.getByRole('heading', { name, exact: true }) });
+  await toggle('Inner').click(); await expect(article.getByText('Inner body.', { exact: true })).toBeHidden();
+  await toggle('Outer').click(); await expect(article.getByText('Outer body.', { exact: true })).toBeHidden();
+  await page.reload();
+  await expect(article.getByRole('heading', { name: 'Outer', exact: true })).toBeVisible();
+  await expect(article.getByText('Outer body.', { exact: true })).toBeHidden();
+  await toggle('Outer').click();
+  await expect(article.getByText('Outer body.', { exact: true })).toBeVisible();
+  await expect(article.getByText('Inner body.', { exact: true })).toBeHidden();
+  await writeFile(doc.path, '## Added\n\nNew body.\n\n' + markdown.replace('Inner body.', 'Revised inner body.'));
+  await expect(article.getByText('New body.', { exact: true })).toBeVisible();
+  await expect(article.getByText('Revised inner body.', { exact: true })).toBeHidden();
+  await expect(article.getByText('Outer body.', { exact: true })).toBeVisible();
+  await page.goto(`${f.url}/?document=${other.id}`);
+  await expect(article.getByText('Inner body.', { exact: true })).toBeVisible();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(article.getByText('Revised inner body.', { exact: true })).toBeHidden();
+  await expect(article.getByText('Outer body.', { exact: true })).toBeVisible();
+});
+
+test('headings without URL slugs retain independent folds after body edits and reset when renamed', async ({ page }) => {
+  const markdown = '## 😀\n\nFirst emoji body.\n\n## 😀\n\nSecond emoji body.\n';
+  const doc = await f.register('emoji-folds.md', markdown);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const article = page.locator('#document');
+  await article.locator('summary').first().click();
+  await expect(article.getByText('First emoji body.', { exact: true })).toBeHidden();
+  await expect(article.getByText('Second emoji body.', { exact: true })).toBeVisible();
+  await writeFile(doc.path, 'Added introduction.\n\n' + markdown);
+  await expect(article.getByText('Added introduction.', { exact: true })).toBeVisible();
+  await expect(article.getByText('First emoji body.', { exact: true })).toBeHidden();
+  await expect(article.getByText('Second emoji body.', { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(article.getByText('First emoji body.', { exact: true })).toBeHidden();
+  await writeFile(doc.path, 'Added introduction.\n\n' + markdown.replace('## 😀', '## 🎉'));
+  await expect(article.getByRole('heading', { name: '🎉', exact: true })).toBeVisible();
+  await expect(article.getByText('First emoji body.', { exact: true })).toBeVisible();
+});
+
+test('folding still works when browser storage is unavailable', async ({ page }) => {
+  await page.addInitScript(() => {
+    const get = Storage.prototype.getItem, set = Storage.prototype.setItem;
+    Storage.prototype.getItem = function (key) { if (key.startsWith('sidecar-folds:')) throw new Error('Storage unavailable'); return get.call(this, key); };
+    Storage.prototype.setItem = function (key, value) { if (key.startsWith('sidecar-folds:')) throw new Error('Storage unavailable'); return set.call(this, key, value); };
+  });
+  const doc = await f.register('unavailable-fold-storage.md', '## Fold\n\nFold body.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const toggle = page.locator('#document summary');
+  await toggle.click(); await expect(page.getByText('Fold body.', { exact: true })).toBeHidden();
+  await toggle.press('Enter'); await expect(page.getByText('Fold body.', { exact: true })).toBeVisible();
+});
+
+test('trailing dividers and a blank spacer stay between sibling sections when nested headings fold', async ({ page }) => {
+  const markdown = '# Review\n\n## Author Summary\n\n#### Dial-outcome inference\n\nSection content.\n\n---\n\nOrdinary paragraph after an internal divider.\n\nFollowing is the proposal:\n\n---\n\n<div><br><br><br></div>\n\n---\n\n## AI-generated summary\n\nGenerated content.\n';
+  const doc = await f.register('divider-boundary.md', markdown);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const article = page.locator('#document');
+  const toggle = (name: string) => article.locator('summary').filter({ has: page.getByRole('heading', { name, exact: true }) });
+  const rules = article.locator('hr'), spacer = article.locator('div:has(> br)');
+  await expect(rules).toHaveCount(3); await expect(spacer).toBeVisible();
+  const renderedText = await article.textContent();
+  await toggle('Dial-outcome inference').click();
+  await expect(rules.nth(0)).toBeHidden();
+  for (const rule of [rules.nth(1), rules.nth(2)]) await expect(rule).toBeVisible();
+  await expect(spacer).toBeVisible();
+  await expect(article.getByText('Following is the proposal:', { exact: true })).toBeHidden();
+  await toggle('Author Summary').click();
+  for (const rule of [rules.nth(1), rules.nth(2)]) await expect(rule).toBeVisible();
+  await expect(spacer).toBeVisible();
+  await expect(article.getByRole('heading', { name: 'AI-generated summary' })).toBeVisible();
+  await toggle('Review').click();
+  await expect(rules.nth(1)).toBeHidden(); await expect(spacer).toBeHidden();
+  expect(await article.textContent()).toBe(renderedText);
+  expect(await readFile(doc.path, 'utf8')).toBe(markdown);
+});
+
+test('internal dividers, child-heading separators and trailing document dividers remain within their section', async ({ page }) => {
+  const doc = await f.register('internal-dividers.md', '# Review\n\n## Section\n\nBefore internal rule.\n\n---\n\nAfter internal rule.\n\n<div>Meaningful HTML content.</div>\n\n---\n\n### Child\n\nChild content.\n\n<div><br><br></div>\n\n### Spacer only\n\nFinal content.\n\n---\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const article = page.locator('#document');
+  const toggle = (name: string) => article.locator('summary').filter({ has: page.getByRole('heading', { name, exact: true }) });
+  await expect(article.locator('hr')).toHaveCount(3);
+  await toggle('Child').click();
+  await expect(article.locator('div:has(> br)')).toBeHidden();
+  await expect(article.getByRole('heading', { name: 'Spacer only' })).toBeVisible();
+  await toggle('Spacer only').click();
+  await expect(article.locator('hr').nth(2)).toBeHidden();
+  await toggle('Section').click();
+  for (const rule of await article.locator('hr').all()) await expect(rule).toBeHidden();
+  await expect(article.getByText('Meaningful HTML content.', { exact: true })).toBeHidden();
+});
+
 test('annotation and heading links reveal only the required folded ancestors', async ({ page }) => {
   const doc = await f.register('fold-navigation.md', '[Jump to inner](#inner)\n\n## Outer\n\nOuter body.\n\n### Inner\n\nNested selected passage.\n\n## Other\n\nOther body.\n');
   await page.goto(`${f.url}/?document=${doc.id}`);
@@ -106,6 +204,79 @@ test('annotation and heading links reveal only the required folded ancestors', a
   await page.locator('.sidebar').getByRole('link', { name: 'the target', exact: true }).click();
   await expect(mark).toBeVisible(); await expect(article.getByText('Other body.', { exact: true })).toBeHidden();
   await expect(page.getByText('Passage changed', { exact: true })).toHaveCount(0);
+  await page.reload();
+  await expect(mark).toBeVisible();
+  await expect(article.getByText('Other body.', { exact: true })).toBeHidden();
+});
+
+test('fold animations finish before annotation and heading navigation scrolls', async ({ page }) => {
+  const doc = await f.register('animated-folds.md', '[Jump to inner](#inner)\n\n## Outer\n\n' + 'Outer context.\n\n'.repeat(15) + '### Inner\n\n' + 'Inner context.\n\n'.repeat(15) + 'Animated target passage.\n\n## End\n\nEnd body.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Where?'); await input.press('Enter'); await expect(input).toHaveValue('');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"Animated target passage."}]}]]\nSee [animated target](#selection-1).');
+  await expect(page.locator('#document mark')).toHaveCount(1);
+  const fold = (name: string) => page.locator('#document details.document-section').filter({ has: page.locator(`:scope > summary #${name}`) });
+  // Native details-content transitions are not in getAnimations. Observe the
+  // actual changing height over frames rather than a timer or just CSS rules.
+  const heights = await fold('inner').evaluate(async element => {
+    const values = [parseFloat(getComputedStyle(element, '::details-content').height)];
+    element.querySelector('summary')!.click();
+    for (let frame = 0; frame < 30; frame++) {
+      await new Promise(requestAnimationFrame);
+      values.push(parseFloat(getComputedStyle(element, '::details-content').height));
+      if (values.at(-1) === 0) break;
+    }
+    return values;
+  });
+  expect(heights.at(-1)).toBe(0);
+  expect(heights.some(height => height > 0 && height < heights[0])).toBe(true);
+  await fold('outer').locator(':scope > summary').click();
+  await expect(page.locator('#document mark')).toBeHidden();
+  await page.evaluate(() => {
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function (...args) {
+      if (this.closest('#document')) {
+        const active = document.getAnimations().filter(a => a instanceof CSSTransition && a.effect instanceof KeyframeEffect && a.effect.target instanceof Element && a.effect.target.closest('#document details.document-section') && a.playState !== 'finished');
+        document.documentElement.dataset.scrollDuringFold = String(active.length);
+        document.documentElement.dataset.scrolledText = this.textContent ?? '';
+      }
+      original.apply(this, args);
+    };
+  });
+  await page.locator('.sidebar').getByRole('link', { name: 'animated target', exact: true }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-scrolled-text', 'Animated target passage.');
+  await expect(page.locator('html')).toHaveAttribute('data-scroll-during-fold', '0');
+  await expect(page.locator('#document mark')).toBeInViewport();
+  await fold('outer').locator(':scope > summary').click();
+  await expect(page.locator('#document mark')).toBeHidden();
+  await page.locator('#document').getByRole('link', { name: 'Jump to inner', exact: true }).click();
+  await expect(page).toHaveURL(/#inner$/);
+  await expect(page.locator('#inner')).toBeInViewport();
+});
+
+test('folds reverse cleanly and respect reduced motion', async ({ page }) => {
+  const doc = await f.register('fold-motion.md', '## Fold\n\n' + 'Fold body.\n\n'.repeat(10));
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const section = page.locator('#document details.document-section');
+  const originalHeight = await section.evaluate(el => el.getBoundingClientRect().height);
+  await section.evaluate(async el => {
+    const summary = el.querySelector('summary')!;
+    summary.click(); el.getAnimations({ subtree: true });
+    await new Promise(requestAnimationFrame);
+    summary.click();
+    await Promise.allSettled(el.getAnimations({ subtree: true }).map(a => a.finished));
+  });
+  await expect(section).toHaveAttribute('open', '');
+  expect(await section.evaluate(el => el.getBoundingClientRect().height)).toBeCloseTo(originalHeight, 0);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const durations = await section.evaluate(el => {
+    el.querySelector('summary')!.click();
+    return el.getAnimations({ subtree: true }).map(a => a.effect?.getTiming().duration);
+  });
+  expect(durations).toEqual([]);
+  await expect(page.locator('#document p').first()).toBeHidden();
+  await section.locator('summary').press('Enter');
+  await expect(page.locator('#document p').first()).toBeVisible();
 });
 
 test('selecting across folded content reveals the full passage before attaching it', async ({ page }) => {
@@ -2552,13 +2723,16 @@ test('library close confirms before removing live or stopped documents and prese
   cleanup.push(() => rm(root, { recursive: true, force: true }));
   f = await fixture({ after: fn => cleanup.unshift(fn) }, 20, root);
   const original = await fixture({ after: fn => cleanup.unshift(fn) }, 20, root);
-  const doc = await original.register('live.md', '# Live review'), keep = await f.register('keep.md', '# Keep this review');
+  const doc = await original.register('live.md', '# Live review\n\nLive body.'), keep = await f.register('keep.md', '# Keep this review');
   const old = createState({ agent: 'codex', sessionId: randomUUID() }), directory = join(root, ownerKey(old.owner));
   await mkdir(directory);
   const path = join(directory, 'stopped.md'); await writeFile(path, '# Stopped review');
   const saved = registerDocument(old, { path, generated: true });
   await writeFile(join(directory, 'state.json'), JSON.stringify(old));
   const viewer = await context.newPage(); await viewer.goto(`${original.url}/?document=${doc.id}`);
+  await viewer.locator('#document summary').click();
+  await expect(viewer.getByText('Live body.', { exact: true })).toBeHidden();
+  expect(await viewer.evaluate(id => localStorage.getItem(`sidecar-folds:${id}`), doc.id)).not.toBeNull();
   await viewer.getByLabel('Message', { exact: true }).fill('Unsent draft');
   await page.goto(`${f.url}/?library=1`);
   const closeLive = page.getByRole('button', { name: 'Close “Live review”', exact: true });
@@ -2578,7 +2752,8 @@ test('library close confirms before removing live or stopped documents and prese
   await expect(page.getByRole('link', { name: /Live review/ })).toHaveCount(0);
   await expect(viewer.getByRole('heading', { name: 'Document closed', exact: true })).toBeVisible();
   expect(await viewer.evaluate(id => Object.keys(localStorage).filter(key => key.startsWith(`sidecar-draft:${id}:`)), doc.id)).toEqual([]);
-  expect(await readFile(doc.path, 'utf8')).toBe('# Live review');
+  expect(await viewer.evaluate(id => localStorage.getItem(`sidecar-folds:${id}`), doc.id)).toBeNull();
+  expect(await readFile(doc.path, 'utf8')).toBe('# Live review\n\nLive body.');
   page.once('dialog', dialog => dialog.accept());
   await page.getByRole('button', { name: 'Close “Stopped review”', exact: true }).click();
   await expect(page.getByRole('link', { name: /Stopped review/ })).toHaveCount(0);

@@ -1512,6 +1512,19 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
 .document-section[open] > summary::after { transform: rotate(45deg); }
 .document-section:not([open]) > summary::after, .document-section:hover > summary::after, .document-section > summary:focus-visible::after { opacity: 1; }
 .document-section > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 4px; border-radius: 3px; }
+@media (prefers-reduced-motion: no-preference) {
+  .document-section > summary::after { transition: transform 120ms ease-out; }
+  @supports (interpolate-size: allow-keywords) and selector(::details-content) {
+    .document-section::details-content {
+      interpolate-size: allow-keywords;
+      height: 0;
+      overflow-y: clip;
+      transition: height 120ms ease-out, content-visibility 120ms allow-discrete;
+    }
+    .document-section[open]::details-content { height: auto; }
+  }
+}
+.document-section[data-revealing]::details-content, .document-section[data-revealing] > summary::after { transition: none; }
 .proposal-decisions { display: flex; gap: 7px; margin-left: auto; }
 .proposal-review .proposal-accept { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
 .proposal-review .proposal-original { border: 0; padding: 4px 0; font-size: 11px; color: var(--muted-foreground); }
