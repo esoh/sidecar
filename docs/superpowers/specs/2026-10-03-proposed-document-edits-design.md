@@ -4,6 +4,14 @@ Date: 2026-10-03. Base: PR27, `ad3e4b55569b`.
 
 The user approved the browser layout and then this written design on 2026-10-03. The [implementation plan](../plans/2026-10-03-proposed-document-edits.md) carries the task breakdown and verification gates.
 
+## As built — 2026-10-04
+
+Implemented shared final-reply proposal capture, state v4 with exact migration backups, literal/context matching, guarded file replacement with durable recovery, per-proposal and per-reply decisions, and the document popover/card UI. Both native adapter fixtures accept a proposal while a later reply is streaming, preserving that reply and delivering no extra native request. The included ambiguity fix saves a chosen occurrence in its original version; it never enables an ambiguous source replacement.
+
+Verification on the implementation branch: 163 backend tests and 89 browser tests passed, backend/web TypeScript checks passed, and `git diff --check` passed. A disposable Chrome viewer demonstrated actual acceptance/rejection history, stale-action refusal, and a chosen original passage becoming highlighted, with no browser console errors. Tests cover exact backing-file effects, per-reply bulk scope, overlaps, formatting-only edits, deletion, missing source, retries, hidden/resolved/pinned selections, historical read-only mode, drafts and viewport changes. No real review document was used for testing.
+
+Snapshots use the existing shared writer extracted into `src/snapshots.ts`. Startup tolerates recovery being blocked by an unreadable document: its durable record remains intact, other documents can open, and a decision retries recovery and reports the file error. Same-file operations are serialized inside Sidecar; as specified below, the final identity/content check plus rename is still optimistic coordination with unrelated external writers, not a cross-process transaction.
+
 ## Intent and scope
 
 Let the attached agent propose changes without editing the document. The user reviews each diff at its document annotation, then accepts or rejects it. Acceptance applies through Sidecar immediately; it does not send a new agent request and does not depend on the agent being idle.
