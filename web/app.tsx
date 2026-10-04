@@ -28,59 +28,10 @@ import type { FileQuote } from '../src/quote.ts';
 import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
 import { ResizeHandle } from '@plannotator/ui/components/ResizeHandle';
 import { onCodeHighlightSwap } from '@plannotator/ui/utils/codeHighlight';
+import { usePosition } from './usePosition.ts';
+import { ProposalReviewContext, useProposalReview } from './ProposalReview.tsx';
 
 type Content = { html: string; markdown: string; version: string };
-
-// Placement adapted from Plannotator's CommentPopover (MIT); see THIRD_PARTY_NOTICES.md.
-function usePosition(
-  ref: RefObject<HTMLElement | null>,
-  anchor: (() => DOMRect | undefined) | null,
-  width: number,
-  preferAbove = false,
-) {
-  useLayoutEffect(() => {
-    const node = ref.current;
-    if (!node || !anchor) return;
-    const update = () => {
-      const rect = anchor();
-      if (!rect) return;
-      const viewport = window.visualViewport;
-      const leftEdge = (viewport?.offsetLeft ?? 0) + 8,
-        topEdge = (viewport?.offsetTop ?? 0) + 8;
-      const rightEdge = leftEdge + (viewport?.width ?? innerWidth) - 16,
-        bottomEdge = topEdge + (viewport?.height ?? innerHeight) - 16;
-      const size = Math.min(width, rightEdge - leftEdge);
-      node.style.width = `${size}px`;
-      node.style.maxHeight = `${bottomEdge - topEdge}px`;
-      const height = node.offsetHeight;
-      const gap = preferAbove ? 10 : 8;
-      const below = bottomEdge - rect.bottom - gap,
-        above = rect.top - topEdge - gap;
-      const placeAbove = preferAbove ? above >= height || above > below : below < height && above > below;
-      const top = placeAbove ? rect.top - height - gap : rect.bottom + gap;
-      node.style.left = `${Math.max(leftEdge, Math.min(rect.left + rect.width / 2 - size / 2, rightEdge - size))}px`;
-      node.dataset.placement = placeAbove ? 'above' : 'below';
-      node.style.top = `${Math.max(topEdge, Math.min(top, bottomEdge - height))}px`;
-    };
-    update();
-    const observer = new ResizeObserver(update);
-    observer.observe(node);
-    // Sidebar resizing changes the passage position without resizing the window.
-    const canvas = document.querySelector('.canvas');
-    if (canvas) observer.observe(canvas);
-    window.addEventListener('scroll', update, true);
-    window.addEventListener('resize', update);
-    window.visualViewport?.addEventListener('resize', update);
-    window.visualViewport?.addEventListener('scroll', update);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener('scroll', update, true);
-      window.removeEventListener('resize', update);
-      window.visualViewport?.removeEventListener('resize', update);
-      window.visualViewport?.removeEventListener('scroll', update);
-    };
-  }, [ref, anchor, width, preferAbove]);
-}
 
 function keepsAttachment(target: EventTarget | null) {
   return target instanceof Element && !!target.closest('.sidebar .composer, .sidebar-header, .thread-row, .sidebar-toggle, .files-edge-toggle, .files-panel, .file-preview');
@@ -672,7 +623,7 @@ function App() {
     if (ids.length) setSidebarShown(true);
     if (ids.length === 1) {
       clearSelection();
-      openMessage(ids[0]);
+      if (!proposalReview.open(ids[0], mark)) openMessage(ids[0]);
     } else if (ids.length > 1) {
       setComposing(false);
       setSelection(undefined);
@@ -744,6 +695,13 @@ function App() {
       });
     },
   };
+  const proposalReview = useProposalReview({
+    documentId, proposals: Object.values(state?.proposals ?? {}).filter(p => p.documentId === documentId),
+    selections: selectedMessages.map(item => item.selection), article, version: content.version,
+    isHistorical: !!originalMessageId || !!previewPath,
+    onShowSelection: selectionActions.showPassage, onShowOriginal: selectionActions.showOriginal,
+    onReturnToCurrent: () => { setOriginalMessageId(null); setPreviewPath(null); },
+  });
   const cancel = () => {
     if (!sendingComment.current) {
       clearSelection();
@@ -783,6 +741,8 @@ function App() {
   );
   return (
     <WorkspaceLinks.Provider value={openLink}>
+      <ProposalReviewContext.Provider value={proposalReview.context}>
+      {proposalReview.popover}
       <header className="topbar">
         <div className="brand">
           <Icon name="logo" />
@@ -956,9 +916,9 @@ function App() {
               choices.ids.map((id) => (
                 <button
                   key={id}
-                  onClick={() => {
+                  onClick={(event) => {
                     clearSelection();
-                    openMessage(id);
+                    if (!proposalReview.open(id, event.currentTarget)) openMessage(id);
                   }}
                 >
                   {(() => { const entry = selectedMessages.find(({ selection }) => selection.id === id); return entry?.selection.label ?? entry?.message.text ?? 'Open message'; })()}
@@ -1006,6 +966,7 @@ function App() {
           </section>,
           document.body,
         )}
+      </ProposalReviewContext.Provider>
     </WorkspaceLinks.Provider>
   );
 }

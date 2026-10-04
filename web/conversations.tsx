@@ -1,4 +1,5 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { ProposalCard, ReplyProposalActions, useProposalContext } from './ProposalReview.tsx';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuRadioGroup, DropdownMenuRadioItem } from '@plannotator/ui/components/ui/dropdown-menu';
 import { threadMatch } from './thread-search.ts';
 import { Tooltip } from '@plannotator/ui/components/Tooltip';
@@ -839,6 +840,7 @@ export type MessageContentProps = {
   onOpenFileQuote: (quote: FileQuote) => void;
 };
 export function MessageContent({ message, documentId, threadId, activeSelectionId, passageIssue, showPassage, showOriginal, onQuoteMessage, onOpenFileQuote, onGoToMessage, prefix = 'message' }: MessageContentProps & { prefix?: string }) {
+  const review = useProposalContext(), proposals = review?.proposals.filter(p => p.messageId === message.id) ?? [];
   function capture(root: HTMLElement) {
     const selected = window.getSelection();
     if (!selected?.rangeCount || selected.isCollapsed) return;
@@ -856,10 +858,15 @@ export function MessageContent({ message, documentId, threadId, activeSelectionI
       <span className="selection-badge text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary">quote</span>
       <button aria-label="Go to quoted message" onClick={() => onGoToMessage(message.messageQuote!.messageId)}><span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={message.messageQuote.exact}>{message.messageQuote.exact}</span><span className="passage-arrow"><Icon name="arrowUpRight" /></span></button>
     </div>}
-    {message.selections?.map(selection => <MessageSelection key={selection.id} documentId={documentId} messageId={message.id} threadId={threadId} selection={selection} isActive={selection.id === activeSelectionId} issue={passageIssue(selection.quote)} showPassage={() => showPassage(selection)} showOriginal={() => showOriginal(selection.id)} />)}
+    <ReplyProposalActions proposals={proposals} />
+    {message.selections?.map(selection => {
+      const proposal = proposals.find(p => p.selectionId === selection.id);
+      return <MessageSelection key={selection.id} documentId={documentId} messageId={message.id} threadId={threadId} selection={selection} isActive={selection.id === activeSelectionId} issue={passageIssue(selection.quote)} showPassage={() => showPassage(selection)} showOriginal={() => showOriginal(selection.id)}>{proposal && <ProposalCard proposal={proposal} selection={selection} />}</MessageSelection>;
+    })}
     <div className="message-bubble" onMouseUp={event => capture(event.currentTarget)} onTouchEnd={event => capture(event.currentTarget)} onKeyUp={event => { if (event.key === 'Shift' || event.key.startsWith('Arrow')) capture(event.currentTarget); }}><MarkdownDocument markdown={message.text} documentId={documentId} anchorPrefix={`${prefix}-${message.id}-`} onSelectionLink={slug => {
       const selection = message.selections?.find(selection => selection.slug === slug);
       if (!selection) return false;
+      if (review?.open(selection.id, document.activeElement instanceof HTMLElement ? document.activeElement : null)) return true;
       if (passageIssue(selection.quote)) showOriginal(selection.id); else showPassage(selection);
       return true;
     }} /></div>
@@ -942,8 +949,8 @@ function PinnedMessages({ messages, threadId, onOpen, onGoToMessage }: { message
 }
 
 // Selection badge and excerpt adapted from Plannotator DocumentQAPair (MIT).
-function MessageSelection({ documentId, threadId, messageId, selection, isActive, issue, showPassage, showOriginal }: {
-  documentId: string; threadId: string; messageId: string; selection: SavedSelection; isActive: boolean; issue: string | null; showPassage: () => void; showOriginal: () => void;
+function MessageSelection({ documentId, threadId, messageId, selection, isActive, issue, showPassage, showOriginal, children }: {
+  documentId: string; threadId: string; messageId: string; selection: SavedSelection; isActive: boolean; issue: string | null; showPassage: () => void; showOriginal: () => void; children?: ReactNode;
 }) {
   const quote = selection.quote;
   const [isSaving, setSaving] = useState(false), [error, setError] = useState('');
@@ -964,8 +971,9 @@ function MessageSelection({ documentId, threadId, messageId, selection, isActive
         finally { setSaving(false); }
       }}>{selection.isVisible ? 'Hide' : 'Show'}</button>
     </div>
-    {issue ? <span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={quote.exact}>{quote.exact}</span> :
-      <button aria-label={`Show passage: ${quote.exact}`} onClick={showPassage}><span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={quote.exact}>{quote.exact}</span><span className="passage-arrow"><Icon name="arrowUpRight" /></span></button>}
+    {children || (issue ? <span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={quote.exact}>{quote.exact}</span> :
+      <button aria-label={`Show passage: ${quote.exact}`} onClick={showPassage}><span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={quote.exact}>{quote.exact}</span><span className="passage-arrow"><Icon name="arrowUpRight" /></span></button>)}
+    {selection.proposalError && <p className="proposal-reason">{selection.proposalError}</p>}
     {issue && <div className="passage-context"><span className="changed">{issue}</span>{path && available === path && <button className="original-link" onClick={showOriginal}>{issue === 'Multiple matching passages' ? 'Choose passage' : 'View original document'} <span className="passage-arrow"><Icon name="arrowUpRight" /></span></button>}</div>}
     {error && <p role="alert">{error}</p>}
   </div>;

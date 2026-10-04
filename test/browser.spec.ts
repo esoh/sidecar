@@ -37,6 +37,162 @@ async function answer(text: string) {
   await f.agent('/agent/replies', { requestId: request.id, documentId: request.documentId, threadId: request.threadId, text });
 }
 
+async function proposalReply(page: Page, markdown = '# Retry policy\n\nThe client retries **failed requests** three times.\n') {
+  const doc = await f.register('proposal.md', markdown);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Propose an edit'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"The client retries failed requests three times.","label":"Retry policy","proposal":{"before":"The client retries **failed requests** three times.","after":"The client retries **temporary failures** up to three times."}}]}]]\nReview [the retry policy](#selection-1).');
+  await expect(page.locator('.sidebar .proposal-card')).toBeVisible();
+  return doc;
+}
+
+test('proposal annotations, reply links and cards open one review without moving the thread; acceptance persists', async ({ page }) => {
+  const doc = await proposalReply(page), original = await readFile(doc.path, 'utf8');
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Keep my draft');
+  const dialog = page.getByRole('dialog', { name: 'Proposed change', exact: true });
+  await page.locator('#document mark').first().click();
+  await expect(dialog).toBeVisible(); await expect(dialog).toContainText('temporary failures');
+  expect(await readFile(doc.path, 'utf8')).toBe(original);
+  await page.keyboard.press('Escape'); await expect(dialog).toBeHidden();
+  const link = page.locator('.sidebar .message-bubble').getByRole('link', { name: 'the retry policy' });
+  const log = page.getByRole('log'); const before = await log.evaluate(node => node.scrollTop);
+  await link.click(); await expect(dialog).toBeVisible(); expect(await log.evaluate(node => node.scrollTop)).toBe(before);
+  await page.keyboard.press('Escape'); await expect(link).toBeFocused();
+  const review = page.locator('.sidebar .proposal-card').getByRole('button', { name: 'Review change', exact: true });
+  await review.focus(); await review.press('Enter'); await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Accept', exact: true }).click();
+  await expect(dialog).toContainText('Accepted');
+  expect(await readFile(doc.path, 'utf8')).toBe('# Retry policy\n\nThe client retries **temporary failures** up to three times.\n');
+  await expect(input).toHaveValue('Keep my draft');
+  await page.keyboard.press('Escape'); await page.reload();
+  await expect(page.locator('.sidebar .proposal-card')).toContainText('Accepted');
+  await expect(page.locator('.sidebar .proposal-card').getByRole('button', { name: 'View change' })).toBeVisible();
+  await expect(input).toHaveValue('Keep my draft');
+});
+
+test('proposal rejection preserves bytes and hidden pinned proposals remain reviewable', async ({ page }) => {
+  const doc = await proposalReply(page), original = await readFile(doc.path, 'utf8');
+  const selection = page.locator('.sidebar .message-selection');
+  await selection.getByRole('button', { name: 'Hide selection', exact: true }).click();
+  await expect(page.locator('#document mark')).toHaveCount(0);
+  const message = page.locator('.sidebar .message.agent'); await message.hover(); await message.getByRole('button', { name: 'Pin message', exact: true }).click();
+  const window = page.locator('.reference-window'); await expect(window).toBeVisible();
+  await window.getByRole('button', { name: 'Review change', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Proposed change', exact: true }); await expect(dialog).toBeVisible();
+  await expect(page.locator('#document mark')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Reject', exact: true }).click();
+  await expect(dialog).toContainText('Rejected'); expect(await readFile(doc.path, 'utf8')).toBe(original);
+  await page.reload(); await expect(page.locator('.sidebar .proposal-card')).toContainText('Rejected');
+});
+
+test('proposal Accept all is per reply and explains overlapping and outdated targets', async ({ page }) => {
+  const markdown = 'abcdef' + '.'.repeat(40) + 'valid' + '.'.repeat(40) + 'stale' + '.'.repeat(40) + 'other';
+  const doc = await f.register('bulk.md', markdown); await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Propose several'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  const highlights = [{ exact: 'abc', proposal: { before: 'abc', after: 'A' } }, { exact: 'bcd', proposal: { before: 'bcd', after: 'B' } }, { exact: 'valid', proposal: { before: 'valid', after: 'accepted' } }, { exact: 'stale', proposal: { before: 'already gone', after: 'new' } }];
+  await answer(`[[sidecar-meta ${JSON.stringify({ highlights })}]]\nFirst suggestions.`);
+  await input.fill('Another proposal'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"other","proposal":{"before":"other","after":"untouched"}}]}]]\nLater suggestion.');
+  const first = page.locator('.sidebar .message.agent').first(), second = page.locator('.sidebar .message.agent').last();
+  await first.getByRole('button', { name: 'Accept all (3)', exact: true }).click();
+  await expect(first).toContainText('1 applied'); await expect(first).toContainText('overlap'); await expect(first).toContainText('Outdated');
+  await expect(second).toContainText('Pending');
+  expect(await readFile(doc.path, 'utf8')).toBe(markdown.replace('valid', 'accepted'));
+});
+
+test('proposal source diff exposes formatting-only changes and deletion with safe Markdown rendering', async ({ page }) => {
+  const doc = await f.register('format.md', '**Bold**\n\nDelete me\n'); await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Propose formatting'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"Bold","proposal":{"before":"**Bold**","after":"_Bold_"}},{"exact":"Delete me","proposal":{"before":"Delete me","after":""}}]}]]\nTwo changes.');
+  await page.locator('.sidebar .proposal-card').first().getByRole('button', { name: 'Review change' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Proposed change', exact: true });
+  await expect(dialog.locator('details')).toHaveAttribute('open', '');
+  await expect(dialog).toContainText('**Bold**'); await expect(dialog).toContainText('_Bold_');
+  await expect(dialog.locator('.proposal-before')).toContainText('−'); await expect(dialog.locator('.proposal-after')).toContainText('+');
+  await page.keyboard.press('Escape'); await page.locator('.sidebar .proposal-card').last().getByRole('button', { name: 'Review change' }).click();
+  await expect(dialog).toContainText('Remove this passage'); await dialog.getByRole('button', { name: 'Accept', exact: true }).click();
+  await expect(dialog).toContainText('Accepted');
+  expect(await readFile(doc.path, 'utf8')).toBe('**Bold**\n\n\n');
+  await page.keyboard.press('Escape'); await input.fill('Suggest HTML'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"Bold","proposal":{"before":"**Bold**","after":"<script>window.proposalExecuted=true</script><a href=\\"javascript:alert(1)\\">click</a>"}}]}]]\nUnsafe source is text.');
+  await page.locator('.sidebar .proposal-card').last().getByRole('button', { name: 'Review change' }).click();
+  await expect(dialog.locator('script')).toHaveCount(0); await expect(dialog.locator('a[href^="javascript:"]')).toHaveCount(0);
+  expect(await page.evaluate(() => 'proposalExecuted' in window)).toBe(false);
+});
+
+test('proposal review respects original-view read-only mode and keeps within a resized document viewport', async ({ page }) => {
+  await proposalReply(page, '# Retry policy\n\nThe client retries **failed requests** three times.\n\n' + 'More context.\n\n'.repeat(60));
+  const card = page.locator('.sidebar .proposal-card'), dialog = page.getByRole('dialog', { name: 'Proposed change', exact: true });
+  await card.getByRole('button', { name: 'Review change' }).click();
+  await page.setViewportSize({ width: 950, height: 650 });
+  await expect.poll(async () => { const box = await dialog.boundingBox(), canvas = await page.locator('main.canvas').boundingBox(); return !!box && !!canvas && box.x >= canvas.x && box.x + box.width <= canvas.x + canvas.width + 1 && box.y >= canvas.y && box.y + box.height <= 651; }).toBe(true);
+  await dialog.getByRole('button', { name: 'View original document', exact: true }).click();
+  await expect(dialog.getByRole('button', { name: 'Accept', exact: true })).toBeDisabled();
+  await dialog.getByRole('button', { name: 'Return to current', exact: true }).click();
+  await expect(dialog.getByRole('button', { name: 'Accept', exact: true })).toBeEnabled();
+  await page.locator('main.canvas').evaluate(node => { node.scrollTop = 150; });
+  await expect.poll(async () => (await dialog.boundingBox())!.y).toBeGreaterThanOrEqual(48);
+  // The resize handle is an outside click; reopening must use its new canvas bounds.
+  const panel = (await page.locator('.sidebar').boundingBox())!;
+  await page.mouse.move(panel.x + 3, panel.y + 100); await page.mouse.down();
+  await page.mouse.move(panel.x + 83, panel.y + 100, { steps: 5 }); await page.mouse.up();
+  await card.getByRole('button', { name: 'Review change' }).click();
+  await expect.poll(async () => { const box = (await dialog.boundingBox())!, canvas = (await page.locator('main.canvas').boundingBox())!; return box.x + box.width <= canvas.x + canvas.width; }).toBe(true);
+  await page.locator('.brand').click(); await expect(dialog).toBeHidden();
+});
+
+test('proposal decisions remain retryable after a save error and resolving a thread does not decide them', async ({ page }) => {
+  const doc = await proposalReply(page), original = await readFile(doc.path, 'utf8'), request = await lastRequest();
+  await page.getByRole('button', { name: 'Resolve thread', exact: true }).click();
+  await expect(page.locator('#document mark')).toHaveCount(0);
+  await page.getByLabel('Thread status').click(); await page.getByRole('menuitemradio', { name: 'Resolved', exact: true }).click();
+  await page.locator(`[data-thread-id="${request.threadId}"]`).click();
+  await page.locator('.sidebar .proposal-card').getByRole('button', { name: 'Review change' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Proposed change', exact: true });
+  await expect(dialog).toContainText('Pending'); await expect(page.locator('#document mark')).toHaveCount(0);
+  await page.route('**/api/proposals/*/decision', route => route.fulfill({ status: 409, json: { error: 'The file changed during preparation. Try again.' } }), { times: 1 });
+  await dialog.getByRole('button', { name: 'Accept', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toContainText('Try again');
+  expect(await readFile(doc.path, 'utf8')).toBe(original);
+  await dialog.getByRole('button', { name: 'Accept', exact: true }).click();
+  await expect(dialog).toContainText('Accepted'); await expect(dialog.getByRole('alert')).toHaveCount(0);
+  expect((await state()).threads[request.threadId].isResolved).toBe(true);
+});
+
+test('proposal source-unavailable diagnostics have no acceptance or original-document action', async ({ page }) => {
+  const markdown = '# Temporarily missing\n\nOriginal sentence.\n', doc = await f.register('missing-proposal.md', markdown);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Propose'); await input.press('Enter'); await expect(input).toHaveValue('');
+  await unlink(doc.path);
+  await answer('[[sidecar-meta {"highlights":[{"exact":"Original sentence.","proposal":{"before":"Original sentence.","after":"Revised sentence."}}]}]]\nA suggestion.');
+  await writeFile(doc.path, markdown);
+  await page.locator('.sidebar .proposal-card').getByRole('button', { name: 'View change' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Proposed change', exact: true });
+  await expect(dialog).toContainText('could not be read');
+  await expect(dialog.getByRole('button', { name: 'Accept', exact: true })).toBeDisabled();
+  await expect(dialog.getByRole('button', { name: 'View original document', exact: true })).toHaveCount(0);
+  expect(await readFile(doc.path, 'utf8')).toBe(markdown);
+});
+
+test('proposal diagnostics and ambiguous source stay non-actionable after navigation clarification', async ({ page }) => {
+  const doc = await f.register('ambiguous-proposals.md', '# Same\n\nSame\n'); await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Propose'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"Same","proposal":{"before":"Same","after":"New"}},{"exact":"Same","proposal":{"before":"","after":"Invalid"}}]}]]\nCheck these.');
+  await expect(page.locator('.sidebar')).toContainText('This proposed change could not be prepared.');
+  const first = page.locator('.sidebar .message-selection').first();
+  await first.getByRole('button', { name: 'Choose passage' }).click();
+  await page.getByRole('button', { name: 'Use passage 1', exact: true }).click();
+  await first.getByRole('button', { name: 'View change', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Proposed change', exact: true }); await expect(dialog).toContainText('Outdated');
+  await expect(dialog.getByRole('button', { name: 'Accept', exact: true })).toBeDisabled();
+});
+
 test('the agent popover resets idle mismatches without losing output or a draft', async ({ page }) => {
   const doc = await f.register();
   await page.goto(`${f.url}/?document=${doc.id}`);
