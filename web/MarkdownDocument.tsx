@@ -1,5 +1,6 @@
 import { Fragment, createContext, memo, useContext, useMemo, useState, useEffect, useRef, type ReactNode } from 'react';
 import { BlockRenderer } from '@plannotator/ui/components/BlockRenderer';
+import { isCodeFilePath } from '@plannotator/core/code-file';
 import { MermaidBlock } from '@plannotator/ui/components/MermaidBlock';
 import { GraphvizBlock } from '@plannotator/ui/components/GraphvizBlock';
 import { computeListIndices, groupBlocks, parseMarkdownToBlocks } from '@plannotator/ui/utils/parser';
@@ -187,9 +188,22 @@ export const MarkdownDocument = memo(function MarkdownDocument({
   return (
     <>
       <div className="plannotator-content theme-plannotator" onClickCapture={event => {
-        if (anchorPrefix || !(event.target instanceof Element)) return;
-        const hash = event.target.closest('a[href^="#"]')?.getAttribute('href');
-        if (!hash) return;
+        if (!(event.target instanceof Element)) return;
+        const href = event.target.closest('a[href]')?.getAttribute('href');
+        if (!href) return;
+        const path = href.trim();
+        // Plannotator rejects otherwise-valid code links with surrounding whitespace.
+        // Handle that case here without changing the saved Markdown or external links.
+        const isLocal = !/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(path) || /^file:\/\//i.test(path);
+        // Saved annotations keep their article-level thread/overlap navigation.
+        const isHighlight = event.target.closest('#document mark.annotation-highlight');
+        if (openLink && href !== path && isLocal && isCodeFilePath(path) && !isHighlight) {
+          event.preventDefault(); event.stopPropagation();
+          openLink('code', path.replace(/#.*$/, ''), linkBase);
+          return;
+        }
+        if (anchorPrefix || !href.startsWith('#')) return;
+        const hash = href;
         try {
           const target = document.getElementById(decodeURIComponent(hash.slice(1)));
           if (target) revealTarget(target);

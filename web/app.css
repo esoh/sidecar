@@ -780,6 +780,9 @@ select {
 .selection-actions button {
   text-align: left;
 }
+.highlight-choice { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex-shrink: 0; }
+.highlight-choice-thread { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; line-height: 16px; color: var(--subtle); }
+.highlight-choice-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; line-height: 18px; }
 /* Plannotator AnnotationToolbar: compact icon row and 150ms slide/fade entrance. */
 .annotation-toolbar {
   flex-direction: row;
