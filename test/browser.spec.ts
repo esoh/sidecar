@@ -47,6 +47,86 @@ async function proposalReply(page: Page, markdown = '# Retry policy\n\nThe clien
   return doc;
 }
 
+test('passage navigation opens nested existing details, including the saved original', async ({ page }) => {
+  const markdown = '# Review\n\n<details><summary>Outer details</summary><details><summary>Inner details</summary><p>Hidden target text.</p></details></details>\n';
+  const doc = await f.register('nested-details.md', markdown);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Where is the target?'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"Hidden target text."}]}]]\nRead [the hidden passage](#selection-1).');
+  const mark = page.locator('#document mark').filter({ hasText: 'Hidden target text.' });
+  await expect(mark).toHaveCount(1); await expect(mark).toBeHidden();
+  await page.locator('.sidebar').getByRole('link', { name: 'the hidden passage', exact: true }).click();
+  await expect(mark).toBeVisible();
+  await expect(page.locator('#document details:not(.document-section)[open]')).toHaveCount(2);
+  await page.locator('#document summary').filter({ hasText: /^Outer details$/ }).click();
+  await expect(mark).toBeHidden();
+  await page.getByRole('button', { name: 'Show passage: Hidden target text.', exact: true }).click();
+  await expect(mark).toBeVisible();
+  await writeFile(doc.path, markdown.replace('Hidden target text.', 'Changed target text.'));
+  await expect(page.getByText('Passage changed', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'View original document', exact: true }).click();
+  await expect(page.locator('.original-document mark').filter({ hasText: 'Hidden target text.' })).toBeVisible();
+});
+
+test('main document headings fold their section and retain nested folds without changing other Markdown views', async ({ page }) => {
+  const doc = await f.register('fold-headings.md', 'Introduction stays visible.\n\n## Outer\n\nOuter body.\n\n### Inner\n\nInner body.\n\n## Next\n\nNext body.\n\n# Last\n\nLast body.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const article = page.locator('#document');
+  const toggle = (name: string) => article.locator('summary').filter({ has: page.getByRole('heading', { name, exact: true }) });
+  await expect(article.getByRole('heading', { name: 'Last', exact: true })).toHaveCSS('margin-top', '24px');
+  await toggle('Inner').click(); await expect(article.getByText('Inner body.', { exact: true })).toBeHidden();
+  await toggle('Outer').click(); await expect(article.getByText('Outer body.', { exact: true })).toBeHidden();
+  await expect(article.getByRole('heading', { name: 'Inner', exact: true })).toBeHidden();
+  for (const text of ['Introduction stays visible.', 'Next body.', 'Last body.']) await expect(article.getByText(text, { exact: true })).toBeVisible();
+  await toggle('Outer').press('Enter'); await expect(article.getByText('Outer body.', { exact: true })).toBeVisible();
+  await expect(article.getByText('Inner body.', { exact: true })).toBeHidden();
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Explain'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer('## Reply heading\n\nReply text.');
+  await expect(page.locator('.sidebar').getByRole('heading', { name: 'Reply heading' })).toBeVisible();
+  await expect(page.locator('.sidebar details.document-section')).toHaveCount(0);
+});
+
+test('annotation and heading links reveal only the required folded ancestors', async ({ page }) => {
+  const doc = await f.register('fold-navigation.md', '[Jump to inner](#inner)\n\n## Outer\n\nOuter body.\n\n### Inner\n\nNested selected passage.\n\n## Other\n\nOther body.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const article = page.locator('#document');
+  const toggle = (name: string) => article.locator('summary').filter({ has: page.getByRole('heading', { name, exact: true }) });
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Locate it'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"Nested selected passage."}]}]]\nSee [the target](#selection-1).');
+  const mark = article.locator('mark').filter({ hasText: 'Nested selected passage.' }); await expect(mark).toBeVisible();
+  await toggle('Inner').click(); await toggle('Outer').click(); await toggle('Other').click();
+  await expect(mark).toBeHidden(); await expect(page.getByText('Passage changed', { exact: true })).toHaveCount(0);
+  await article.getByRole('link', { name: 'Jump to inner', exact: true }).click();
+  await expect(article.getByRole('heading', { name: 'Inner', exact: true })).toBeVisible();
+  await expect(mark).toBeHidden();
+  await toggle('Outer').click();
+  await page.locator('.sidebar').getByRole('link', { name: 'the target', exact: true }).click();
+  await expect(mark).toBeVisible(); await expect(article.getByText('Other body.', { exact: true })).toBeHidden();
+  await expect(page.getByText('Passage changed', { exact: true })).toHaveCount(0);
+});
+
+test('selecting across folded content reveals the full passage before attaching it', async ({ page }) => {
+  const doc = await f.register('select-folded.md', 'Visible introduction.\n\n## Folded\n\nPreviously hidden body.\n\n## End\n\nVisible ending.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const article = page.locator('#document');
+  await article.locator('summary').filter({ has: page.getByRole('heading', { name: 'Folded', exact: true }) }).click();
+  await expect(article.getByText('Previously hidden body.', { exact: true })).toBeHidden();
+  await article.evaluate(root => {
+    const paragraphs = root.querySelectorAll('p');
+    const range = document.createRange(); range.setStart(paragraphs[0].firstChild!, 0); range.setEnd(paragraphs[paragraphs.length - 1].firstChild!, 'Visible ending.'.length);
+    window.getSelection()!.removeAllRanges(); window.getSelection()!.addRange(range);
+    root.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  });
+  await expect(article.getByText('Previously hidden body.', { exact: true })).toBeVisible();
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Explain this passage'); await input.press('Enter'); await expect(input).toHaveValue('');
+  const request = await lastRequest();
+  expect(request.quote.exact).toContain('Previously hidden body.');
+  expect(request.quote.exact).toContain('Visible ending.');
+});
+
 test('proposal window stays open while the reader clicks elsewhere and types in the thread', async ({ page }) => {
   await proposalReply(page);
   await page.locator('.sidebar .proposal-card').getByRole('button', { name: 'Review change', exact: true }).click();
@@ -1138,7 +1218,7 @@ test('partial replies render Markdown live without losing a follow-up draft or e
   await page.goto(`${f.url}/?document=${doc.id}`);
   await page.getByLabel('Message', { exact: true }).fill('Stream the answer');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
-  await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('');
   const request = await lastRequest();
   await f.agent(`/agent/requests/${request.id}/claim`, {});
   const route = { requestId: request.id, documentId: doc.id, threadId: request.threadId };
@@ -1956,8 +2036,9 @@ test('renderer fonts, spacing, images and highlighted code survive reload and fi
   const heading = page.locator('#document h1');
   await expect(heading).toHaveCSS('font-size', '22px');
   await expect(heading).toHaveCSS('margin-bottom', '16px');
+  await expect(heading).toHaveCSS('margin-top', '0px');
   await expect(heading).toHaveCSS('font-family', /Inter Variable/);
-  await expect(page.locator('#document > .plannotator-content > p').first()).toHaveCSS('line-height', '24.375px');
+  await expect(page.locator('#document p').filter({ hasText: /^Paragraph with formatting\.$/ })).toHaveCSS('line-height', '24.375px');
   await expect(page.locator('#document code')).toHaveCSS('font-family', /Geist Mono Variable/);
   await expect(page.locator('#document code')).toHaveCSS('padding', '16px');
   const emptyIcon = page.locator('.empty-conversation svg');

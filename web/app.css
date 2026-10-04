@@ -1502,6 +1502,16 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
 .proposal-review button:disabled, .reply-proposal-actions button:disabled { opacity: .45; cursor: default; }
 .proposal-review > header > button { width: 26px; height: 26px; padding: 0; border: 0; font-size: 20px; flex-shrink: 0; }
 .proposal-review footer { display: flex; flex-shrink: 0; flex-wrap: wrap; align-items: center; gap: 8px; justify-content: space-between; padding: 10px 14px; border-top: 1px solid var(--border); }
+.document-section > summary { display: block; position: relative; list-style: none; cursor: pointer; }
+/* The summary wrapper must not make every H1 match upstream first:mt-0. */
+.document-section > summary > h1 { margin-top: 1.5rem; }
+.plannotator-content > .document-section:first-child > summary > h1 { margin-top: 0; }
+.document-section > summary::-webkit-details-marker { display: none; }
+.document-section > summary::before { content: ''; position: absolute; left: -32px; top: 50%; width: 32px; height: 32px; transform: translateY(-50%); }
+.document-section > summary::after { content: ''; position: absolute; left: -17px; top: 50%; width: 6px; height: 6px; margin-top: -4px; border-right: 1.5px solid var(--muted-foreground); border-bottom: 1.5px solid var(--muted-foreground); transform: rotate(-45deg); pointer-events: none; opacity: 0; }
+.document-section[open] > summary::after { transform: rotate(45deg); }
+.document-section:not([open]) > summary::after, .document-section:hover > summary::after, .document-section > summary:focus-visible::after { opacity: 1; }
+.document-section > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 4px; border-radius: 3px; }
 .proposal-decisions { display: flex; gap: 7px; margin-left: auto; }
 .proposal-review .proposal-accept { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
 .proposal-review .proposal-original { border: 0; padding: 4px 0; font-size: 11px; color: var(--muted-foreground); }

@@ -14,6 +14,7 @@ import {
 } from './conversations.tsx';
 import { useQuestionDrafts, forgetDocument, type QuestionDraft, type QuestionDrafts } from './useQuestionDrafts.ts';
 import { quoteIssue, quoteRange, selectionText, selectionSentence, excludedSelection } from './selection.ts';
+import { revealRange } from './reveal-target.ts';
 import { MarkdownDocument, WorkspaceLinks, type OpenWorkspaceLink } from './MarkdownDocument.tsx';
 import { resolveWorkspaceLink, splitLineSuffix } from './links.ts';
 import { setDocPreviewFetcher } from '@plannotator/ui/components/InlineMarkdown';
@@ -565,6 +566,7 @@ function App() {
     if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return;
     if ([range.startContainer, range.endContainer].some((node) => node.parentElement?.closest(excludedSelection)))
       return;
+    revealRange(range);
     const before = document.createRange();
     before.selectNodeContents(root);
     before.setEnd(range.startContainer, range.startOffset);
@@ -685,6 +687,7 @@ function App() {
       requestAnimationFrame(() => {
         const root = article.current, range = root && quoteRange(root, selection.quote, content.version);
         if (!range) return;
+        revealRange(range);
         const node = range.startContainer.parentElement;
         node?.scrollIntoView({ block: 'center', behavior: 'smooth' });
         if (innerWidth <= 850) setSidebarShown(false);
@@ -840,7 +843,7 @@ function App() {
               onMouseUp={captureSelection}
               onTouchEnd={captureSelection}
               onClick={(event) => {
-                if (visitHighlight(event.target)) event.preventDefault();
+                if (ignoreClick.current || visitHighlight(event.target)) event.preventDefault();
               }}
               onKeyUp={(event) => {
                 if (event.key.startsWith('Arrow') || event.key === 'Shift') captureSelection();
@@ -858,7 +861,7 @@ function App() {
               }}
             >
               {current && !documentError && <DocumentHeader key={documentId} repoInfo={current.repoInfo} markdown={content.markdown} onError={setError} />}
-              <MarkdownDocument markdown={content.markdown} documentId={documentId} linkBase={current?.path.replace(/\/[^/]*$/, '')} />
+              <MarkdownDocument markdown={content.markdown} documentId={documentId} linkBase={current?.path.replace(/\/[^/]*$/, '')} canCollapseHeadings />
             </article>
           </div>
         </main>

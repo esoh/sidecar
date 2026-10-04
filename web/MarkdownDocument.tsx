@@ -1,4 +1,4 @@
-import { Fragment, createContext, memo, useContext, useMemo, useState, useEffect, useRef } from 'react';
+import { Fragment, createContext, memo, useContext, useMemo, useState, useEffect, useRef, type ReactNode } from 'react';
 import { BlockRenderer } from '@plannotator/ui/components/BlockRenderer';
 import { MermaidBlock } from '@plannotator/ui/components/MermaidBlock';
 import { GraphvizBlock } from '@plannotator/ui/components/GraphvizBlock';
@@ -9,6 +9,23 @@ import { sanitizeBlockHtml } from '@plannotator/ui/utils/sanitizeHtml';
 import { buildHeadingSlugMap } from '@plannotator/ui/utils/slugify';
 import { createPortal } from 'react-dom';
 import type { Block } from '@plannotator/ui/types';
+import { revealTarget } from './reveal-target.ts';
+
+type BlockGroup = ReturnType<typeof groupBlocks>[number];
+type SectionGroup = { type: 'section'; block: Block; children: DocumentGroup[] };
+type DocumentGroup = BlockGroup | SectionGroup;
+function groupSections(groups: BlockGroup[]): DocumentGroup[] {
+  const roots: DocumentGroup[] = [], parents: SectionGroup[] = [];
+  for (const group of groups) {
+    if (group.type === 'single' && group.block.type === 'heading') {
+      while (parents.length && (parents.at(-1)?.block.level ?? 1) >= (group.block.level ?? 1)) parents.pop();
+      const section: SectionGroup = { type: 'section', block: group.block, children: [] };
+      (parents.at(-1)?.children ?? roots).push(section);
+      parents.push(section);
+    } else (parents.at(-1)?.children ?? roots).push(group);
+  }
+  return roots;
+}
 
 setImageSrcResolver((path, documentId) =>
   /^(https:|data:image\/)/i.test(path)
@@ -29,6 +46,7 @@ export const MarkdownDocument = memo(function MarkdownDocument({
   libraryOwner,
   onSelectionLink,
   linkBase,
+  canCollapseHeadings = false,
 }: {
   markdown: string;
   documentId: string;
@@ -37,6 +55,7 @@ export const MarkdownDocument = memo(function MarkdownDocument({
   onSelectionLink?: (slug: string) => boolean;
   /** Absolute folder that relative links resolve from; replies resolve from the workspace root. */
   linkBase?: string;
+  canCollapseHeadings?: boolean;
 }) {
   const openLink = useContext(WorkspaceLinks);
   const blocks = useMemo(
@@ -52,7 +71,7 @@ export const MarkdownDocument = memo(function MarkdownDocument({
       }),
     [markdown],
   );
-  const groups = useMemo(() => groupBlocks(blocks), [blocks]);
+  const groups = useMemo(() => canCollapseHeadings ? groupSections(groupBlocks(blocks)) : groupBlocks(blocks), [blocks, canCollapseHeadings]);
   const headings = useMemo(() => buildHeadingSlugMap(blocks), [blocks]);
   const [image, setImage] = useState<{ src: string; alt: string } | null>(null);
   function renderBlock(block: Block, orderedIndex?: number | null) {
@@ -73,9 +92,8 @@ export const MarkdownDocument = memo(function MarkdownDocument({
             ? (hash) => {
                 try {
                   if (onSelectionLink?.(decodeURIComponent(hash.slice(1)))) return;
-                  document
-                    .getElementById(anchorPrefix + decodeURIComponent(hash.slice(1)))
-                    ?.scrollIntoView({ block: 'nearest' });
+                  const target = document.getElementById(anchorPrefix + decodeURIComponent(hash.slice(1)));
+                  if (target) { revealTarget(target); target.scrollIntoView({ block: 'nearest' }); }
                 } catch {
                   /* Ignore malformed anchor escapes. */
                 }
@@ -86,29 +104,46 @@ export const MarkdownDocument = memo(function MarkdownDocument({
       />
     );
   }
+  function renderGroups(items: DocumentGroup[]): ReactNode {
+    return items.map(group => {
+      if (group.type === 'section' && group.children.length) return (
+        <details key={headings.get(group.block.id) ?? group.block.id} className="document-section" open>
+          <summary>{renderBlock(group.block)}</summary>{'\n'}
+          {renderGroups(group.children)}
+        </details>
+      );
+      if (group.type !== 'list-group')
+        return (
+          <Fragment key={group.block.id}>
+            {renderBlock(group.block)}
+            {'\n'}
+          </Fragment>
+        );
+      const indices = computeListIndices(group.blocks);
+      return (
+        <div key={group.key} className="py-1 -mx-2 px-2">
+          {group.blocks.map((block, i) => (
+            <Fragment key={block.id}>
+              {renderBlock(block, indices[i])}
+              {'\n'}
+            </Fragment>
+          ))}
+        </div>
+      );
+    });
+  }
   return (
     <>
-      <div className="plannotator-content theme-plannotator">
-        {groups.map((group) => {
-          if (group.type !== 'list-group')
-            return (
-              <Fragment key={group.block.id}>
-                {renderBlock(group.block)}
-                {'\n'}
-              </Fragment>
-            );
-          const indices = computeListIndices(group.blocks);
-          return (
-            <div key={group.key} className="py-1 -mx-2 px-2">
-              {group.blocks.map((block, i) => (
-                <Fragment key={block.id}>
-                  {renderBlock(block, indices[i])}
-                  {'\n'}
-                </Fragment>
-              ))}
-            </div>
-          );
-        })}
+      <div className="plannotator-content theme-plannotator" onClickCapture={event => {
+        if (anchorPrefix || !(event.target instanceof Element)) return;
+        const hash = event.target.closest('a[href^="#"]')?.getAttribute('href');
+        if (!hash) return;
+        try {
+          const target = document.getElementById(decodeURIComponent(hash.slice(1)));
+          if (target) revealTarget(target);
+        } catch { /* Ignore malformed anchor escapes. */ }
+      }}>
+        {renderGroups(groups)}
       </div>
       {image && createPortal(<ImageLightbox {...image} onClose={() => setImage(null)} />, document.body)}
     </>
