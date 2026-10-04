@@ -180,3 +180,20 @@ When an edit summary names the changed section, link the existing heading withou
 Updated the comparison under [Admission checks](#selection-1).
 [[/sidecar:SUPPLIED_NONCE]]
 ```
+
+### Propose a document change for approval
+
+When the user asks you to propose changes or get approval before editing, attach a `proposal` to a highlight in the same final metadata line. This is for the **registered main Markdown document only**, not file windows, other documents, or code files. Know the current source; read it if needed. Do not also apply the proposed change with a tool. Ordinary requests to edit still use Edit/apply_patch directly unless the user asks for a proposal or approval first.
+
+```text
+[[sidecar:SUPPLIED_NONCE]]
+[[sidecar-meta {"highlights":[{"exact":"The client retries failed requests three times.","label":"Retry policy","proposal":{"before":"The client retries **failed requests** three times.","after":"The client retries **temporary connection failures** up to three times."}}]}]]
+Review [the retry policy](#selection-1).
+[[/sidecar:SUPPLIED_NONCE]]
+```
+
+`exact` and its `prefix`/`suffix` still describe **visible rendered text** for navigation. Nested `proposal.before` and `proposal.after` are **literal Markdown source**, including formatting and whitespace. Optional nested `proposal.prefix`/`proposal.suffix` are immediately adjacent **source text** to disambiguate repeated passages. The replacement must match exactly and uniquely; Sidecar never substitutes similar wording or guesses an occurrence. A user clarifying an ambiguous navigation highlight does not repair or authorize an ambiguous source replacement.
+
+Use a nonempty `before`, allow an empty `after` for deletion, and do not propose identical before/after strings. For insertion, replace an existing source anchor with that anchor plus the new content. Each before/after is limited to 16,384 UTF-16 code units and each source context to 512. The existing cap of 20 highlights per final reply still applies. Invalid proposals retain a non-actionable diagnostic; missing or ambiguous source produces an outdated proposal while preserving your answer.
+
+Only complete final replies create proposals; progress or interrupted output cannot create actionable changes. The user can Accept/Reject each proposal, or Accept all for that reply. Accept writes through Sidecar immediately, without another request to you, and may happen while you are busy. Re-read affected source before a later direct edit; remembered pending status is not authoritative. If you need the latest decisions, the existing optional `sidecar request ID --owner KEY` context read includes that thread's proposals. Keep simple replies in one trip; do not poll decisions unnecessarily. Retried completed replies preserve proposal identities. Metadata itself never edits the file.

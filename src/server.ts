@@ -10,6 +10,7 @@ import { observeCodex, readCodexActivity, resetCodexSession, type CodexObserver,
 import { ReplyStream, isStreamEvent } from './stream.ts';
 import { parseReply } from './reply-metadata.ts';
 import { readDocument } from './documents.ts';
+import { prepareProposal } from './proposals.ts';
 import { readAppVersion } from './version.ts';
 import { libraryDocument, listLibrary, recordDocumentOpen } from './library.ts';
 import { listFiles, readCode, readPreview } from './files.ts';
@@ -237,9 +238,16 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     const state = store.read(), request = get(state.requests, input.requestId);
     if (request.documentId !== input.documentId || request.threadId !== input.threadId) throw new DomainError('Reply routing does not match the request', 409);
     if (!request.answer && input.metadata?.highlights?.length) {
-      const data = await readDocument(get(state.documents, input.documentId).path);
-      await saveVersion(input.documentId, data);
-      input.selectionVersion = data.version;
+      const highlights = input.metadata.highlights;
+      let data: DocumentData | undefined;
+      try { data = await readDocument(get(state.documents, input.documentId).path); }
+      catch (error) {
+        // A proposal that cannot be prepared still belongs to a valid answer.
+        if (!highlights.some(h => h.proposal || h.proposalError)) throw error;
+      }
+      if (data) await saveVersion(input.documentId, data);
+      input.selectionVersion = data?.version ?? '';
+      input.proposalTargets = highlights.map(h => h.proposal ? prepareProposal(data?.markdown ?? null, data?.version ?? null, h.proposal) : null);
     }
     await store.update(state => reply(state, input));
   }
@@ -851,7 +859,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         const markers = result.claimStatus === 'already-claimed' && stream?.route.requestId === id
           ? stream.error ? { error: stream.error } : { prefix: stream.prefix, suffix: stream.suffix, progress: stream.progress }
           : undefined;
-        changed(); json(response, { ...result, ...requestContext(state, id), ...(markers ? { stream: markers } : {}), document, thread: get(state.threads, result.request.threadId) }); return;
+        changed(); json(response, { ...result, ...requestContext(state, id), ...(markers ? { stream: markers } : {}), document, thread: get(state.threads, result.request.threadId), proposals: Object.values(state.proposals).filter(p => p.threadId === result.request.threadId) }); return;
       }
       if (method === 'POST' && path === '/agent/streams') {
         const route = { requestId: text(body, 'requestId'), documentId: text(body, 'documentId'), threadId: text(body, 'threadId') };

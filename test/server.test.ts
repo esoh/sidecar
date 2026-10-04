@@ -5,6 +5,38 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fixture } from './support.ts';
 
+test('proposal capture isolates malformed and ambiguous source from a unique source with ambiguous visible text', async t => {
+  const f = await fixture(t), markdown = '# Heading\n\nSee Heading.\n\nSame and Same.';
+  const doc = await f.register('proposals.md', markdown);
+  const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'Propose edits', clientMessageId: 'proposal' })).json();
+  await f.agent(`/agent/requests/${request.id}/claim`, {});
+  const highlights = [
+    { exact: 'Heading', proposal: { before: '# Heading', after: '# New heading' } },
+    { exact: 'Same', proposal: { before: 'Same', after: 'Different' } },
+    { exact: 'See Heading.', proposal: { before: '', after: 'Invalid' } },
+    { exact: 'Same and Same.' },
+  ];
+  assert.equal((await f.agent('/agent/replies', { requestId: request.id, documentId: doc.id, threadId: request.threadId, text: `[[sidecar-meta ${JSON.stringify({ highlights })}]]\nReview these.` })).status, 200);
+  const saved = await (await f.view('/api/state')).json(), proposals = Object.values<any>(saved.proposals), message = saved.threads[request.threadId].messages.at(-1);
+  assert.equal(proposals.length, 2); assert.deepEqual(proposals.map(p => p.status), ['pending', 'outdated']);
+  assert.equal(proposals[1].reason, 'ambiguous'); assert.equal(proposals[1].baseRange, null);
+  assert.equal(proposals[0].baseVersion, proposals[1].baseVersion);
+  assert.equal(message.selections.length, 4); assert.ok(message.selections[2].proposalError);
+  assert.equal(message.selections[3].slug, 'selection-4');
+  assert.equal(await readFile(doc.path, 'utf8'), markdown);
+});
+
+test('missing proposal source completes the answer without inventing a document revision', async t => {
+  const f = await fixture(t), doc = await f.register();
+  const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'Propose edit', clientMessageId: 'missing' })).json();
+  await f.agent(`/agent/requests/${request.id}/claim`, {}); await unlink(doc.path);
+  assert.equal((await f.agent('/agent/replies', { requestId: request.id, documentId: doc.id, threadId: request.threadId, text: '[[sidecar-meta {"highlights":[{"exact":"Hello world.","proposal":{"before":"Hello **world**.","after":"New wording"}}]}]]\nReview this.' })).status, 200);
+  const saved = await (await f.view('/api/state')).json(), proposed = Object.values<any>(saved.proposals)[0];
+  assert.equal(saved.requests[request.id].status, 'completed'); assert.equal(proposed.status, 'outdated');
+  assert.equal(proposed.reason, 'source-unavailable'); assert.equal(proposed.baseVersion, null);
+  assert.equal(saved.threads[request.threadId].messages.at(-1).selections[0].quote.version, '');
+});
+
 test('selection disambiguation is scoped, preserves the original revision and survives restart', async t => {
   const f = await fixture(t), markdown = '# Author Summary\n\nSee Author Summary.';
   const doc = await f.register('duplicate.md', markdown);
