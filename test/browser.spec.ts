@@ -1544,13 +1544,14 @@ test('composer stays in a narrow viewport and cancels without submitting', async
   await page.getByLabel('Message', { exact: true }).fill('A general question');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect(page.locator('#threads').getByText('A general question', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('');
   expect((await lastRequest()).quote).toBeUndefined();
 });
 
 // Clicking a link's annotation must open its thread, not follow the underlying URL.
-for (const padded of [false, true]) test(`${padded ? 'Padded code' : 'External'} link highlights stay in the viewer and overlapping threads can each be opened`, async ({ page, context }) => {
-  const root = await filesWorkspace({ 'source.ts': 'export const value = 1;\n' });
-  const href = padded ? ` ${root}/source.ts:1 ` : 'https://example.com';
+for (const kind of ['External', 'Padded code', 'Markdown line']) test(`${kind} link highlights stay in the viewer and overlapping threads can each be opened`, async ({ page, context }) => {
+  const root = await filesWorkspace({ 'source.ts': 'export const value = 1;\n', 'README.md': '# Reference\n' });
+  const href = kind === 'Markdown line' ? `${root}/README.md:1` : kind === 'Padded code' ? ` ${root}/source.ts:1 ` : 'https://example.com';
   const a = await f.register('a.md', `# Links\n\nRead [the docs](${href}) carefully.`);
   await page.goto(`${f.url}/?document=${a.id}`);
   await expect(page.locator('#document')).toContainText('the docs');
@@ -1808,6 +1809,39 @@ test('inline title cancellation, blur saving and failed-save recovery preserve u
   await pencil.click(); await title.fill('Retry this name'); await title.press('Enter');
   await expect(title).toHaveValue('Retry this name'); await expect(page.getByRole('alert')).toHaveText('Save failed');
   await title.press('Enter'); await expect(page).toHaveTitle('Retry this name'); await expect(pencil).toBeFocused();
+});
+
+test('thread list restores reading positions and follows latest replies only from the bottom', async ({ page }) => {
+  const doc = await f.register();
+  const addReply = async (text: string, threadId?: string) => {
+    const request = await (await f.view('/api/questions', { documentId: doc.id, threadId, text, clientMessageId: randomUUID() })).json();
+    await answer(`${text}\n\n` + 'A detailed explanation.\n\n'.repeat(40));
+    return request.threadId;
+  };
+  const first = await addReply('First discussion'), second = await addReply('Second discussion');
+  await page.addInitScript(id => sessionStorage.setItem(`sidecar-thread:${id}`, 'list'), doc.id);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const log = page.getByRole('log');
+  const open = (id: string) => page.locator(`[data-thread-id="${id}"]`).click();
+  const back = () => page.getByRole('button', { name: 'Threads', exact: true }).click();
+  const expectBottom = async () => {
+    await expect.poll(() => log.evaluate(node => node.scrollTop)).toBeGreaterThan(100);
+    await expect.poll(() => log.evaluate(node => node.scrollHeight - node.scrollTop - node.clientHeight)).toBeLessThan(2);
+  };
+  await open(first); await expectBottom();
+  await log.evaluate(node => { node.scrollTop = 230; node.dispatchEvent(new Event('scroll')); });
+  await back(); await open(second); await expectBottom();
+  await log.evaluate(node => { node.scrollTop = 410; node.dispatchEvent(new Event('scroll')); });
+  await back();
+  await addReply('New reply while reading older messages', first);
+  await open(first);
+  await expect.poll(() => log.evaluate(node => node.scrollTop)).toBe(230);
+  await log.evaluate(node => { node.scrollTop = node.scrollHeight; node.dispatchEvent(new Event('scroll')); });
+  await back();
+  await addReply('New reply while following the bottom', first);
+  await open(first); await expectBottom();
+  await back(); await open(second);
+  await expect.poll(() => log.evaluate(node => node.scrollTop)).toBe(410);
 });
 
 test('thread creation retry and conversation scroll survive switching', async ({ page }) => {
@@ -3611,6 +3645,42 @@ test('whitespace-padded code links in replies open a file window and preserve th
   const file = page.getByRole('dialog', { name: 'File: src/evidence.ts', exact: true });
   await expect(file.locator('pre code')).toContainText('return true;');
   await expect(input).toHaveValue('Keep this question');
+  expect(page.url()).toContain(`document=${doc.id}`);
+  expect(context.pages()).toHaveLength(1);
+});
+
+test('Markdown line links in documents and replies open rendered files and preserve drafts', async ({ page, context }) => {
+  const root = await filesWorkspace({
+    'docs/main.md': '# Main\n\nRead [the relative README](README.md:3-4#target).\n',
+    'docs/README.md': '# Reference heading\n\nReference body.\n',
+  });
+  const doc = await (await f.agent('/agent/documents', { path: join(root, 'docs/main.md'), workspace: root })).json();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Keep this draft');
+  const file = page.getByRole('dialog', { name: 'File: docs/README.md', exact: true });
+  await page.locator('#document').getByRole('link', { name: 'the relative README', exact: true }).click();
+  await expect(file.getByRole('heading', { name: 'Reference heading', exact: true })).toBeVisible();
+  await expect(input).toHaveValue('Keep this draft');
+  await file.getByRole('button', { name: 'Close file window' }).click();
+  await input.fill('Where is the rule?'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer(`It is [recorded in the semantic graph README](${root}/docs/README.md:11). Also [padded path]( ${root}/docs/README.md:3-4 ) and [external README](https://example.com/README.md:11).`);
+  await input.fill('Keep my follow-up');
+  for (const name of ['recorded in the semantic graph README', 'padded path']) {
+    await page.getByRole('log').getByRole('link', { name, exact: true }).click();
+    await expect(file.getByRole('heading', { name: 'Reference heading', exact: true })).toBeVisible();
+    await expect(input).toHaveValue('Keep my follow-up');
+    await file.getByRole('button', { name: 'Close file window' }).click();
+  }
+  const external = page.getByRole('link', { name: 'external README', exact: true });
+  await context.route('https://example.com/README.md:11', route => route.fulfill({ contentType: 'text/plain', body: 'External destination' }));
+  const opened = context.waitForEvent('page');
+  await external.click();
+  const externalPage = await opened;
+  await expect(externalPage).toHaveURL('https://example.com/README.md:11');
+  await expect(file).toHaveCount(0);
+  await externalPage.close();
   expect(page.url()).toContain(`document=${doc.id}`);
   expect(context.pages()).toHaveLength(1);
 });

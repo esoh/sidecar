@@ -8,9 +8,11 @@ import '@plannotator/ui/utils/math-eager';
 import { setImageSrcResolver } from '@plannotator/ui/components/ImageThumbnail';
 import { sanitizeBlockHtml } from '@plannotator/ui/utils/sanitizeHtml';
 import { buildHeadingSlugMap } from '@plannotator/ui/utils/slugify';
+import { hasLinkedDocExtension } from '@plannotator/ui/utils/markdownExtensions';
 import { createPortal } from 'react-dom';
 import type { Block } from '@plannotator/ui/types';
 import { revealTarget } from './reveal-target.ts';
+import { splitLineSuffix } from './links.ts';
 
 type BlockGroup = ReturnType<typeof groupBlocks>[number];
 type SectionGroup = { type: 'section'; block: Block; children: DocumentGroup[] };
@@ -192,14 +194,16 @@ export const MarkdownDocument = memo(function MarkdownDocument({
         const href = event.target.closest('a[href]')?.getAttribute('href');
         if (!href) return;
         const path = href.trim();
-        // Plannotator rejects otherwise-valid code links with surrounding whitespace.
-        // Handle that case here without changing the saved Markdown or external links.
-        const isLocal = !/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(path) || /^file:\/\//i.test(path);
+        // Plannotator misses document links with line suffixes and padded code links.
+        // Normalize those cases without changing saved Markdown or external links.
+        const [documentPath, line] = splitLineSuffix(path.replace(/#.*$/, ''));
+        const isLocal = !/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(documentPath) || /^file:\/\//i.test(documentPath);
+        const isDocumentLine = !!line && hasLinkedDocExtension(documentPath);
         // Saved annotations keep their article-level thread/overlap navigation.
         const isHighlight = event.target.closest('#document mark.annotation-highlight');
-        if (openLink && href !== path && isLocal && isCodeFilePath(path) && !isHighlight) {
+        if (openLink && isLocal && !isHighlight && (isDocumentLine || (href !== path && isCodeFilePath(path)))) {
           event.preventDefault(); event.stopPropagation();
-          openLink('code', path.replace(/#.*$/, ''), linkBase);
+          openLink(isDocumentLine ? 'doc' : 'code', isDocumentLine ? documentPath : path.replace(/#.*$/, ''), linkBase);
           return;
         }
         if (anchorPrefix || !href.startsWith('#')) return;
