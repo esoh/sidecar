@@ -1493,18 +1493,25 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
   cursor: pointer;
 }
 
-.proposal-review { z-index: 80; position: fixed; overflow: auto; padding: 0; border-radius: 12px; border: 1px solid var(--border); background: var(--popover, var(--card)); box-shadow: 0 14px 45px #0006; font-size: 13px; }
-.proposal-review > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.proposal-review { z-index: 80; position: fixed; overflow: visible; display: flex; flex-direction: column; padding: 0; border-radius: 12px; border: 1px solid var(--border); background: var(--popover, var(--card)); box-shadow: 0 14px 45px #0006; font-size: 13px; }
+.proposal-review > header { display: flex; flex-shrink: 0; cursor: grab; touch-action: none; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
 .proposal-review > header > div { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .proposal-review > header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .proposal-review button, .proposal-card button, .reply-proposal-actions button { border: 1px solid var(--border); background: transparent; color: inherit; border-radius: 6px; padding: 5px 9px; font: inherit; cursor: pointer; }
 .proposal-review button:hover, .proposal-card button:hover, .reply-proposal-actions button:hover { background: var(--muted); }
 .proposal-review button:disabled, .reply-proposal-actions button:disabled { opacity: .45; cursor: default; }
 .proposal-review > header > button { width: 26px; height: 26px; padding: 0; border: 0; font-size: 20px; flex-shrink: 0; }
-.proposal-review footer { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; justify-content: space-between; padding: 10px 14px; border-top: 1px solid var(--border); }
+.proposal-review footer { display: flex; flex-shrink: 0; flex-wrap: wrap; align-items: center; gap: 8px; justify-content: space-between; padding: 10px 14px; border-top: 1px solid var(--border); }
 .proposal-decisions { display: flex; gap: 7px; margin-left: auto; }
 .proposal-review .proposal-accept { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
 .proposal-review .proposal-original { border: 0; padding: 4px 0; font-size: 11px; color: var(--muted-foreground); }
+.proposal-review :focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.proposal-content { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.proposal-text-size { display: flex; align-items: center; flex-shrink: 0; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--border); font-size: 11px; }
+.proposal-text-size label, .proposal-text-size output { flex-shrink: 0; white-space: nowrap; }
+.proposal-text-size input { flex: 1; min-width: 0; width: 100%; accent-color: var(--primary); }
+.proposal-text-size output { width: 4ch; text-align: right; font-variant-numeric: tabular-nums; }
+.proposal-text-size button { padding: 3px 6px; }
 .proposal-diff { padding: 12px 14px; }
 .proposal-before, .proposal-after { display: grid; grid-template-columns: 15px minmax(0, 1fr); gap: 5px; padding: 9px; border-radius: 5px; overflow-wrap: anywhere; }
 .proposal-before { background: oklch(.6 .13 25 / .10); border-left: 2px solid oklch(.7 .13 25 / .7); }
@@ -1523,7 +1530,7 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
 .proposal-card button { padding: 3px 6px; color: var(--foreground); font-size: 10px; }
 .proposal-excerpt { margin: 5px 0 0; color: var(--muted-foreground); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; }
 .proposal-reason { font-size: 11px; color: var(--muted-foreground); margin: 6px 0; }
-.proposal-review > .proposal-reason, .proposal-review > [role=alert] { margin: 0 14px 12px; }
+.proposal-content .proposal-reason, .proposal-content [role=alert] { margin: 0 14px 12px; }
 .reply-proposal-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 11px; }
 .reply-proposal-actions:empty { display: none; }
 .reply-proposal-actions [role=status] { font-size: 10px; color: var(--muted-foreground); }

@@ -47,6 +47,112 @@ async function proposalReply(page: Page, markdown = '# Retry policy\n\nThe clien
   return doc;
 }
 
+test('proposal window stays open while the reader clicks elsewhere and types in the thread', async ({ page }) => {
+  await proposalReply(page);
+  await page.locator('.sidebar .proposal-card').getByRole('button', { name: 'Review change', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Proposed change', exact: true });
+  const draft = page.getByLabel('Message', { exact: true });
+  await draft.click(); await draft.fill('Compare this with the proposed change');
+  await expect(dialog).toBeVisible(); await expect(draft).toHaveValue('Compare this with the proposed change');
+  await page.locator('.brand').click(); await expect(dialog).toBeVisible();
+  await page.keyboard.press('Escape'); await expect(dialog).toBeHidden();
+});
+
+test('proposal window moves and resizes without snapping back on content changes or document scrolling', async ({ page }) => {
+  await proposalReply(page, '# Retry policy\n\nThe client retries **failed requests** three times.\n\n' + 'More context.\n\n'.repeat(60));
+  const review = page.locator('.sidebar .proposal-card').getByRole('button', { name: 'Review change', exact: true });
+  await review.click();
+  const dialog = page.getByRole('dialog', { name: 'Proposed change', exact: true });
+  const before = (await dialog.boundingBox())!;
+  const title = (await dialog.locator('header').boundingBox())!;
+  await page.mouse.move(title.x + 65, title.y + title.height / 2); await page.mouse.down();
+  await page.mouse.move(title.x + 145, title.y + title.height / 2 + 60, { steps: 5 }); await page.mouse.up();
+  await expect.poll(async () => (await dialog.boundingBox())!.x).toBeCloseTo(before.x + 80, 0);
+  await expect.poll(async () => (await dialog.boundingBox())!.y).toBeCloseTo(before.y + 60, 0);
+  const moved = (await dialog.boundingBox())!;
+  await dialog.locator('summary').click();
+  await page.locator('main.canvas').evaluate(node => { node.scrollTop = 150; });
+  await expect.poll(async () => (await dialog.boundingBox())!.x).toBeCloseTo(moved.x, 0);
+  await expect.poll(async () => (await dialog.boundingBox())!.y).toBeCloseTo(moved.y, 0);
+  const corner = (await dialog.locator('.resize-se').boundingBox())!;
+  await page.mouse.move(corner.x + corner.width / 2, corner.y + corner.height / 2); await page.mouse.down();
+  await page.mouse.move(corner.x + corner.width / 2 + 90, corner.y + corner.height / 2 + 75, { steps: 5 }); await page.mouse.up();
+  await expect.poll(async () => (await dialog.boundingBox())!.width).toBeCloseTo(moved.width + 90, 0);
+  await expect.poll(async () => (await dialog.boundingBox())!.height).toBeCloseTo(moved.height + 75, 0);
+  const resized = (await dialog.boundingBox())!;
+  const handle = dialog.getByRole('group', { name: 'Move proposed change' });
+  await handle.press('ArrowLeft'); await handle.press('Shift+ArrowRight');
+  await expect.poll(async () => (await dialog.boundingBox())!.x).toBeCloseTo(resized.x - 10, 0);
+  await expect.poll(async () => (await dialog.boundingBox())!.width).toBeCloseTo(resized.width + 10, 0);
+  await expect(dialog.getByRole('button', { name: /dock/i })).toHaveCount(0);
+  const draft = page.getByLabel('Message', { exact: true }); await draft.fill('Keep reviewing while I draft');
+  await expect(dialog).toBeVisible(); await expect(draft).toHaveValue('Keep reviewing while I draft');
+  await page.keyboard.press('Escape'); await expect(dialog).toBeHidden(); await expect(review).toBeFocused();
+});
+
+test('proposal window keeps controls reachable while long content scrolls and the viewport shrinks', async ({ page }) => {
+  const before = Array.from({ length: 25 }, (_, i) => `Paragraph ${i + 1} needs a clearer explanation of the retry policy.`).join('\n\n');
+  const doc = await f.register('long-proposal.md', before);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Revise'); await input.press('Enter'); await expect(input).toHaveValue('');
+  await answer(`[[sidecar-meta ${JSON.stringify({ highlights: [{ exact: before, label: 'Retry policy', proposal: { before, after: before.replaceAll('clearer', 'better') } }] })}]]\nReview this revision.`);
+  await page.locator('.sidebar .proposal-card').getByRole('button', { name: 'Review change' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Proposed change', exact: true });
+  const header = dialog.locator('header'), footer = dialog.locator('footer');
+  const headerBefore = await header.boundingBox(), footerBefore = await footer.boundingBox();
+  const body = dialog.locator('.proposal-content');
+  await expect.poll(() => body.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
+  await body.evaluate(node => { node.scrollTop = node.scrollHeight; });
+  await expect.poll(() => body.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+  expect(await header.boundingBox()).toEqual(headerBefore); expect(await footer.boundingBox()).toEqual(footerBefore);
+  // Take over the initial anchored placement, then exercise the independent viewport clamp.
+  await dialog.getByRole('group', { name: 'Move proposed change' }).press('ArrowRight');
+  await page.setViewportSize({ width: 360, height: 420 });
+  await expect.poll(async () => {
+    const rect = (await dialog.boundingBox())!;
+    return rect.x >= 0 && rect.y >= 0 && rect.x + rect.width <= 360 && rect.y + rect.height <= 420;
+  }).toBe(true);
+  for (const name of ['Close proposed change', 'View original document', 'Accept', 'Reject']) {
+    const button = dialog.getByRole('button', { name, exact: true });
+    await expect(button).toBeInViewport(); await button.click({ trial: true });
+  }
+  await dialog.getByRole('button', { name: 'Reject', exact: true }).click();
+  await expect(dialog).toContainText('Rejected'); expect(await readFile(doc.path, 'utf8')).toBe(before);
+});
+
+test('proposal text size affects both previews and source diff and persists independently of reading settings', async ({ page }) => {
+  await proposalReply(page);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('slider', { name: 'Document text size', exact: true }).fill('120');
+  await page.getByRole('slider', { name: 'Conversation text size', exact: true }).fill('90');
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  const review = page.locator('.sidebar .proposal-card').getByRole('button', { name: 'Review change', exact: true });
+  await review.click();
+  const dialog = page.getByRole('dialog', { name: 'Proposed change', exact: true });
+  const size = dialog.getByRole('slider', { name: 'Proposal text size', exact: true });
+  await expect(size).toHaveValue('100');
+  await dialog.locator('summary').click();
+  const preview = dialog.locator('.proposal-after strong'), source = dialog.locator('diffs-container');
+  await expect(source.locator('[data-code]').first()).toBeVisible();
+  const previewBefore = (await preview.boundingBox())!, sourceBefore = (await source.boundingBox())!;
+  const closeBefore = (await dialog.getByRole('button', { name: 'Close proposed change' }).boundingBox())!;
+  await size.fill('140');
+  await expect.poll(async () => (await preview.boundingBox())!.height).toBeGreaterThan(previewBefore.height * 1.3);
+  await expect.poll(async () => (await source.boundingBox())!.height).toBeGreaterThan(sourceBefore.height * 1.3);
+  expect((await dialog.getByRole('button', { name: 'Close proposed change' }).boundingBox())!.height).toBe(closeBefore.height);
+  await dialog.getByRole('button', { name: 'Close proposed change' }).click(); await expect(review).toBeFocused();
+  await review.click(); await expect(size).toHaveValue('140');
+  await page.reload(); await review.click(); await expect(size).toHaveValue('140');
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('slider', { name: 'Document text size', exact: true })).toHaveValue('120');
+  await expect(page.getByRole('slider', { name: 'Conversation text size', exact: true })).toHaveValue('90');
+  await page.getByRole('slider', { name: 'Document text size', exact: true }).fill('150');
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await review.click(); await expect(size).toHaveValue('140');
+  await dialog.getByRole('button', { name: 'Reset proposal text size', exact: true }).click(); await expect(size).toHaveValue('100');
+});
+
 test('proposal annotations, reply links and cards open one review without moving the thread; acceptance persists', async ({ page }) => {
   const doc = await proposalReply(page), original = await readFile(doc.path, 'utf8');
   const input = page.getByLabel('Message', { exact: true }); await input.fill('Keep my draft');
@@ -137,13 +243,14 @@ test('proposal review respects original-view read-only mode and keeps within a r
   await expect(dialog.getByRole('button', { name: 'Accept', exact: true })).toBeEnabled();
   await page.locator('main.canvas').evaluate(node => { node.scrollTop = 150; });
   await expect.poll(async () => (await dialog.boundingBox())!.y).toBeGreaterThanOrEqual(48);
-  // The resize handle is an outside click; reopening must use its new canvas bounds.
+  // Changing the sidebar must keep the open proposal within its new canvas bounds.
   const panel = (await page.locator('.sidebar').boundingBox())!;
   await page.mouse.move(panel.x + 3, panel.y + 100); await page.mouse.down();
   await page.mouse.move(panel.x + 83, panel.y + 100, { steps: 5 }); await page.mouse.up();
   await card.getByRole('button', { name: 'Review change' }).click();
   await expect.poll(async () => { const box = (await dialog.boundingBox())!, canvas = (await page.locator('main.canvas').boundingBox())!; return box.x + box.width <= canvas.x + canvas.width; }).toBe(true);
-  await page.locator('.brand').click(); await expect(dialog).toBeHidden();
+  await page.locator('.brand').click(); await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Close proposed change' }).click(); await expect(dialog).toBeHidden();
 });
 
 test('proposal decisions remain retryable after a save error and resolving a thread does not decide them', async ({ page }) => {
