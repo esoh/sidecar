@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import Highlighter from '@plannotator/web-highlighter';
-import type { Quote, RequestRecord } from '../src/store.ts';
+import type { Quote, RequestRecord, Thread } from '../src/store.ts';
 import { api, errorText, type ViewerState, type ClosedDocument } from './api.ts';
 import {
   AgentStatus,
@@ -13,12 +13,18 @@ import {
 } from './conversations.tsx';
 import { useQuestionDrafts, forgetDocument, type QuestionDraft, type QuestionDrafts } from './useQuestionDrafts.ts';
 import { locateQuote, quoteRange, selectionText, selectionSentence, excludedSelection } from './selection.ts';
-import { MarkdownDocument } from './MarkdownDocument.tsx';
+import { MarkdownDocument, WorkspaceLinks, type OpenWorkspaceLink } from './MarkdownDocument.tsx';
+import { resolveWorkspaceLink, splitLineSuffix } from './links.ts';
+import { setDocPreviewFetcher } from '@plannotator/ui/components/InlineMarkdown';
 import { DocumentLibrary } from './DocumentLibrary.tsx';
 import { SettingsProvider, TextSettings } from './TextSettings.tsx';
 import { PinnedWindows } from './PinnedWindows.tsx';
 import { DocumentHeader } from './DocumentHeader.tsx';
 import { OriginalDocument } from './OriginalDocument.tsx';
+import { FilesPanel } from './FilesPanel.tsx';
+import { isAnnotatableDocPath } from '@plannotator/core/annotatable';
+import type { OpenFile } from './FilePreview.tsx';
+import type { FileQuote } from '../src/quote.ts';
 import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
 import { ResizeHandle } from '@plannotator/ui/components/ResizeHandle';
 import { onCodeHighlightSwap } from '@plannotator/ui/utils/codeHighlight';
@@ -77,7 +83,7 @@ function usePosition(
 }
 
 function keepsAttachment(target: EventTarget | null) {
-  return target instanceof Element && !!target.closest('.sidebar .composer, .sidebar-header, .thread-row, .sidebar-toggle');
+  return target instanceof Element && !!target.closest('.sidebar .composer, .sidebar-header, .thread-row, .sidebar-toggle, .files-edge-toggle, .files-panel, .file-preview');
 }
 
 function App() {
@@ -137,8 +143,36 @@ function App() {
   useLayoutEffect(() => {
     document.documentElement.style.setProperty('--sidecar-panel-width', `${panelResize.width}px`);
   }, [panelResize.width]);
+  const [isFilesShown, setFilesShown] = useState(() => {
+    try { return localStorage.getItem('sidecar-files-open') === 'true'; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('sidecar-files-open', String(isFilesShown)); } catch { /* per-browser convenience only */ }
+  }, [isFilesShown]);
+  const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const [visibleRoot, setVisibleRoot] = useState<string | null>(null);
+  const [fileReveal, setFileReveal] = useState<{ path: string; id: number } | null>(null);
+  const rootVisit = useRef(0);
+  useEffect(() => { rootVisit.current++; setVisibleRoot(null); setFileReveal(null); }, [documentId, current?.workspace]);
+  const browserRoot = visibleRoot ?? current?.workspace;
+  const [files, setFiles] = useState<OpenFile[]>([]);
+  const fileThread = useRef<Promise<Thread> | null>(null);
+  const fileSelectionVisit = useRef(0);
+  useEffect(() => { fileThread.current = null; }, [activeThreadId]);
+  const filesResize = useResizablePanel({
+    storageKey: 'sidecar-files-width',
+    defaultWidth: 280,
+    side: 'left',
+    onSnapClose: () => setFilesShown(false),
+    onClick: () => setFilesShown(false),
+    apply: (width) => document.documentElement.style.setProperty('--sidecar-files-width', `${width}px`),
+  });
+  useLayoutEffect(() => {
+    document.documentElement.style.setProperty('--sidecar-files-width', `${filesResize.width}px`);
+  }, [filesResize.width]);
   const openThread = useCallback(
     (id: string | null) => {
+      fileSelectionVisit.current++;
       const focusBeforeOpen = document.activeElement;
       setOriginalMessageId(null);
       drafts.flush();
@@ -209,7 +243,7 @@ function App() {
   const removeAttachment = useCallback(() => {
     if (!activeThreadId) return;
     const draft = drafts.get(activeThreadId);
-    if (draft?.quote || draft?.messageQuote) { const { quote, messageQuote, ...rest } = draft; drafts.set(activeThreadId, rest); }
+    if (draft?.quote || draft?.messageQuote || draft?.fileQuote) { const { quote, messageQuote, fileQuote, ...rest } = draft; drafts.set(activeThreadId, rest); }
   }, [activeThreadId, drafts]);
   const clearPendingSelection = useCallback(() => {
     // Plannotator's handleToolbarClose removes only the pending source, before
@@ -220,7 +254,80 @@ function App() {
     setComposing(false);
     setChoices(null);
   }, []);
+  const openPreview = (path: string, refusal?: string, kind: OpenFile['kind'] = 'doc', root = current?.workspace) => {
+    // Keep passage drafts; file windows cannot attach selections to the main document.
+    clearPendingSelection();
+    window.getSelection()?.removeAllRanges();
+    const absolutePath = root && !refusal ? `${root.replace(/\/$/, '')}/${path}` : path;
+    setPreviewPath(absolutePath);
+    const id = `file:${absolutePath}`;
+    setFiles(previous => {
+      const existing = previous.find(file => file.id === id);
+      const file = { id, path, root, kind, refusal, revision: (existing?.revision ?? 0) + 1 };
+      return existing ? previous.map(value => value.id === id ? file : value) : [...previous, file];
+    });
+    setOpenPins(previous => [...previous, id]);
+    if (innerWidth <= 850) setFilesShown(false);
+  };
+  const insideRoot = (path: string, root: string) => path.startsWith(`${root.replace(/\/$/, '')}/`);
+  async function allowRoot(directory: string) {
+    if (directory === current?.workspace) return directory;
+    return (await api<{ root: string }>('/api/files/root', { documentId, directory })).root;
+  }
+  async function changeVisibleRoot(directory: string, revealPath?: string) {
+    const visit = ++rootVisit.current;
+    try {
+      const root = await allowRoot(directory);
+      if (visit !== rootVisit.current) return;
+      setVisibleRoot(root); setFilesShown(true);
+      if (revealPath) { setPreviewPath(revealPath); setFileReveal(previous => ({ path: revealPath, id: (previous?.id ?? 0) + 1 })); }
+      else setFileReveal(null);
+    } catch (reason) { if (visit === rootVisit.current) setError(errorText(reason)); }
+  }
+  function revealFile(path: string) {
+    const root = browserRoot && insideRoot(path, browserRoot) ? browserRoot : path.slice(0, path.lastIndexOf('/')) || '/';
+    void changeVisibleRoot(root, path);
+  }
+  async function openAbsoluteFile(absolutePath: string, kind?: OpenFile['kind']) {
+    const path = absolutePath.replace(/^\/\/+/, '/');
+    const sourceRoot = browserRoot && insideRoot(path, browserRoot) ? browserRoot
+      : current?.workspace && insideRoot(path, current.workspace) ? current.workspace : path.slice(0, path.lastIndexOf('/')) || '/';
+    try {
+      const root = await allowRoot(sourceRoot);
+      openPreview(path.slice(sourceRoot.replace(/\/$/, '').length + 1), undefined, kind ?? (isAnnotatableDocPath(path) ? 'doc' : 'code'), root);
+    } catch (reason) { setError(errorText(reason)); }
+  }
+  const workspaceRoot = useRef<string | undefined>(undefined);
+  workspaceRoot.current = current?.workspace;
+  const resolveLink = (kind: 'doc' | 'code', target: string, baseDir?: string) => {
+    const root = workspaceRoot.current;
+    if (!root) return null;
+    // Repository-style code paths (src/app.ts:4) are workspace-relative; ./ and ../ follow the linking file.
+    return resolveWorkspaceLink(target, root, kind === 'code' && !/^\.\.?\//.test(target) ? root : baseDir ?? root);
+  };
+  const handleLink = useRef<OpenWorkspaceLink>(() => undefined);
+  handleLink.current = (kind, target, baseDir) => {
+    const [file] = kind === 'code' ? splitLineSuffix(target) : [target];
+    const resolved = resolveLink(kind, file, baseDir);
+    if (!resolved) openPreview(file, 'This document has no recorded workspace. Reopen it from your agent.');
+    else void openAbsoluteFile('outside' in resolved ? resolved.outside : `${workspaceRoot.current}/${resolved.path}`, kind);
+  };
+  // Stable identity so memoized documents and messages do not re-render on every state tick.
+  const openLink = useCallback<OpenWorkspaceLink>((...args) => handleLink.current(...args), []);
+  useEffect(() => {
+    // Plannotator's hover preview for `path:line` code references reads Sidecar's code route.
+    setDocPreviewFetcher(async (candidate) => {
+      const [file, line] = splitLineSuffix(candidate);
+      const resolved = resolveLink('code', file);
+      if (!resolved || 'outside' in resolved) return null;
+      const response = await fetch(`/api/files/code?document=${encodeURIComponent(documentId)}&path=${encodeURIComponent(resolved.path + line)}`);
+      if (!response.ok) return null;
+      const data = await response.json() as { contents: string; filepath: string };
+      return { contents: data.contents, filepath: data.filepath };
+    });
+  }, [documentId]);
   const clearSelection = useCallback(() => {
+    fileSelectionVisit.current++;
     removeAttachment();
     clearPendingSelection();
   }, [removeAttachment, clearPendingSelection]);
@@ -362,6 +469,9 @@ function App() {
     }
     for (const target of targets) {
       if (!target.quote || painted.current.has(target.id)) continue;
+      // Exact overlaps leave empty text nodes inside the library's marks. A later
+      // partial overlap detaches those nodes while wrapping; normalize only marks.
+      for (const mark of painter.getDoms()) mark.normalize();
       const range = quoteRange(root, target.quote);
       if (!range) continue;
       paintingId = target.id;
@@ -417,10 +527,11 @@ function App() {
       )
         return;
       if (
+        window.getSelection()?.anchorNode?.parentElement?.closest('.file-preview') ||
         [event.target, document.activeElement].some(
           (node) =>
             node instanceof Element &&
-            node.closest('input, textarea, select, [role="textbox"], [contenteditable]:not([contenteditable="false"])'),
+            node.closest('.file-preview, input, textarea, select, [role="textbox"], [contenteditable]:not([contenteditable="false"])'),
         )
       )
         return;
@@ -430,9 +541,11 @@ function App() {
     // Copied from Viewer's native copy handler: the highlighter owns the
     // visible selection after mouseup, so supply its captured text to Cmd/Ctrl+C.
     const copy = (event: ClipboardEvent) => {
+      const nativeSelection = window.getSelection();
+      if (nativeSelection && !nativeSelection.isCollapsed && !article.current?.contains(nativeSelection.anchorNode)) return;
       if (
         event.target instanceof Element &&
-        event.target.closest('input, textarea, [contenteditable]:not([contenteditable="false"])')
+        event.target.closest('.file-preview, input, textarea, [contenteditable]:not([contenteditable="false"])')
       )
         return;
       event.preventDefault();
@@ -530,10 +643,11 @@ function App() {
       version: content.version,
       ...(sentence ? { sentence } : {}),
     };
+    fileSelectionVisit.current++;
     setSelection(quote);
     if (activeThreadId && isSidebarShown) {
       const draft = drafts.get(activeThreadId) ?? { text: '', retry: null };
-      const { messageQuote, ...rest } = draft;
+      const { messageQuote, fileQuote, ...rest } = draft;
       drafts.set(activeThreadId, { ...rest, quote });
     }
     setComposing(false);
@@ -566,11 +680,32 @@ function App() {
     return ids.length > 0;
   }
   const passageChanged = (quote: Quote) => !!documentError || !locateQuote(documentText, quote);
+  async function quoteFile(fileQuote: FileQuote) {
+    const visit = ++fileSelectionVisit.current;
+    clearPendingSelection();
+    ignoreClick.current = true;
+    requestAnimationFrame(() => { ignoreClick.current = false; });
+    try {
+      let target = activeThreadId;
+      if (!target) {
+        fileThread.current ??= api<Thread>('/api/threads', { id: crypto.randomUUID(), documentId });
+        const thread = await fileThread.current;
+        setState(previous => previous ? { ...previous, threads: { ...previous.threads, [thread.id]: thread } } : previous);
+        target = thread.id;
+      }
+      if (visit !== fileSelectionVisit.current) return;
+      const { quote, messageQuote, ...draft } = drafts.get(target) ?? { text: '', retry: null };
+      drafts.set(target, { ...draft, fileQuote });
+      if (activeThreadId !== target || !isSidebarShown) openThread(target);
+    } catch (reason) { fileThread.current = null; setError(errorText(reason)); }
+  }
   const selectionActions = {
+    onOpenFileQuote: (quote: FileQuote) => openLink(quote.kind, quote.path),
     onQuoteMessage: (messageQuote: import('../src/quote.ts').MessageQuote) => {
+      fileSelectionVisit.current++;
       const target = activeThreadId && isSidebarShown ? activeThreadId : messageQuote.threadId;
       clearPendingSelection();
-      const { quote, ...draft } = drafts.get(target) ?? { text: '', retry: null };
+      const { quote, fileQuote, ...draft } = drafts.get(target) ?? { text: '', retry: null };
       drafts.set(target, { ...draft, messageQuote });
       if (activeThreadId !== target || !isSidebarShown) openThread(target);
       ignoreClick.current = true;
@@ -584,6 +719,7 @@ function App() {
       clearSelection();
       window.getSelection()?.removeAllRanges();
       setOriginalMessageId(selectionId);
+      setPreviewPath(null);
       setActiveMessageId(selectionId);
       if (innerWidth <= 850) setSidebarShown(false);
     },
@@ -592,6 +728,7 @@ function App() {
       if (entry) setActiveThreadId(entry.thread.id);
       setActiveMessageId(selection.id);
       setOriginalMessageId(null);
+      setPreviewPath(null);
       requestAnimationFrame(() => {
         const root = article.current, range = root && quoteRange(root, selection.quote);
         if (!range) return;
@@ -644,7 +781,7 @@ function App() {
     </>
   );
   return (
-    <>
+    <WorkspaceLinks.Provider value={openLink}>
       <header className="topbar">
         <div className="brand">
           <Icon name="logo" />
@@ -686,12 +823,32 @@ function App() {
           </button>
         )}
       </header>
+      {current?.workspace && <button
+        className="files-edge-toggle"
+        aria-label={isFilesShown ? 'Hide files' : 'Show files'} title={isFilesShown ? 'Hide files' : 'Show files'}
+        aria-expanded={isFilesShown} aria-controls="files-panel"
+        onClick={() => setFilesShown(shown => !shown)}
+      ><Icon name="folder" /></button>}
       {error && (
         <p className="app-error" role="alert">
           {error}
         </p>
       )}
-      <div className={`layout${isSidebarShown ? '' : ' sidebar-collapsed'}`}>
+      <div className={`layout${isSidebarShown ? '' : ' sidebar-collapsed'}${isFilesShown && current?.workspace ? ' files-open' : ''}`}>
+        {isFilesShown && current?.workspace && (
+          <>
+            <FilesPanel key={`${documentId}:${browserRoot}`} documentId={documentId} root={browserRoot ?? current.workspace} workspace={current.workspace}
+              activePath={previewPath} reveal={fileReveal} onSelect={path => { void openAbsoluteFile(path); }} onRootChange={(path, revealPath) => { void changeVisibleRoot(path, revealPath); }} />
+            <ResizeHandle
+              {...filesResize.handleProps}
+              className="files-resize"
+              side="left"
+              hideHoverTrack
+              tooltip="Drag to resize · Click to collapse"
+              onCollapse={() => setFilesShown(false)}
+            />
+          </>
+        )}
         <div className="document-workspace" ref={workspace}>
         <main className="canvas">
           <div className="reading-width">
@@ -738,11 +895,14 @@ function App() {
               }}
             >
               {current && !documentError && <DocumentHeader key={documentId} repoInfo={current.repoInfo} markdown={content.markdown} onError={setError} />}
-              <MarkdownDocument markdown={content.markdown} documentId={documentId} />
+              <MarkdownDocument markdown={content.markdown} documentId={documentId} linkBase={current?.path.replace(/\/[^/]*$/, '')} />
             </article>
           </div>
         </main>
-        <PinnedWindows key={documentId} workspace={workspace} threads={threads} documentId={documentId} openRequests={openPins} onOpened={ids => setOpenPins(previous => previous.filter(id => !ids.includes(id)))} {...selectionActions} onGoToMessage={goToMessage} />
+        <PinnedWindows key={documentId} workspace={workspace} threads={threads} files={files} root={current?.workspace} documentId={documentId} onQuoteFile={quoteFile} onRevealFile={revealFile} openRequests={openPins} onOpened={ids => setOpenPins(previous => previous.filter(id => !ids.includes(id)))} onCloseFile={id => {
+          setFiles(previous => previous.filter(file => file.id !== id));
+          setPreviewPath(previous => `file:${previous}` === id ? null : previous);
+        }} {...selectionActions} onGoToMessage={goToMessage} />
         </div>
         {isSidebarShown && (
           <ResizeHandle
@@ -844,7 +1004,7 @@ function App() {
           </section>,
           document.body,
         )}
-    </>
+    </WorkspaceLinks.Provider>
   );
 }
 const root = document.getElementById('root');

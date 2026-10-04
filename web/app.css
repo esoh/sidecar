@@ -1177,6 +1177,7 @@ pre code.pn-code[data-keep-layout] {
 .agent-session-popover > div { display: flex; align-items: center; gap: 12px; margin-top: 6px; }
 .agent-session-popover code { font-family: var(--font-mono); overflow-wrap: anywhere; user-select: all; }
 .agent-session-popover button { flex-shrink: 0; }
+.agent-session-popover .agent-reset { margin-top: 12px; }
 @media (max-width: 600px) { .library-document { align-items: start; flex-direction: column; gap: 6px; } .library-document-meta { text-align: left; } }
 
 .thread-name { flex: 1; }
@@ -1353,3 +1354,112 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
 .passage-arrow { display: inline-flex; align-items: center; flex-shrink: 0; margin-left: auto; }
 .passage-arrow .sidecar-icon { width: 12px; height: 12px; }
 .original-link .passage-arrow { margin-left: 0; }
+
+.layout.files-open {
+  grid-template-columns: var(--sidecar-files-width, 280px) 0 minmax(0, 1fr) 0 var(--sidecar-panel-width, 365px);
+}
+.layout.files-open.sidebar-collapsed {
+  grid-template-columns: var(--sidecar-files-width, 280px) 0 minmax(0, 1fr);
+}
+.files-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+  background: var(--card);
+}
+.files-navigation { flex-shrink: 0; }
+.files-tree { flex: 1; min-height: 0; overflow: auto; }
+.files-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 10px 10px 40px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+.files-panel-header button {
+  font: inherit;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--primary);
+  background: transparent;
+  border: 0;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+.files-panel-header button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.files-empty {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.files-resize {
+  z-index: 5;
+}
+.file-preview-frame {
+  width: 100%;
+  flex: 1;
+  min-height: 160px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: white;
+}
+.file-preview { min-height: 100%; display: flex; flex-direction: column; }
+.file-preview-path { display: flex; align-items: baseline; gap: 12px; color: var(--subtle); font-size: 11px; margin-bottom: 16px; }
+.file-preview-path code { overflow-wrap: anywhere; }
+.file-reveal { color: inherit; text-align: left; cursor: pointer; }
+.file-reveal:hover { color: var(--primary); text-decoration: underline; }
+.code-file-view { min-width: 0; flex: 1; }
+.files-edge-toggle { position: fixed; top: 57px; left: 0; z-index: 6; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--border); border-left: 0; border-radius: 0 7px 7px 0; background: var(--card); color: var(--subtle); box-shadow: 2px 2px 6px #0002; cursor: pointer; }
+.files-edge-toggle:hover, .files-edge-toggle[aria-expanded='true'] { color: var(--primary); }
+.files-edge-toggle:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.files-root-actions { display: flex; justify-content: space-between; padding: 0 10px 5px; gap: 8px; }
+.files-root-actions button, .files-root-form button { font-size: 11px; color: var(--subtle); cursor: pointer; }
+.files-root-actions button:disabled { opacity: .4; cursor: default; }
+.files-root-path { margin: 0 10px 8px; text-align: left; font: 10px/1.5 'Geist Mono Variable', monospace; overflow-wrap: anywhere; color: var(--subtle); cursor: text; }
+.files-root-path:hover { color: var(--foreground); }
+.files-root-form { display: flex; gap: 5px; padding: 0 10px 8px; }
+.files-root-form input { min-width: 0; width: 100%; font-size: 11px; border: 1px solid var(--border); border-radius: 4px; padding: 4px; }
+.file-preview-path span { margin-left: auto; flex-shrink: 0; }
+@media (max-width: 850px) {
+  .layout.files-open,
+  .layout.files-open.sidebar-collapsed {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .files-panel {
+    position: fixed;
+    top: 49px;
+    bottom: 0;
+    left: 0;
+    width: min(300px, 100vw);
+    z-index: 4;
+    box-shadow: 15px 0 40px #0004;
+  }
+  .files-resize {
+    display: none;
+  }
+}
+.file-refusal {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.file-refusal button {
+  font: inherit;
+  color: var(--primary);
+  background: transparent;
+  border: 0;
+  padding: 3px;
+  cursor: pointer;
+}

@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocketServer } from 'ws';
-import { observeCodex } from '../src/codex-stream.ts';
+import { observeCodex, resetCodexSession } from '../src/codex-stream.ts';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { startServer } from '../src/server.ts';
@@ -42,6 +42,45 @@ test('Codex interrupts only the turn bound to matching output and observes nativ
   for (let i = 0; i < 100 && !ended.length; i++) await delay(5);
   assert.deepEqual(ended, [{ id: 'reply', status: 'interrupted' }]);
   await assert.rejects(observer.interrupt('reply'), /no longer active/);
+});
+
+for (const mode of ['idle', 'busy', 'wrong-session', 'disconnected', 'unconfirmed'] as const) test(`Codex Reset verifies native ${mode} state and never substitutes another session`, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'sc-reset-'));
+  const path = join(root, 'native.sock'), http = createServer(), ws = new WebSocketServer({ server: http });
+  const interrupts: unknown[] = [], methods: string[] = [];
+  await new Promise<void>(resolve => http.listen(path, resolve));
+  t.after(async () => { for (const client of ws.clients) client.terminate(); ws.close(); await new Promise<void>(resolve => http.close(() => resolve())); await rm(root, { recursive: true, force: true }); });
+  let isInterrupted = false;
+  ws.on('connection', socket => socket.on('message', data => {
+    const m = JSON.parse(String(data)); methods.push(m.method);
+    const reply = (result: unknown) => socket.send(JSON.stringify({ id: m.id, result }));
+    if (m.method === 'initialize') reply({});
+    if (m.method === 'thread/read' || m.method === 'thread/resume') reply({ thread: { id: mode === 'wrong-session' ? 'other' : 'original', status: { type: mode === 'disconnected' ? 'notLoaded' : mode === 'idle' || isInterrupted ? 'idle' : 'active' } } });
+    if (m.method === 'thread/turns/list') reply({ data: [{ id: 'terminal-work', status: mode === 'idle' ? 'completed' : 'inProgress', items: [{ type: 'agentMessage', id: 'message', text: 'Captured native answer.' }] }], nextCursor: null });
+    if (m.method === 'turn/interrupt') {
+      interrupts.push(m.params); reply({});
+      if (mode !== 'unconfirmed') {
+        isInterrupted = true;
+        // A stale end first must not satisfy Reset's wait.
+        socket.send(JSON.stringify({ method: 'turn/completed', params: { threadId: 'original', turn: { id: 'old-turn', status: 'interrupted', items: [] } } }));
+        socket.send(JSON.stringify({ method: 'turn/completed', params: { threadId: 'original', turn: { id: 'terminal-work', status: 'interrupted', items: [{ type: 'agentMessage', id: 'message', text: 'Captured native answer.' }] } } }));
+      }
+    }
+  }));
+  const abort = new AbortController();
+  let timer: NodeJS.Timeout | undefined;
+  if (mode === 'unconfirmed') timer = setTimeout(() => abort.abort(), 250);
+  try {
+    const result = resetCodexSession('original', abort.signal, path);
+    if (mode === 'idle' || mode === 'busy') {
+      assert.deepEqual(await result, { turnId: 'terminal-work', answer: 'Captured native answer.' });
+      assert.deepEqual(interrupts, mode === 'busy' ? [{ threadId: 'original', turnId: 'terminal-work' }] : []);
+    } else await assert.rejects(result, /session|verify/);
+    if (mode === 'wrong-session' || mode === 'disconnected') {
+      assert.equal(methods.includes('thread/resume'), false);
+      assert.deepEqual(interrupts, []);
+    }
+  } finally { clearTimeout(timer); }
 });
 
 for (const loaded of [true, false]) test(`Codex observer ${loaded ? 'streams only its original loaded thread' : 'refuses to load a replacement session'}`, async t => {

@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rename, rm, writeFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createState, registerDocument, submit, claim, reply, resolveThread, setTitle, openStore } from '../src/store.ts';
+import { createState, registerDocument, submit, claim, reply, resolveThread, setTitle, openStore, readSavedState } from '../src/store.ts';
 
 const owner = { agent: 'codex' as const, sessionId: '11111111-1111-4111-8111-111111111111' };
 function setup() {
@@ -41,6 +41,23 @@ test('message quotes retain their source, replace document selections, and dedup
   assert.throws(() => submit(state, { ...next, clientMessageId: 'wrong-doc', documentId: other.id }), /another document/);
   assert.throws(() => submit(state, { ...next, clientMessageId: 'missing', messageQuote: { ...messageQuote, messageId: 'missing' } }), /Message not found/);
   assert.throws(() => submit(state, { ...next, clientMessageId: 'both', quote: { exact: 'doc', prefix: '', suffix: '', start: 0, end: 3, version: 'v' } }), /one selection/);
+});
+
+test('file quotes keep their source and literal text across saves and retries without becoming document highlights', () => {
+  const { state, doc, input } = setup();
+  doc.workspace = '/tmp/work';
+  const fileQuote = { path: '/tmp/work/src/app.ts', kind: 'code' as const, exact: '  return true;\n', startLine: 4, endLine: 4 };
+  const next = { ...input, fileQuote };
+  const request = submit(state, next);
+  assert.deepEqual(request.fileQuote, fileQuote);
+  assert.equal(request.quote, undefined);
+  assert.deepEqual(state.threads[request.threadId].messages[0].fileQuote, fileQuote);
+  assert.equal(state.threads[request.threadId].messages[0].selections, undefined);
+  assert.deepEqual(readSavedState(JSON.parse(JSON.stringify(state))), state);
+  assert.equal(submit(state, next).id, request.id);
+  assert.throws(() => submit(state, { ...next, fileQuote: { ...fileQuote, exact: 'return false;' } }), /different content/);
+  assert.throws(() => submit(state, { ...next, clientMessageId: 'both', quote: { exact: 'doc', prefix: '', suffix: '', start: 0, end: 3, version: 'v' } }), /one selection/);
+  assert.equal(submit(state, { ...next, clientMessageId: 'outside', fileQuote: { ...fileQuote, path: '/tmp/elsewhere.ts' } }).fileQuote?.path, '/tmp/elsewhere.ts');
 });
 
 test('new user messages reopen resolved threads, while invalid submissions and retries retain resolution', () => {

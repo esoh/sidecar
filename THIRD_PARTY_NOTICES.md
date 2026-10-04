@@ -44,6 +44,27 @@ adapted from `DocumentQAPair` in `@plannotator/ui` 0.47.0
 `components/ai/DocumentAIChatPanel.tsx`, with Sidecar's two-line excerpt limit
 and requested rounded attachment background.
 
+`src/workspace-status.ts` is copied unchanged from Plannotator's
+`packages/shared/workspace-status.ts`. The file-browser exclusions and tree
+builder in `src/files.ts` are copied from `packages/shared/reference-common.ts`,
+and its walk, file cap and changed-file seeding follow `handleFileBrowserFiles`
+in `packages/server/reference-handlers.ts`. Its file-type predicates are copied
+from the published `@plannotator/core` 0.25.7 `annotatable.ts`.
+Source: https://github.com/backnotprop/plannotator/tree/772c620302f584654c3d8e17bbffb2c6255d3331/packages
+
+The Files panel imports `FileBrowser` and `useFileBrowser` from the published
+`@plannotator/ui` 0.47.0, connected to Sidecar through its `setFileTreeBackend`
+seam. File previews use Sidecar's shared floating windows and dock.
+Code previews directly use `@pierre/diffs` 1.3.6's `File` renderer, as Plannotator's
+`CodeFilePopout.tsx` does. `web/CodeFileView.tsx` adapts its rendering options,
+theme integration and shadow-DOM selection handling to Sidecar's composer.
+
+Local file links use the `onOpenLinkedDoc`/`onOpenCodeFile` callbacks and
+`setDocPreviewFetcher` of `@plannotator/ui` 0.47.0 `InlineMarkdown`. The code-link
+file types in `src/files.ts` are copied from `@plannotator/core` 0.25.7
+`code-file.ts`. Source previews reuse `guideLanguageForPath` from that package's
+`guide-format.ts` and the document renderer's syntax highlighting.
+
 Inter and Geist Mono are served from Plannotator's Fontsource dependencies;
 the fonts use the SIL Open Font License 1.1 distributed with those packages.
 KaTeX and its fonts retain the licenses included in the KaTeX dependency.

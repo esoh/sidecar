@@ -2,26 +2,26 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename, unlink } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 
-import { isQuote, isMessageQuote, type MessageQuote, type Quote } from './quote.ts';
+import { isQuote, isMessageQuote, isFileQuote, type FileQuote, type MessageQuote, type Quote } from './quote.ts';
 import type { ReplyMetadata } from './reply-metadata.ts';
 import { isPinStyle, type PinStyle } from './pin-style.ts';
 
 export type Owner = { agent: 'codex' | 'claude'; sessionId: string };
 export { isQuote, type Quote } from './quote.ts';
 export type RepoInfo = { display: string; branch?: string };
-export type DocumentRecord = { id: string; path: string; generated: boolean; providedTitle?: string; userTitle?: string; repoInfo?: RepoInfo };
+export type DocumentRecord = { id: string; path: string; generated: boolean; providedTitle?: string; userTitle?: string; repoInfo?: RepoInfo; workspace?: string };
 export type MessageSelection = { id: string; slug: string; quote: Quote; isVisible: boolean; label?: string };
-export type Message = { id: string; role: 'user' | 'agent'; text: string; requestId: string; createdAt: number; selections?: MessageSelection[]; messageQuote?: MessageQuote; isPinned?: boolean; pinStyle?: PinStyle };
+export type Message = { id: string; role: 'user' | 'agent'; text: string; requestId: string; createdAt: number; selections?: MessageSelection[]; messageQuote?: MessageQuote; fileQuote?: FileQuote; isPinned?: boolean; pinStyle?: PinStyle };
 export type Thread = { id: string; documentId: string; title?: string; createdAt?: number; isResolved: boolean; messages: Message[] };
 export type RequestRecord = {
   id: string; documentId: string; threadId: string; text: string; clientMessageId: string;
-  quote?: Quote; messageQuote?: MessageQuote; status: 'queued' | 'claimed' | 'completed' | 'failed' | 'uncertain' | 'stopped'; createdAt: number;
+  quote?: Quote; messageQuote?: MessageQuote; fileQuote?: FileQuote; status: 'queued' | 'claimed' | 'completed' | 'failed' | 'uncertain' | 'stopped'; createdAt: number;
   submission: string; answer?: { text: string; isError: boolean }; acceptedAt?: number; batchId?: string;
   replyRecovery?: { id: string; turnId: string; status: 'pending' | 'sent' | 'failed' };
 };
 export type State = { version: 3; owner: Owner; documents: Record<string, DocumentRecord>; threads: Record<string, Thread>; requests: Record<string, RequestRecord> };
 export type Store = { read(): State; update<T>(change: (draft: State) => T): Promise<T> };
-export type SubmitInput = { documentId: string; threadId?: string; text: string; quote?: Quote; messageQuote?: MessageQuote; clientMessageId: string };
+export type SubmitInput = { documentId: string; threadId?: string; text: string; quote?: Quote; messageQuote?: MessageQuote; fileQuote?: FileQuote; clientMessageId: string };
 export type ReplyInput = { requestId: string; documentId: string; threadId: string; text: string; isError?: boolean; metadata?: ReplyMetadata; selectionVersion?: string };
 export type ClaimResult = { claimStatus: 'claimed' | 'already-claimed' | 'completed' | 'uncertain'; request: RequestRecord };
 
@@ -45,9 +45,10 @@ export function isRepoInfo(v: unknown): v is RepoInfo {
   return isObject(v) && string(v.display) && v.display.trim().length > 0 && v.display.length <= 512 && (v.branch === undefined || (string(v.branch) && v.branch.length > 0 && v.branch.length <= 512));
 }
 function isDocument(v: unknown): v is DocumentRecord {
-  return isObject(v) && string(v.id) && string(v.path) && isAbsolute(v.path) && typeof v.generated === 'boolean' && optionalString(v.providedTitle) && optionalString(v.userTitle) && (v.repoInfo === undefined || isRepoInfo(v.repoInfo));
+  return isObject(v) && string(v.id) && string(v.path) && isAbsolute(v.path) && typeof v.generated === 'boolean' && optionalString(v.providedTitle) && optionalString(v.userTitle) && (v.repoInfo === undefined || isRepoInfo(v.repoInfo)) && (v.workspace === undefined || (string(v.workspace) && isAbsolute(v.workspace)));
 }
 function isMessage(v: unknown): v is Message {
+  if (isObject(v) && v.fileQuote !== undefined && (!isFileQuote(v.fileQuote) || v.role !== 'user' || v.messageQuote !== undefined || (Array.isArray(v.selections) && v.selections.length > 0))) return false;
   if (isObject(v) && v.messageQuote !== undefined && (!isMessageQuote(v.messageQuote) || v.role !== 'user' || (Array.isArray(v.selections) && v.selections.length > 0))) return false;
   return isMessageFields(v) && !('quote' in v) && (v.selections === undefined || (Array.isArray(v.selections) && v.selections.length <= (v.role === 'user' ? 1 : 20) && v.selections.every(s => isObject(s) && string(s.id) && string(s.slug) && /^selection-[1-9][0-9]*$/.test(s.slug) && isQuote(s.quote) && typeof s.isVisible === 'boolean' && optionalString(s.label)) && new Set(v.selections.map(s => s.id)).size === v.selections.length && new Set(v.selections.map(s => s.slug)).size === v.selections.length));
 }
@@ -70,6 +71,7 @@ function isOldThread(v: unknown): v is OldThread {
   return isObject(v) && string(v.id) && string(v.documentId) && optionalString(v.title) && (v.createdAt === undefined || number(v.createdAt)) && typeof v.isResolved === 'boolean' && Array.isArray(v.messages) && v.messages.every(m => isMessageFields(m) && !('selections' in m) && (m.quote === undefined || (m.role === 'user' && isQuote(m.quote))));
 }
 function isRequest(v: unknown): v is RequestRecord {
+  if (isObject(v) && v.fileQuote !== undefined && (!isFileQuote(v.fileQuote) || v.messageQuote !== undefined || v.quote !== undefined)) return false;
   if (isObject(v) && v.replyRecovery !== undefined && (!isObject(v.replyRecovery) || !string(v.replyRecovery.id) || !string(v.replyRecovery.turnId) || !['pending', 'sent', 'failed'].includes(String(v.replyRecovery.status)))) return false;
   if (isObject(v) && v.messageQuote !== undefined && (!isMessageQuote(v.messageQuote) || v.quote !== undefined)) return false;
   if (isObject(v) && v.batchId !== undefined && (!string(v.batchId) || !/^[0-9a-f-]{36}$/i.test(v.batchId))) return false;
@@ -137,7 +139,7 @@ export function createState(owner: Owner): State {
   ownerKey(owner);
   return { version: 3, owner: structuredClone(owner), documents: {}, threads: {}, requests: {} };
 }
-export function registerDocument(state: State, input: {path: string; title?: string; generated: boolean; repoInfo?: RepoInfo}): DocumentRecord {
+export function registerDocument(state: State, input: {path: string; title?: string; generated: boolean; repoInfo?: RepoInfo; workspace?: string}): DocumentRecord {
   if (!isAbsolute(input.path)) throw new DomainError('Document path must be absolute');
   if (input.repoInfo !== undefined && !isRepoInfo(input.repoInfo)) throw new DomainError('Invalid repository metadata');
   const path = resolve(input.path);
@@ -147,6 +149,9 @@ export function registerDocument(state: State, input: {path: string; title?: str
     state.documents[document.id] = document;
   }
   if (input.repoInfo !== undefined) document.repoInfo = structuredClone(input.repoInfo);
+  // The badge describes the declared root, so a root without Git metadata clears it.
+  else if (input.workspace !== undefined) delete document.repoInfo;
+  if (input.workspace !== undefined) document.workspace = input.workspace;
   ensureGeneralThread(state, document.id);
   if (input.title?.trim()) document.providedTitle = input.title.trim();
   return document;
@@ -192,9 +197,15 @@ export function nameThread(state: State, threadId: string, title: string, { canR
   thread.title = value;
 }
 export function submit(state: State, input: SubmitInput): RequestRecord {
-  get(state.documents, input.documentId);
+  const document = get(state.documents, input.documentId);
   if (!input.text.trim() || !input.clientMessageId || input.clientMessageId.length > 128) throw new DomainError('A question and message ID are required');
   if (input.quote !== undefined && !isQuote(input.quote)) throw new DomainError('Invalid selection');
+  if ([input.quote, input.messageQuote, input.fileQuote].filter(value => value !== undefined).length > 1) throw new DomainError('Attach only one selection per message');
+  if (input.fileQuote !== undefined) {
+    if (!isFileQuote(input.fileQuote)) throw new DomainError('Invalid file quote');
+    if (!document.workspace) throw new DomainError('This document has no workspace');
+    // A quote may come from an explicitly chosen browsing root. It is context, not authority to read/edit a file.
+  }
   if (input.messageQuote !== undefined) {
     if (!isMessageQuote(input.messageQuote)) throw new DomainError('Invalid message quote');
     if (input.quote) throw new DomainError('Attach only one selection per message');
@@ -202,7 +213,7 @@ export function submit(state: State, input: SubmitInput): RequestRecord {
     if (source.documentId !== input.documentId) throw new DomainError('Quoted message belongs to another document', 409);
     if (!source.messages.some(message => message.id === input.messageQuote?.messageId)) throw new DomainError('Message not found', 404);
   }
-  const signature = JSON.stringify([input.documentId, input.threadId ?? null, input.text, input.quote ?? null, ...(input.messageQuote ? [input.messageQuote] : [])]);
+  const signature = JSON.stringify([input.documentId, input.threadId ?? null, input.text, input.quote ?? null, ...(input.messageQuote ? [input.messageQuote] : []), ...(input.fileQuote ? [{ fileQuote: input.fileQuote }] : [])]);
   const previous = Object.values(state.requests).find(r => r.clientMessageId === input.clientMessageId);
   if (previous) {
     if (previous.submission !== signature) throw new DomainError('Message ID was already used for different content', 409);
@@ -218,10 +229,11 @@ export function submit(state: State, input: SubmitInput): RequestRecord {
   const request: RequestRecord = { id: randomUUID(), documentId: input.documentId, threadId: thread.id, text: input.text, clientMessageId: input.clientMessageId, submission: signature, status: 'queued', createdAt: Date.now() };
   if (input.quote) request.quote = structuredClone(input.quote);
   if (input.messageQuote) request.messageQuote = structuredClone(input.messageQuote);
+  if (input.fileQuote) request.fileQuote = structuredClone(input.fileQuote);
   state.requests[request.id] = request;
   thread.isResolved = false;
   const id = randomUUID();
-  thread.messages.push({ id, role: 'user', text: input.text, requestId: request.id, createdAt: request.createdAt, ...(input.messageQuote ? { messageQuote: structuredClone(input.messageQuote) } : {}), ...(input.quote ? { selections: [{ id, slug: 'selection-1', quote: structuredClone(input.quote), isVisible: true }] } : {}) });
+  thread.messages.push({ id, role: 'user', text: input.text, requestId: request.id, createdAt: request.createdAt, ...(input.fileQuote ? { fileQuote: structuredClone(input.fileQuote) } : {}), ...(input.messageQuote ? { messageQuote: structuredClone(input.messageQuote) } : {}), ...(input.quote ? { selections: [{ id, slug: 'selection-1', quote: structuredClone(input.quote), isVisible: true }] } : {}) });
   return request;
 }
 export function requestBatch(state: State, requestId: string): RequestRecord[] {
@@ -290,8 +302,9 @@ export function stopRequest(state: State, requestId: string, partial: string): v
   if (request.status !== 'claimed') return;
   for (const member of batch) member.status = 'stopped';
   request.answer = { text: partial, isError: false };
-  const thread = get(state.threads, request.threadId), last = thread.messages.at(-1);
-  if (partial.trim() && !(last?.role === 'agent' && last.requestId === requestId && last.text === partial))
+  const thread = get(state.threads, request.threadId);
+  const last = thread.messages.filter(message => message.role === 'agent' && message.requestId === requestId).at(-1);
+  if (partial.trim() && last?.text !== partial)
     thread.messages.push({ id: randomUUID(), role: 'agent', text: partial, requestId, createdAt: Date.now() });
 }
 export function resolveThread(state: State, threadId: string, isResolved: boolean): void {

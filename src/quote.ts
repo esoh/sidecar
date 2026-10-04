@@ -1,5 +1,14 @@
 export type Quote = { exact: string; prefix: string; suffix: string; start: number; end: number; version: string; sentence?: string };
 export type MessageQuote = { threadId: string; messageId: string; exact: string };
+export type FileQuote = { path: string; kind: 'doc' | 'code'; exact: string; startLine?: number; endLine?: number };
+export function isFileQuote(value: unknown): value is FileQuote {
+  return isObject(value) && string(value.path) && value.path.startsWith('/') && value.path.length <= 4096 && !/[\x00-\x1f]/.test(value.path)
+    && (value.kind === 'doc' || value.kind === 'code') && string(value.exact) && !!value.exact.trim() && value.exact.length <= 128 * 1024
+    && ((value.startLine === undefined && value.endLine === undefined) || (number(value.startLine) && Number.isInteger(value.startLine) && value.startLine > 0 && number(value.endLine) && Number.isInteger(value.endLine) && value.endLine >= value.startLine));
+}
+export function fileQuoteLabel(quote: FileQuote) {
+  return (quote.path.split('/').pop() ?? quote.path) + (quote.startLine ? `:${quote.startLine}${quote.endLine !== quote.startLine ? `–${quote.endLine}` : ''}` : '');
+}
 export function isMessageQuote(value: unknown): value is MessageQuote {
   return isObject(value) && string(value.threadId) && value.threadId.length > 0 && value.threadId.length <= 256 && string(value.messageId) && value.messageId.length > 0 && value.messageId.length <= 256 && string(value.exact) && !!value.exact.trim() && value.exact.length <= 128 * 1024;
 }

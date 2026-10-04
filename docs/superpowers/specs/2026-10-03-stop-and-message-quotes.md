@@ -12,3 +12,15 @@ User-approved scope, 2026-10-03:
 Verification must cover stale/wrong turn IDs, late output, completion races, partial replies, disconnection, both native agents, saved drafts, Markdown text, and both message surfaces. No new dependencies.
 
 As built on 2026-10-03: both installed native agents confirmed interruption through the app and retained partial text. Claude's control module identifies the native turn by the exact Sidecar output marker because its display hook uses a different turn ID. Shared message rendering captures quote context for conversation, floating-window and dock surfaces; hidden drafts are preserved when another source thread opens.
+
+Terminal interruption correction on 2026-10-03: a confirmed interruption of the matching native turn also marks its request Stopped when initiated outside Sidecar. Completed progress and partial replies are retained without duplicating progress if a follow-up is queued, and later requests can be delivered. Complete final snapshots still take precedence; idle/disconnected status and stale or unrelated turn IDs do not stop requests. Disposable Codex transport and Claude native-module tests cover interruption between messages and during a second message.
+
+User-approved Reset extension, 2026-10-03:
+
+- Add **Reset** inside the attached Claude/Codex label's session popover. This explicit control may interrupt any work in that native session, including unrelated terminal work. The composer's Stop remains limited to the current Sidecar request.
+- Recheck native state when clicked. Codex queries its exact loaded session and latest native turn; Claude's control module answers a fresh Reset identifier. An idle badge, old heartbeat, disconnected socket or missing process is not confirmation.
+- Idle confirmation reconciles unfinished claimed/uncertain batches. An active session is interrupted by exact turn ID and reconciliation waits for native completion. Unknown/unreachable state, an identity change or timeout reports failure and keeps work recoverable.
+- Preserve captured output and saved history, mark reconciled requests Stopped, and release later queued messages without replaying the interrupted task. Complete replies win races. Pause new Sidecar delivery during Reset, reject overlapping resets, and keep draft text intact.
+- Claude's native module remains reachable while idle. A fresh/reloaded module starts with unknown activity until it observes a native turn. After reconnecting a killed session, use Reset once native state is known. No force-reset based on silence.
+
+As built for this extension: backend tests exercise fresh verification, unrelated-work interruption, stale IDs, complete snapshots, uncertain batches and reordered idle/completion hooks. Browser coverage opens Reset from the session popover and checks output and draft preservation. A read-only query of the installed Codex daemon confirmed that its latest-turn endpoint returns the active `inProgress` turn; no live agent was interrupted for that query.

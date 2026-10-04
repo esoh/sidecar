@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile, rm, open, rename } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rm, open, rename, realpath } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
@@ -20,6 +20,17 @@ export async function repositoryInfo(cwd = process.cwd()) {
     const branch = await git('symbolic-ref', '--short', 'HEAD').catch(() => '');
     return { display, ...(branch ? { branch } : {}) };
   } catch { return undefined; }
+}
+// The browsed root: the worktree the agent declares, else the Git top-level of its working directory.
+export async function workspaceMetadata(explicit?: string, cwd = process.cwd()) {
+  let workspace: string | undefined;
+  if (explicit) workspace = await realpath(resolve(cwd, explicit));
+  else {
+    const topLevel = await promisify(execFile)('git', ['rev-parse', '--show-toplevel'], { cwd, timeout: 2000 }).then(result => result.stdout.trim(), () => '');
+    if (topLevel) workspace = await realpath(topLevel);
+  }
+  const repoInfo = await repositoryInfo(workspace ?? cwd);
+  return { ...(workspace ? { workspace } : {}), ...(repoInfo ? { repoInfo } : {}) };
 }
 async function stdin(): Promise<string> {
   const chunks: Buffer[] = [];
@@ -124,13 +135,13 @@ export async function forwardHook(agent: string | undefined, payload: unknown): 
   });
 }
 async function main() {
-  const { values, positionals } = parseArgs({ allowPositionals: true, options: { help: { type: 'boolean', short: 'h' }, version: { type: 'boolean' }, agent: { type: 'string' }, session: { type: 'string' }, owner: { type: 'string' }, file: { type: 'string' }, title: { type: 'string' }, document: { type: 'string' }, thread: { type: 'string' }, stdin: { type: 'boolean' }, resume: { type: 'boolean' }, error: { type: 'boolean' }, 'no-browser': { type: 'boolean' }, stream: { type: 'boolean' } } });
+  const { values, positionals } = parseArgs({ allowPositionals: true, options: { help: { type: 'boolean', short: 'h' }, version: { type: 'boolean' }, agent: { type: 'string' }, session: { type: 'string' }, owner: { type: 'string' }, file: { type: 'string' }, title: { type: 'string' }, workspace: { type: 'string' }, document: { type: 'string' }, thread: { type: 'string' }, stdin: { type: 'boolean' }, resume: { type: 'boolean' }, error: { type: 'boolean' }, 'no-browser': { type: 'boolean' }, stream: { type: 'boolean' } } });
   if (values.version) {
     process.stdout.write(`${await readAppVersion()}\n`);
     return;
   }
   if (values.help || !positionals.length) {
-    process.stdout.write('Sidecar — document conversations with your existing agent.\n\nUsage: sidecar COMMAND [options]\nCommands: open, browse, status, request, name-thread, stream, reply, watch, stop, hook\n\nOpen: sidecar open --agent codex|claude --session UUID --file /absolute/document.md\nUse the Sidecar skill in the original agent to establish live delivery.\n');
+    process.stdout.write('Sidecar — document conversations with your existing agent.\n\nUsage: sidecar COMMAND [options]\nCommands: open, browse, status, request, name-thread, stream, reply, watch, stop, hook\n\nOpen: sidecar open --agent codex|claude --session UUID --file /absolute/document.md [--workspace /absolute/worktree]\nUse the Sidecar skill in the original agent to establish live delivery.\n');
     return;
   }
   const [command, requestId] = positionals;
@@ -157,7 +168,7 @@ async function main() {
     await ensureApp(key);
     let path = values.file ? resolve(values.file) : '';
     if (values.stdin) { path = join(ownerDirectory(key), `generated-${randomUUID()}.md`); await writeFile(path, await stdin(), { mode: 0o600, flag: 'wx' }); }
-    const document = await agentCall(key, '/agent/documents', { path, title: values.title, generated: Boolean(values.stdin), repoInfo: await repositoryInfo() });
+    const document = await agentCall(key, '/agent/documents', { path, title: values.title, generated: Boolean(values.stdin), ...(await workspaceMetadata(values.workspace)) });
     const runtime = await readRuntime(key), url = `${runtime.url}/?document=${document.id}`;
     output({ ownerKey: key, documentId: document.id, url });
     if (!values['no-browser']) await openBrowser(url);

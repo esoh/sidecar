@@ -12,7 +12,7 @@ import { useMessageSettings } from './TextSettings.tsx';
 import { isPinIcon, pinColors, pinIcons, type PinStyle } from '../src/pin-style.ts';
 
 import type { QuestionDraft, QuestionDrafts } from './useQuestionDrafts.ts';
-import type { MessageQuote } from '../src/quote.ts';
+import { fileQuoteLabel, type FileQuote, type MessageQuote } from '../src/quote.ts';
 import { excludedSelection, selectionText } from './selection.ts';
 
 const paths = {
@@ -45,6 +45,8 @@ const paths = {
   close: 'm6 6 12 12M6 18 18 6',
   logo: 'M4 4h16v16H4zM15 4v16',
   settings: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z',
+  folder: 'M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
+  file: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6',
   panel: 'M14 3v18M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z',
 };
 export function Icon({ name }: { name: keyof typeof paths }) {
@@ -59,6 +61,7 @@ export function QuestionForm({
   threadId,
   quote,
   messageQuote,
+  fileQuote,
   quoteChanged = false,
   onSent,
   floating = false,
@@ -74,6 +77,7 @@ export function QuestionForm({
   threadId?: string;
   quote?: Quote;
   messageQuote?: MessageQuote;
+  fileQuote?: FileQuote;
   quoteChanged?: boolean;
   onSent: (request: RequestRecord) => void;
   floating?: boolean;
@@ -93,8 +97,8 @@ export function QuestionForm({
   const retry = useRef(initialDraft?.retry ?? null);
   const [isStopping, setStopping] = useState(false);
   const hasStop = !floating && !text.length && stream && stream.threadId === threadId && (stream.canStop || stream.stopping);
-  const attachment = messageQuote ? { messageQuote } : quote ? { quote } : {};
-  const attachedText = messageQuote?.exact ?? quote?.exact;
+  const attachment = fileQuote ? { fileQuote } : messageQuote ? { messageQuote } : quote ? { quote } : {};
+  const attachedText = fileQuote?.exact ?? messageQuote?.exact ?? quote?.exact;
   const updateDraft = (draft: QuestionDraft, immediately = false) => {
     drafts.set(draftKey, draft);
     if (immediately) drafts.flush();
@@ -181,7 +185,7 @@ export function QuestionForm({
       )}
       {!floating && attachedText && (
         <div className="draft-selection">
-          <span className="selection-badge text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary">{messageQuote ? 'quote' : 'selection'}</span>
+          <span className="selection-badge text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary" title={fileQuote?.path}>{fileQuote ? fileQuoteLabel(fileQuote) : messageQuote ? 'quote' : 'selection'}</span>
           <span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={attachedText}>{attachedText}</span>
           <button type="button" className="cancel-button" aria-label="Remove selection" onClick={onRemoveSelection}><Icon name="close" /></button>
         </div>
@@ -353,7 +357,7 @@ export function AgentStatus({ state, connected }: { state: ViewerState | null; c
         </span>
       </Tooltip>
       <span>
-        {state ? <AgentSession owner={state.owner} /> : 'Agent'}
+        {state ? <AgentSession owner={state.owner} reset={state.reset ?? null} /> : 'Agent'}
         <span className="sr-only"> · {label}</span>
         {queued ? ` · ${queued} queued` : ''}
       </span>
@@ -396,6 +400,7 @@ export function ConversationSidebar({
   onGoToMessage,
   messageJump,
   onQuoteMessage,
+  onOpenFileQuote,
 }: {
   documentId: string;
   threads: Thread[];
@@ -418,6 +423,7 @@ export function ConversationSidebar({
   onGoToMessage: (messageId: string) => void;
   messageJump: { id: string; sequence: number } | null;
   onQuoteMessage: (quote: MessageQuote) => void;
+  onOpenFileQuote: (quote: FileQuote) => void;
 }) {
   const [filter, setFilter] = useState('unresolved'),
     [search, setSearch] = useState(''),
@@ -457,6 +463,7 @@ export function ConversationSidebar({
   const previousId = useRef<string | null>(null),
     atBottom = useRef(true);
   const handledJump = useRef<number | null>(null);
+  const handledVisit = useRef(messageVisit);
   const active = threads.find((thread) => thread.id === activeId);
   const recovering = requests.find(request => request.threadId === activeId && request.replyRecovery && ['claimed', 'uncertain'].includes(request.status));
   const requestStatuses = new Map(requests.map((request) => [request.id, request.status]));
@@ -522,10 +529,12 @@ export function ConversationSidebar({
     previousId.current = active?.id ?? null;
   }, [active?.id, deliveredMessages.length, queuedMessages.length, text, isShown]);
   useLayoutEffect(() => {
-    if (!isShown || !activeMessageId) return;
+    // Only document-to-thread navigation requests a conversation scroll. An
+    // inline selection link changes the active passage without moving the reply.
+    if (!isShown || !activeMessageId || handledVisit.current === messageVisit) return;
     const node = Array.from(conversation.current?.querySelectorAll<HTMLElement>('[data-selection-id]') ?? []).find(node => node.dataset.selectionId === activeSelectionId)
       ?? Array.from(conversation.current?.querySelectorAll<HTMLElement>('[data-message-id]') ?? []).find(node => node.dataset.messageId === activeMessageId);
-    node?.scrollIntoView({ block: 'nearest' });
+    if (node) { handledVisit.current = messageVisit; node.scrollIntoView({ block: 'nearest' }); }
   }, [activeSelectionId, activeMessageId, active?.id, isShown, messageVisit]);
   useLayoutEffect(() => {
     if (!isShown || !messageJump || handledJump.current === messageJump.sequence) return;
@@ -560,7 +569,7 @@ export function ConversationSidebar({
   async function leaveConversation() {
     if (!active || isLeaving) return;
     // Pending submissions retain their draft until accepted; don't discard them.
-    if (active.messages.length || (drafts.get(active.id)?.text.trim() || drafts.get(active.id)?.quote || drafts.get(active.id)?.messageQuote)) {
+    if (active.messages.length || (drafts.get(active.id)?.text.trim() || drafts.get(active.id)?.quote || drafts.get(active.id)?.messageQuote || drafts.get(active.id)?.fileQuote)) {
       onOpen(null);
       return;
     }
@@ -705,7 +714,7 @@ export function ConversationSidebar({
               return (
                 <div className={`message ${message.role}`} key={message.id} tabIndex={-1} data-message-id={message.id} data-active={message.id === activeMessageId || undefined}>
                   <div className="message-content">
-                    <MessageContent message={message} documentId={documentId} threadId={active.id} activeSelectionId={activeSelectionId} passageChanged={passageChanged} showPassage={showPassage} showOriginal={showOriginal} onQuoteMessage={onQuoteMessage} onGoToMessage={onGoToMessage} />
+                    <MessageContent message={message} documentId={documentId} threadId={active.id} activeSelectionId={activeSelectionId} passageChanged={passageChanged} showPassage={showPassage} showOriginal={showOriginal} onQuoteMessage={onQuoteMessage} onGoToMessage={onGoToMessage} onOpenFileQuote={onOpenFileQuote} />
                     <MessageActions message={message} threadId={active.id} onPinned={() => onOpenPin(message.id)} />
                   </div>
                   {isLatest && requestId !== recovering?.id && !hasStreamedReply && (status === 'claimed' || status === 'stopped') && (
@@ -756,6 +765,7 @@ export function ConversationSidebar({
                 <span className="queue-preview" title={message.text}>{messagePreview(message.text)}</span>
                 {message.selections?.map(selection => <button key={selection.id} data-selection-id={selection.id} aria-label="Show queued selection" title={selection.quote.exact} onClick={() => passageChanged(selection.quote) ? showOriginal(selection.id) : showPassage(selection)}><Icon name="annotation" /></button>)}
                 {message.messageQuote && <button aria-label="Go to queued quote" title={message.messageQuote.exact} onClick={() => onGoToMessage(message.messageQuote!.messageId)}><Icon name="comment" /></button>}
+                {message.fileQuote && <button aria-label={`Open queued file: ${fileQuoteLabel(message.fileQuote)}`} title={message.fileQuote.exact} onClick={() => onOpenFileQuote(message.fileQuote!)}><Icon name="file" /></button>}
               </li>)}
             </ol>
           </section>}
@@ -768,6 +778,7 @@ export function ConversationSidebar({
             stream={stream}
             quote={drafts.get(active.id)?.quote}
             messageQuote={drafts.get(active.id)?.messageQuote}
+            fileQuote={drafts.get(active.id)?.fileQuote}
             onRemoveSelection={onRemoveSelection}
             disabled={isLeaving}
             onSent={(request) => {
@@ -810,7 +821,7 @@ export function ConversationSidebar({
                     {match ? <>{match.before}<mark>{match.match}</mark>{match.after}</> : thread.messages.at(-1)?.text ?? 'Start a conversation about this document.'}
                   </span>
                 </span>
-                {(drafts.get(thread.id)?.text || drafts.get(thread.id)?.quote || drafts.get(thread.id)?.messageQuote) && <span className="row-tag">Draft</span>}
+                {(drafts.get(thread.id)?.text || drafts.get(thread.id)?.quote || drafts.get(thread.id)?.messageQuote || drafts.get(thread.id)?.fileQuote) && <span className="row-tag">Draft</span>}
               </span>
             </button>;
           })}
@@ -825,8 +836,9 @@ export type MessageContentProps = {
   message: Message; documentId: string; threadId: string; activeSelectionId: string | null;
   passageChanged: (quote: Quote) => boolean; showPassage: (selection: SavedSelection) => void; showOriginal: (id: string) => void;
   onQuoteMessage: (quote: MessageQuote) => void; onGoToMessage: (id: string) => void;
+  onOpenFileQuote: (quote: FileQuote) => void;
 };
-export function MessageContent({ message, documentId, threadId, activeSelectionId, passageChanged, showPassage, showOriginal, onQuoteMessage, onGoToMessage, prefix = 'message' }: MessageContentProps & { prefix?: string }) {
+export function MessageContent({ message, documentId, threadId, activeSelectionId, passageChanged, showPassage, showOriginal, onQuoteMessage, onOpenFileQuote, onGoToMessage, prefix = 'message' }: MessageContentProps & { prefix?: string }) {
   function capture(root: HTMLElement) {
     const selected = window.getSelection();
     if (!selected?.rangeCount || selected.isCollapsed) return;
@@ -836,6 +848,10 @@ export function MessageContent({ message, documentId, threadId, activeSelectionI
     if (exact.trim()) onQuoteMessage({ threadId, messageId: message.id, exact });
   }
   return <>
+    {message.fileQuote && <div className="message-selection file-quote quote">
+      <span className="selection-badge text-[9px] font-semibold tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary" title={message.fileQuote.path}>{fileQuoteLabel(message.fileQuote)}</span>
+      <button aria-label={`Open quoted file: ${fileQuoteLabel(message.fileQuote)}`} onClick={() => onOpenFileQuote(message.fileQuote!)}><span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={message.fileQuote.exact}>{message.fileQuote.exact}</span><span className="passage-arrow"><Icon name="arrowUpRight" /></span></button>
+    </div>}
     {message.messageQuote && <div className="message-selection message-quote quote">
       <span className="selection-badge text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary">quote</span>
       <button aria-label="Go to quoted message" onClick={() => onGoToMessage(message.messageQuote!.messageId)}><span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={message.messageQuote.exact}>{message.messageQuote.exact}</span><span className="passage-arrow"><Icon name="arrowUpRight" /></span></button>

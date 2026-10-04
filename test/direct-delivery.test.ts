@@ -216,4 +216,18 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   for (let i = 0; i < 100 && (await state()).requests[quoted.id].status !== 'completed'; i++) await delay(10);
   assert.equal((await state()).requests[quoted.id].answer.text, 'Recovered answer.');
   assert.equal((agent === 'codex' ? await readFile(deliveries, 'utf8') : watched).trim().split('\n').length, 8);
+  const workspaceDocument = await (await post('/agent/documents', { path: file, workspace: root })).json();
+  await writeFile(join(root, 'app.ts'), 'export function check() {\n  return true;\n}\n');
+  const fileQuote = { path: join(workspaceDocument.workspace, 'app.ts'), kind: 'code', exact: '  return true;', startLine: 2, endLine: 2 };
+  const fileResponse = await post('/api/questions', { documentId: doc.id, threadId: passage.threadId, text: 'Explain this line', fileQuote, clientMessageId: 'file-quote' });
+  assert.equal(fileResponse.status, 200);
+  const fileRequest = await fileResponse.json();
+  const fileEvent = await eventCount(9);
+  assert.equal(fileEvent.requestId, fileRequest.id);
+  assert.deepEqual(fileEvent.fileQuote, fileQuote);
+  assert.equal(fileEvent.quote, undefined);
+  assert.equal(fileEvent.messageQuote, undefined);
+  const savedFileQuote = JSON.parse(await readFile(join(directory, 'state.json'), 'utf8'));
+  assert.deepEqual(savedFileQuote.requests[fileRequest.id].fileQuote, fileQuote);
+  assert.deepEqual(savedFileQuote.threads[fileRequest.threadId].messages.at(-1).fileQuote, fileQuote);
 });

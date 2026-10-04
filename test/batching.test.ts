@@ -81,6 +81,20 @@ test('oversized batches freeze before ID-only handoff and recover every question
   assert.equal((await (await f.view('/api/state')).json()).requests[late.id].status, 'queued');
 });
 
+test('batched file questions retain each input’s own file quote', async t => {
+  const f = await fixture(t), doc = await f.register();
+  const registered = await (await f.agent('/agent/documents', { path: doc.path, workspace: f.directory })).json();
+  const firstQuote = { path: `${registered.workspace}/first.ts`, kind: 'code', exact: 'return true;', startLine: 2, endLine: 2 };
+  const secondQuote = { path: `${registered.workspace}/second.yml`, kind: 'doc', exact: 'enabled: true', startLine: 1, endLine: 1 };
+  const first = await (await f.view('/api/questions', { documentId: doc.id, text: 'Explain this code', fileQuote: firstQuote, clientMessageId: 'file-first' })).json();
+  const second = await (await f.view('/api/questions', { documentId: doc.id, threadId: first.threadId, text: 'Compare with this setting', fileQuote: secondQuote, clientMessageId: 'file-second' })).json();
+  const event = await (await f.agent(`/agent/requests/${first.id}/prepare`, {})).json();
+  assert.deepEqual(event.messages, [
+    { requestId: first.id, text: 'Explain this code', fileQuote: firstQuote },
+    { requestId: second.id, text: 'Compare with this setting', fileQuote: secondQuote },
+  ]);
+});
+
 test('saved batch membership cannot cross threads or disagree about completion', async t => {
   const f = await fixture(t), doc = await f.register();
   const first = await (await f.view('/api/questions', { documentId: doc.id, text: 'First', clientMessageId: 'first' })).json();

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { isQuote, isMessageQuote, type MessageQuote, type Quote } from '../src/quote.ts';
+import { isQuote, isMessageQuote, isFileQuote, type FileQuote, type MessageQuote, type Quote } from '../src/quote.ts';
 
-export type QuestionDraft = { text: string; retry: { signature: string; id: string } | null; quote?: Quote; messageQuote?: MessageQuote };
+export type QuestionDraft = { text: string; retry: { signature: string; id: string } | null; quote?: Quote; messageQuote?: MessageQuote; fileQuote?: FileQuote };
 export type QuestionDrafts = {
   get(id: string): QuestionDraft | undefined;
   set(id: string, draft: QuestionDraft): void;
@@ -24,9 +24,10 @@ function readDraft(key: string): QuestionDraft | undefined {
   try {
     const saved: unknown = JSON.parse(localStorage.getItem(key) ?? 'null');
     if (!saved || typeof saved !== 'object' || !('text' in saved) || typeof saved.text !== 'string' || !('retry' in saved)) return;
-    const messageQuote = 'messageQuote' in saved && isMessageQuote(saved.messageQuote) ? saved.messageQuote : undefined;
+    const fileQuote = 'fileQuote' in saved && isFileQuote(saved.fileQuote) ? saved.fileQuote : undefined;
+    const messageQuote = !fileQuote && 'messageQuote' in saved && isMessageQuote(saved.messageQuote) ? saved.messageQuote : undefined;
     const quote = !messageQuote && 'quote' in saved && isQuote(saved.quote) ? saved.quote : undefined;
-    const attachment = messageQuote ? { messageQuote } : quote ? { quote } : {};
+    const attachment = fileQuote ? { fileQuote } : messageQuote ? { messageQuote } : quote ? { quote } : {};
     if (saved.retry === null) return { text: saved.text, retry: null, ...attachment };
     const retry = saved.retry;
     if (retry && typeof retry === 'object' && 'signature' in retry && typeof retry.signature === 'string' && 'id' in retry && typeof retry.id === 'string')
@@ -46,7 +47,7 @@ export function useQuestionDrafts(documentId: string): QuestionDrafts {
         if (closedDocuments.has(documentId) || localStorage.getItem(`sidecar-closed-document:${documentId}`)) { dirty.clear(); return; }
         for (const id of dirty) {
           const draft = values.get(id);
-          if (draft?.text || draft?.quote || draft?.messageQuote) localStorage.setItem(key(id), JSON.stringify(draft));
+          if (draft?.text || draft?.quote || draft?.messageQuote || draft?.fileQuote) localStorage.setItem(key(id), JSON.stringify(draft));
           else localStorage.removeItem(key(id));
         }
         dirty.clear(); setError('');
