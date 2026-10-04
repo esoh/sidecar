@@ -1250,7 +1250,12 @@ pre code.pn-code[data-keep-layout] {
 .message-actions { display: flex; align-items: center; gap: 2px; height: 26px; padding-top: 3px; opacity: 0; }
 .message:hover .message-actions, .message:focus-within .message-actions { opacity: 1; }
 .message-actions button { display: inline-flex; align-items: center; justify-content: center; width: 25px; height: 23px; padding: 3px; color: var(--subtle); }
-.message-actions button[aria-pressed="true"] { color: var(--primary); }
+.message-actions button[aria-pressed="true"] {
+  color: color-mix(in srgb, var(--primary) 70%, var(--foreground));
+  background: color-mix(in srgb, var(--primary) 24%, transparent);
+  border-color: color-mix(in srgb, var(--primary) 65%, transparent);
+}
+.message-actions button[aria-pressed="true"]:hover { background: color-mix(in srgb, var(--primary) 34%, transparent); }
 .message-actions .sidecar-icon { width: 14px; height: 14px; }
 .message:has(.message-actions) { margin-bottom: 14px; }
 .pinned-messages { flex: 0 0 auto; padding: 7px 12px; border-bottom: 1px solid var(--line); max-height: 35%; overflow: auto; }

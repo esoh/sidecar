@@ -600,6 +600,34 @@ test('agent source apostrophes locate rendered smart quotes and retain genuine p
   await expect(page.getByRole('region', { name: 'Original document' }).locator('mark')).toHaveCount(3);
 });
 
+test('a message annotation toggle hides mixed selections and shows all hidden selections', async ({ page }) => {
+  const doc = await f.register('message-annotations.md', '# Notes\n\nFirst passage. Second passage. Third passage.');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Show me the first two.'); await input.press('Enter');
+  await expect(page.getByRole('log')).toContainText('Show me the first two.');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"First passage."},{"exact":"Second passage."}]}]]\nThe first two.');
+  await input.fill('And the third.'); await input.press('Enter');
+  await expect(page.getByRole('log')).toContainText('And the third.');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"Third passage."}]}]]\nThe third.');
+  const first = page.getByRole('log').locator('.message.agent').first();
+  const second = page.getByRole('log').locator('.message.agent').last();
+  await first.hover();
+  await expect(first.getByRole('button', { name: 'Hide message annotations', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('.message.user').getByRole('button', { name: /message annotations/ })).toHaveCount(0);
+  await first.getByRole('button', { name: 'Hide selection', exact: true }).first().click();
+  await expect(first.getByRole('button', { name: 'Show selection', exact: true })).toHaveCount(1);
+  await first.getByRole('button', { name: 'Hide message annotations', exact: true }).click();
+  await expect(first.getByRole('button', { name: 'Show selection', exact: true })).toHaveCount(2);
+  await expect(page.locator('#document mark')).toHaveText('Third passage.');
+  await page.reload();
+  await expect(first.getByRole('button', { name: 'Show message annotations', exact: true })).toHaveAttribute('aria-pressed', 'false');
+  await first.getByRole('button', { name: 'Show message annotations', exact: true }).focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#document mark')).toHaveText(['First passage.', 'Second passage.', 'Third passage.']);
+  await expect(second.getByRole('button', { name: 'Hide message annotations', exact: true })).toHaveAttribute('aria-pressed', 'true');
+});
+
 test('clicking a later agent highlight scrolls its own selection card into view', async ({ page }) => {
   const highlights = Array.from({ length: 20 }, (_, i) => ({ exact: `Passage ${i + 1}.` }));
   const doc = await f.register('many-highlights.md', '# Many highlights\n\n' + highlights.map(h => h.exact).join(' '));

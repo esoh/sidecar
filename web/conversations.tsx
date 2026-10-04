@@ -868,6 +868,8 @@ export function MessageContent({ message, documentId, threadId, activeSelectionI
 
 function MessageActions({ message, threadId, onPinned }: { message: Message; threadId: string; onPinned: () => void }) {
   const { copyFormat } = useMessageSettings();
+  const hasVisibleSelections = message.selections?.some(selection => selection.isVisible) ?? false;
+  const annotationAction = hasVisibleSelections ? 'Hide message annotations' : 'Show message annotations';
   const [saving, setSaving] = useState(false), [error, setError] = useState(''), [copied, setCopied] = useState(false);
   useEffect(() => { if (copied) { const timer = setTimeout(() => setCopied(false), 1500); return () => clearTimeout(timer); } }, [copied]);
   return <>
@@ -881,6 +883,12 @@ function MessageActions({ message, threadId, onPinned }: { message: Message; thr
         catch (reason) { setError(errorText(reason)); }
         finally { setSaving(false); }
       }}><Icon name="pin" /></button>
+      {!!message.selections?.length && <button aria-label={annotationAction} title={annotationAction} aria-pressed={hasVisibleSelections} disabled={saving} onClick={async () => {
+        setSaving(true);
+        try { await api(`/api/threads/${threadId}/messages/${encodeURIComponent(message.id)}/selections`, { isVisible: !hasVisibleSelections }); setError(''); }
+        catch (reason) { setError(errorText(reason)); }
+        finally { setSaving(false); }
+      }}><Icon name="annotation" /></button>}
     </div>
     {copied && <span className="sr-only" role="status">Message copied</span>}
     {error && <p role="alert">{error}</p>}

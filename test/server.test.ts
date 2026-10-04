@@ -5,6 +5,30 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fixture } from './support.ts';
 
+test('message annotation visibility is scoped, validated, and saved across restart', async t => {
+  const f = await fixture(t), doc = await f.register();
+  const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'Show both', clientMessageId: 'annotations' })).json();
+  await f.agent(`/agent/requests/${request.id}/claim`, {});
+  await f.agent('/agent/replies', { requestId: request.id, documentId: doc.id, threadId: request.threadId, text: '[[sidecar-meta {"highlights":[{"exact":"First heading"},{"exact":"Hello world."}]}]]\nBoth.' });
+  const next = await (await f.view('/api/questions', { documentId: doc.id, threadId: request.threadId, text: 'Again', clientMessageId: 'again' })).json();
+  await f.agent(`/agent/requests/${next.id}/claim`, {});
+  await f.agent('/agent/replies', { requestId: next.id, documentId: doc.id, threadId: next.threadId, text: '[[sidecar-meta {"highlights":[{"exact":"Hello world."}]}]]\nHere.' });
+  const messages = async () => (await (await f.view('/api/state')).json()).threads[request.threadId].messages.filter((m: any) => m.role === 'agent');
+  const before = await messages();
+  const path = `/api/threads/${request.threadId}/messages/${before[0].id}/selections`;
+  assert.equal((await f.view(path, { isVisible: 'no' })).status, 400);
+  assert.equal((await f.view(`/api/threads/${request.threadId}/messages/missing/selections`, { isVisible: false })).status, 404);
+  const other = await (await f.view('/api/threads', { documentId: doc.id })).json();
+  assert.equal((await f.view(`/api/threads/${other.id}/messages/${before[0].id}/selections`, { isVisible: false })).status, 404);
+  assert.equal((await f.view(path, { isVisible: false })).status, 200);
+  await f.reopen();
+  const hidden = await messages();
+  assert.deepEqual(hidden[0], { ...before[0], selections: before[0].selections.map((s: any) => ({ ...s, isVisible: false })) });
+  assert.deepEqual(hidden[1], before[1]);
+  assert.equal((await f.view(path, { isVisible: true })).status, 200);
+  assert.deepEqual(await messages(), before);
+});
+
 test('message pins validate routing and survive restart without altering message contents', async t => {
   const f = await fixture(t), doc = await f.register();
   const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'Remember this', clientMessageId: 'pin' })).json();
