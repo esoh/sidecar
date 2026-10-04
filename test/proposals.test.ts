@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseReply } from '../src/reply-metadata.ts';
+import * as proposals from '../src/proposals.ts';
 import { claim, createState, openStore, readSavedState, registerDocument, reply, submit } from '../src/store.ts';
 
 const owner = { agent: 'codex' as const, sessionId: '11111111-1111-4111-8111-111111111111' };
@@ -113,4 +114,68 @@ test('unavailable proposal sources keep the reply with no invented revision or a
   const saved = Object.values(state.proposals).find(p => p.messageId === message.id)!;
   assert.equal(saved.status, 'outdated'); assert.equal(saved.reason, 'source-unavailable'); assert.equal(saved.baseVersion, null);
   assert.deepEqual(readSavedState(state), state);
+});
+
+test('literal source preparation keeps Markdown bytes and captures only immediate context', () => {
+  const target = proposals.prepareProposal('Intro\nRetries: **3**\nEnd', 'v1', proposal);
+  assert.deepEqual(target.baseRange, { start: 6, end: 20 });
+  assert.equal(target.prefix, 'Intro\n'); assert.equal(target.suffix, '\nEnd');
+  for (const before of ['**bold**', '`code`', '[link](https://example.com)', '“quoted”', '😀 emoji']) {
+    const prepared = proposals.prepareProposal('x'.repeat(40) + before + 'y'.repeat(40), 'v1', { before, after: '' });
+    assert.deepEqual(prepared.baseRange, { start: 40, end: 40 + before.length });
+    assert.equal(prepared.prefix, 'x'.repeat(32)); assert.equal(prepared.suffix, 'y'.repeat(32));
+  }
+  for (const [source, before] of [['“quoted”', '"quoted"'], ['two  spaces', 'two spaces'], ['**bold**', 'bold text']]) {
+    assert.equal(proposals.prepareProposal(source, 'v1', { before, after: 'replacement' }).reason, 'missing');
+  }
+});
+
+test('proposal preparation reports missing, ambiguous, changed context and unavailable source distinctly', () => {
+  const input = { before: 'Same', after: 'New' };
+  assert.equal(proposals.prepareProposal('Same\nSame', 'v1', input).reason, 'ambiguous');
+  const contextual = proposals.prepareProposal('First Same\nSecond Same', 'v1', { ...input, prefix: 'Second ' });
+  assert.deepEqual(contextual.baseRange, { start: 18, end: 22 });
+  assert.equal(contextual.prefix, 'Second ');
+  assert.equal(proposals.prepareProposal('First Same', 'v1', { ...input, prefix: 'Second ' }).reason, 'context-changed');
+  assert.deepEqual(proposals.prepareProposal(null, null, input), { ...input, prefix: '', suffix: '', baseVersion: null, baseRange: null, reason: 'source-unavailable' });
+  const missing = proposals.prepareProposal('Other', 'v1', input);
+  assert.equal(missing.baseVersion, 'v1'); assert.equal(missing.baseRange, null); assert.equal(missing.reason, 'missing');
+});
+
+function pending(id: string, source: string, before: string, after: string, context: { prefix?: string; suffix?: string } = {}): proposals.Proposal {
+  return { ...proposals.prepareProposal(source, 'v1', { before, after, ...context }), id, documentId: 'doc', threadId: 'thread', messageId: 'message', selectionId: id, status: 'pending', createdAt: 1 };
+}
+
+test('replacement follows exact contextual text after shifts but never falls through to another occurrence', () => {
+  const source = 'Intro\nRetries: **3**\nEnd', prepared = pending('one', source, proposal.before, proposal.after);
+  const moved = proposals.planReplacements('Added above\n' + source, [prepared]);
+  assert.equal(moved.markdown, 'Added above\nIntro\nRetries: **4**\nEnd');
+  assert.deepEqual(moved.applied, [{ id: 'one', range: { start: 18, end: 32 } }]);
+  const original = 'Original Same ending' + '.'.repeat(40) + 'Other Same elsewhere';
+  const selected = pending('one', original, 'Same', 'New', { prefix: 'Original ' });
+  const removed = original.replace('Original Same ending', 'Removed');
+  const result = proposals.planReplacements(removed, [selected]);
+  assert.equal(result.markdown, removed); assert.deepEqual(result.applied, []);
+  assert.deepEqual(result.outdated, [{ id: 'one', reason: 'context-changed' }]);
+});
+
+test('bulk replacements preserve disjoint text and return resulting ranges including insertion and deletion', () => {
+  const source = 'A cat B dog C bird D';
+  const result = proposals.planReplacements(source, [pending('one', source, 'cat', 'kitten'), pending('two', source, 'dog', ''), pending('three', source, 'bird', 'bird and egg')]);
+  assert.equal(result.markdown, 'A kitten B  C bird and egg D');
+  assert.deepEqual(result.applied, [{ id: 'one', range: { start: 2, end: 8 } }, { id: 'two', range: { start: 11, end: 11 } }, { id: 'three', range: { start: 14, end: 26 } }]);
+  assert.deepEqual(result.outdated, []); assert.deepEqual(result.overlapping, []);
+  const adjacent = proposals.planReplacements('AB', [pending('a', 'AB', 'A', 'AA'), pending('b', 'AB', 'B', 'BB')]);
+  assert.equal(adjacent.markdown, 'AABB');
+});
+
+test('bulk excludes every overlap and duplicate while applying independent valid members beside stale ones', () => {
+  const source = 'abcdef' + '.'.repeat(40) + 'valid' + '.'.repeat(40) + 'stale';
+  const candidates = [pending('one', source, 'abc', 'A'), pending('two', source, 'bcd', 'B'), pending('three', source, 'def', 'C'), pending('four', source, 'valid', 'accepted'), pending('five', source, 'stale', 'old')];
+  const changed = source.replace('stale', 'gone'), result = proposals.planReplacements(changed, candidates);
+  assert.equal(result.markdown, changed.replace('valid', 'accepted'));
+  assert.deepEqual(result.overlapping, ['one', 'two', 'three']);
+  assert.deepEqual(result.outdated, [{ id: 'five', reason: 'missing' }]);
+  assert.equal(result.applied.length, 1);
+  assert.deepEqual(proposals.planReplacements('same', [pending('a', 'same', 'same', 'new'), pending('b', 'same', 'same', 'new')]).overlapping, ['a', 'b']);
 });

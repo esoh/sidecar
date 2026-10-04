@@ -56,3 +56,51 @@ export function isProposalWrite(v: unknown): v is ProposalWrite {
     Array.isArray(v.proposalIds) && v.proposalIds.length > 0 && v.proposalIds.length <= 20 && v.proposalIds.every(nonempty) && new Set(v.proposalIds).size === v.proposalIds.length &&
     Object.keys(ranges).length === v.proposalIds.length && v.proposalIds.every(id => Object.hasOwn(ranges, id) && isRange(ranges[id]));
 }
+
+function locateSource(markdown: string, input: ProposalInput): SourceRange | ProposalReason {
+  const matches: SourceRange[] = [];
+  let hasExact = false;
+  for (let start = markdown.indexOf(input.before); start >= 0; start = markdown.indexOf(input.before, start + 1)) {
+    hasExact = true;
+    const end = start + input.before.length;
+    if ((!input.prefix || markdown.slice(0, start).endsWith(input.prefix)) && (!input.suffix || markdown.slice(end).startsWith(input.suffix))) matches.push({ start, end });
+    if (matches.length > 1) return 'ambiguous';
+  }
+  return matches[0] ?? (hasExact ? 'context-changed' : 'missing');
+}
+
+export function prepareProposal(markdown: string | null, version: string | null, input: ProposalInput): PreparedProposal {
+  if (!isProposalInput(input)) throw new Error('Invalid proposal source');
+  const base = { ...input, prefix: input.prefix ?? '', suffix: input.suffix ?? '', baseVersion: version, baseRange: null };
+  if (markdown === null || version === null) return { ...base, baseVersion: null, reason: 'source-unavailable' };
+  const found = locateSource(markdown, input);
+  if (typeof found === 'string') return { ...base, reason: found };
+  return { ...base, baseRange: found, prefix: input.prefix ?? markdown.slice(Math.max(0, found.start - 32), found.start), suffix: input.suffix ?? markdown.slice(found.end, found.end + 32) };
+}
+
+export function planReplacements(markdown: string, proposals: Proposal[]): {
+  markdown: string; applied: Array<{ id: string; range: SourceRange }>;
+  outdated: Array<{ id: string; reason: ProposalReason }>; overlapping: string[];
+} {
+  const located: Array<{ proposal: Proposal; range: SourceRange }> = [], outdated: Array<{ id: string; reason: ProposalReason }> = [];
+  for (const proposal of proposals) {
+    if (proposal.status !== 'pending') continue;
+    const found = locateSource(markdown, proposal);
+    if (typeof found === 'string') outdated.push({ id: proposal.id, reason: found });
+    else located.push({ proposal, range: found });
+  }
+  const conflicts = new Set<string>();
+  for (let i = 0; i < located.length; i++) for (let j = i + 1; j < located.length; j++) {
+    const a = located[i], b = located[j];
+    if (a.range.start < b.range.end && b.range.start < a.range.end) { conflicts.add(a.proposal.id); conflicts.add(b.proposal.id); }
+  }
+  const disjoint = located.filter(item => !conflicts.has(item.proposal.id)).sort((a, b) => a.range.start - b.range.start);
+  let delta = 0;
+  const applied = disjoint.map(({ proposal, range }) => {
+    const start = range.start + delta;
+    delta += proposal.after.length - proposal.before.length;
+    return { id: proposal.id, range: { start, end: start + proposal.after.length } };
+  });
+  for (const { proposal, range } of [...disjoint].reverse()) markdown = markdown.slice(0, range.start) + proposal.after + markdown.slice(range.end);
+  return { markdown, applied, outdated, overlapping: located.filter(item => conflicts.has(item.proposal.id)).map(item => item.proposal.id) };
+}
