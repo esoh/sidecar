@@ -1,7 +1,8 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { parseDiffFromFile } from '@pierre/diffs';
 import { FileDiff } from '@pierre/diffs/react';
+import { storage } from '@plannotator/ui/utils/storage';
 import type { MessageSelection } from '../src/store.ts';
 import type { DecisionResult, Proposal, ProposalReason } from '../src/proposals.ts';
 import { api, errorText } from './api.ts';
@@ -54,10 +55,9 @@ export function useProposalReview(options: Options) {
   useEffect(() => {
     if (!active) return;
     const frame = requestAnimationFrame(() => dialog.current?.querySelector<HTMLButtonElement>('[aria-label="Close proposed change"]')?.focus({ preventScroll: true }));
-    const outside = (event: PointerEvent) => { if (event.target instanceof Node && !dialog.current?.contains(event.target) && !active.invoker?.contains(event.target)) close(); };
     const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); close(); } };
-    document.addEventListener('pointerdown', outside); document.addEventListener('keydown', escape);
-    return () => { cancelAnimationFrame(frame); document.removeEventListener('pointerdown', outside); document.removeEventListener('keydown', escape); };
+    document.addEventListener('keydown', escape);
+    return () => { cancelAnimationFrame(frame); document.removeEventListener('keydown', escape); };
   }, [active, close]);
   const anchor = useCallback(() => {
     const root = latest.current.article.current;
@@ -66,7 +66,6 @@ export function useProposalReview(options: Options) {
     return rect && (rect.width || rect.height) ? rect : active?.invoker?.getBoundingClientRect() ?? root?.getBoundingClientRect();
   }, [active, selection]);
   const bounds = useCallback(() => document.querySelector('main.canvas')?.getBoundingClientRect(), []);
-  usePosition(dialog, active ? anchor : null, 480, false, bounds);
   async function run(key: string, ids: string[], path: string, body: unknown) {
     if (latest.current.isHistorical || ids.some(id => busy.has(id))) return;
     setBusy(previous => new Set([...previous, ...ids])); setErrors(previous => ({ ...previous, [key]: '' }));
@@ -83,19 +82,101 @@ export function useProposalReview(options: Options) {
     },
   };
   return { context, open, popover: proposal && selection && active ? createPortal(
-    <section ref={dialog} className="floating proposal-review" role="dialog" aria-label="Proposed change" aria-modal={false}>
-      <header><div><strong>{selection.label ?? 'Proposed change'}</strong><span className={`proposal-status ${proposal.status}`}>{statusLabel(proposal)}</span></div><button aria-label="Close proposed change" onClick={close}>×</button></header>
-      <ProposalDiff proposal={proposal} documentId={options.documentId} />
-      {proposal.reason && <p className="proposal-reason">{explanations[proposal.reason]}</p>}
-      {errors[proposal.id] && <p role="alert">{errors[proposal.id]}</p>}
-      <footer>
+    <ProposalWindow key={proposal.id} dialog={dialog} anchor={anchor} bounds={bounds} onClose={close}
+      title={<><strong>{selection.label ?? 'Proposed change'}</strong><span className={`proposal-status ${proposal.status}`}>{statusLabel(proposal)}</span></>}
+      footer={<>
         {options.isHistorical ? <button className="proposal-original" onClick={options.onReturnToCurrent}>Return to current</button> : proposal.baseVersion && <OriginalLink documentId={options.documentId} version={proposal.baseVersion} onOpen={() => options.onShowOriginal(selection.id)} />}
         {(proposal.status === 'pending' || proposal.status === 'outdated') && <div className="proposal-decisions">
           <button disabled={options.isHistorical || busy.has(proposal.id)} onClick={() => void context.decide(proposal, 'reject')}>Reject</button>
           <button className="proposal-accept" disabled={options.isHistorical || proposal.status !== 'pending' || busy.has(proposal.id)} onClick={() => void context.decide(proposal, 'accept')}>{busy.has(proposal.id) ? 'Saving…' : 'Accept'}</button>
         </div>}
-      </footer>
-    </section>, document.body) : null };
+      </>}>
+      <ProposalDiff proposal={proposal} documentId={options.documentId} />
+      {proposal.reason && <p className="proposal-reason">{explanations[proposal.reason]}</p>}
+      {errors[proposal.id] && <p role="alert">{errors[proposal.id]}</p>}
+    </ProposalWindow>, document.body) : null };
+}
+
+type ProposalGeometry = { x: number; y: number; width: number; height: number };
+function proposalViewport() {
+  const viewport = window.visualViewport, left = (viewport?.offsetLeft ?? 0) + 8, top = (viewport?.offsetTop ?? 0) + 8;
+  return { left, top, right: left + (viewport?.width ?? innerWidth) - 16, bottom: top + (viewport?.height ?? innerHeight) - 16 };
+}
+function clampProposal(value: ProposalGeometry): ProposalGeometry {
+  const { left, top, right, bottom } = proposalViewport();
+  const width = Math.max(0, Math.min(value.width, right - left)), height = Math.max(0, Math.min(value.height, bottom - top));
+  return { width, height, x: Math.max(left, Math.min(value.x, right - width)), y: Math.max(top, Math.min(value.y, bottom - height)) };
+}
+function ProposalWindow({ dialog, anchor, bounds, title, children, footer, onClose }: {
+  dialog: RefObject<HTMLElement | null>; anchor: () => DOMRect | undefined; bounds: () => DOMRect | undefined;
+  title: ReactNode; children: ReactNode; footer: ReactNode; onClose: () => void;
+}) {
+  const [geometry, setGeometry] = useState<ProposalGeometry | null>(null);
+  const [textSize, setTextSize] = useState(() => {
+    const saved = Number(storage.getItem('sidecar-proposal-text-size'));
+    return Number.isInteger(saved) && saved >= 80 && saved <= 150 && saved % 5 === 0 ? saved : 100;
+  });
+  const stopGesture = useRef<(() => void) | null>(null);
+  // Anchoring owns initial placement only; scroll and diff layout changes must not undo a gesture.
+  usePosition(dialog, geometry ? null : anchor, 480, false, bounds);
+  useEffect(() => { storage.setItem('sidecar-proposal-text-size', String(textSize)); }, [textSize]);
+  useEffect(() => () => stopGesture.current?.(), []);
+  useLayoutEffect(() => {
+    const resize = () => setGeometry(previous => previous && clampProposal(previous));
+    window.addEventListener('resize', resize); window.visualViewport?.addEventListener('resize', resize); window.visualViewport?.addEventListener('scroll', resize);
+    return () => { window.removeEventListener('resize', resize); window.visualViewport?.removeEventListener('resize', resize); window.visualViewport?.removeEventListener('scroll', resize); };
+  }, []);
+  function gesture(event: ReactPointerEvent, edge?: string) {
+    if (event.button !== 0 || (event.target instanceof Element && event.target.closest('button, input'))) return;
+    const original = dialog.current?.getBoundingClientRect(); if (!original) return;
+    event.preventDefault(); stopGesture.current?.();
+    const start = { x: event.clientX, y: event.clientY }, previous = geometry;
+    setGeometry(clampProposal(original));
+    const cursor = document.body.style.cursor, selection = document.body.style.userSelect;
+    document.body.style.cursor = edge ? `${edge}-resize` : 'grabbing'; document.body.style.userSelect = 'none';
+    const move = (next: PointerEvent) => {
+      if (next.pointerId !== event.pointerId) return;
+      const dx = next.clientX - start.x, dy = next.clientY - start.y;
+      if (!edge) { setGeometry(clampProposal({ x: original.x + dx, y: original.y + dy, width: original.width, height: original.height })); return; }
+      const viewport = proposalViewport(), minWidth = Math.min(280, viewport.right - viewport.left), minHeight = Math.min(220, viewport.bottom - viewport.top);
+      const left = edge.includes('w') ? Math.max(viewport.left, Math.min(original.x + dx, original.right - minWidth)) : original.x;
+      const top = edge.includes('n') ? Math.max(viewport.top, Math.min(original.y + dy, original.bottom - minHeight)) : original.y;
+      const right = edge.includes('e') ? Math.min(viewport.right, Math.max(original.x + minWidth, original.right + dx)) : original.right;
+      const bottom = edge.includes('s') ? Math.min(viewport.bottom, Math.max(original.y + minHeight, original.bottom + dy)) : original.bottom;
+      setGeometry(clampProposal({ x: left, y: top, width: right - left, height: bottom - top }));
+    };
+    const finish = () => {
+      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', cancel); window.removeEventListener('blur', cancel);
+      document.body.style.cursor = cursor; document.body.style.userSelect = selection; stopGesture.current = null;
+    };
+    const up = (next: PointerEvent) => { if (next.pointerId === event.pointerId) finish(); };
+    const cancel = () => { finish(); setGeometry(previous); };
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up); window.addEventListener('pointercancel', cancel); window.addEventListener('blur', cancel);
+    stopGesture.current = finish;
+  }
+  return <section ref={dialog} className="floating proposal-review" role="dialog" aria-label="Proposed change" aria-modal={false}
+    style={geometry ? { left: geometry.x, top: geometry.y, width: geometry.width, height: geometry.height, maxHeight: 'none' } : undefined}>
+    <header role="group" tabIndex={0} aria-label="Move proposed change" title="Drag to move. Arrow keys move; Shift+Arrow keys resize."
+      onPointerDown={event => gesture(event)} onKeyDown={event => {
+        if (event.target !== event.currentTarget) return;
+        const delta = { ArrowLeft: [-10, 0], ArrowRight: [10, 0], ArrowUp: [0, -10], ArrowDown: [0, 10] }[event.key];
+        const current = dialog.current?.getBoundingClientRect(); if (!delta || !current) return;
+        event.preventDefault();
+        setGeometry(clampProposal({ x: current.x + (event.shiftKey ? 0 : delta[0]), y: current.y + (event.shiftKey ? 0 : delta[1]),
+          width: event.shiftKey ? Math.max(280, current.width + delta[0]) : current.width, height: event.shiftKey ? Math.max(220, current.height + delta[1]) : current.height }));
+      }}>
+      <div>{title}</div><button aria-label="Close proposed change" onClick={onClose}>×</button>
+    </header>
+    <div className="proposal-text-size">
+      <label htmlFor="proposal-text-size">Text size</label>
+      <input id="proposal-text-size" type="range" aria-label="Proposal text size" aria-valuetext={`${textSize}%`} min={80} max={150} step={5} value={textSize} onChange={event => setTextSize(event.target.valueAsNumber)} />
+      <output htmlFor="proposal-text-size">{textSize}%</output>
+      <button aria-label="Reset proposal text size" disabled={textSize === 100} onClick={() => setTextSize(100)}>Reset</button>
+    </div>
+    <div className="proposal-content"><div style={{ zoom: textSize / 100 }}>{children}</div></div>
+    <footer>{footer}</footer>
+    {['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'].map(edge => <div key={edge} className={`resize-edge resize-${edge}`} onPointerDown={event => gesture(event, edge)} />)}
+  </section>;
 }
 
 function OriginalLink({ documentId, version, onOpen }: { documentId: string; version: string; onOpen: () => void }) {
