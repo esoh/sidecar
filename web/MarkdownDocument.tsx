@@ -14,13 +14,32 @@ import { revealTarget } from './reveal-target.ts';
 type BlockGroup = ReturnType<typeof groupBlocks>[number];
 type SectionGroup = { type: 'section'; block: Block; children: DocumentGroup[] };
 type DocumentGroup = BlockGroup | SectionGroup;
+function isSectionSeparator(group: DocumentGroup): boolean {
+  if (group.type !== 'single') return false;
+  if (group.block.type === 'hr') return true;
+  if (group.block.type !== 'html') return false;
+  const template = document.createElement('template');
+  template.innerHTML = group.block.content;
+  return !template.content.textContent?.trim() &&
+    Array.from(template.content.querySelectorAll('*')).every(element => ['DIV', 'BR'].includes(element.tagName));
+}
 function groupSections(groups: BlockGroup[]): DocumentGroup[] {
   const roots: DocumentGroup[] = [], parents: SectionGroup[] = [];
   for (const group of groups) {
     if (group.type === 'single' && group.block.type === 'heading') {
+      const previous = parents.at(-1);
+      let boundary: DocumentGroup[] = [];
+      if (previous && (previous.block.level ?? 1) >= (group.block.level ?? 1)) {
+        let start = previous.children.length;
+        while (start > 0 && isSectionSeparator(previous.children[start - 1])) start--;
+        // Only a trailing divider run belongs between the sections being closed
+        // and opened. Internal rules and spacer-only tails stay in their section.
+        if (previous.children.slice(start).some(item => item.type === 'single' && item.block.type === 'hr'))
+          boundary = previous.children.splice(start);
+      }
       while (parents.length && (parents.at(-1)?.block.level ?? 1) >= (group.block.level ?? 1)) parents.pop();
       const section: SectionGroup = { type: 'section', block: group.block, children: [] };
-      (parents.at(-1)?.children ?? roots).push(section);
+      (parents.at(-1)?.children ?? roots).push(...boundary, section);
       parents.push(section);
     } else (parents.at(-1)?.children ?? roots).push(group);
   }
@@ -73,6 +92,28 @@ export const MarkdownDocument = memo(function MarkdownDocument({
   );
   const groups = useMemo(() => canCollapseHeadings ? groupSections(groupBlocks(blocks)) : groupBlocks(blocks), [blocks, canCollapseHeadings]);
   const headings = useMemo(() => buildHeadingSlugMap(blocks), [blocks]);
+  const foldIds = useMemo(() => {
+    const ids = new Map(headings), counts = new Map<string, number>();
+    for (const block of blocks) {
+      if (block.type !== 'heading' || ids.has(block.id)) continue;
+      // Emoji/punctuation-only headings have no URL slug. Their parser IDs are
+      // positional, so use the heading text and occurrence for saved folds.
+      const base = JSON.stringify([block.level, block.content]);
+      const occurrence = counts.get(base) ?? 0;
+      counts.set(base, occurrence + 1);
+      ids.set(block.id, `${base}:${occurrence}`);
+    }
+    return ids;
+  }, [blocks, headings]);
+  const foldKey = `sidecar-folds:${documentId}`;
+  const folded = useMemo(() => {
+    if (!canCollapseHeadings) return new Set<string>();
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem(foldKey) ?? '[]');
+      if (Array.isArray(saved) && saved.every((value): value is string => typeof value === 'string')) return new Set<string>(saved);
+    } catch { /* Folding remains usable without browser storage. */ }
+    return new Set<string>();
+  }, [foldKey, canCollapseHeadings]);
   const [image, setImage] = useState<{ src: string; alt: string } | null>(null);
   function renderBlock(block: Block, orderedIndex?: number | null) {
     const language = block.language?.trim().split(/\s+/, 1)[0]?.toLowerCase();
@@ -106,12 +147,23 @@ export const MarkdownDocument = memo(function MarkdownDocument({
   }
   function renderGroups(items: DocumentGroup[]): ReactNode {
     return items.map(group => {
-      if (group.type === 'section' && group.children.length) return (
-        <details key={headings.get(group.block.id) ?? group.block.id} className="document-section" open>
-          <summary>{renderBlock(group.block)}</summary>{'\n'}
-          {renderGroups(group.children)}
-        </details>
-      );
+      if (group.type === 'section' && group.children.length) {
+        const key = foldIds.get(group.block.id) ?? JSON.stringify([group.block.level, group.block.content]);
+        return (
+          <details key={key} className="document-section" open={!folded.has(key)} onToggle={event => {
+            // Native toggles include keyboard use and programmatic link reveals.
+            // Ignore descendant toggles and initial mount events that change nothing.
+            if (event.target !== event.currentTarget) return;
+            const isFolded = !event.currentTarget.open;
+            if (folded.has(key) === isFolded) return;
+            if (isFolded) folded.add(key); else folded.delete(key);
+            try { localStorage.setItem(foldKey, JSON.stringify([...folded])); } catch { /* Per-browser reading preference only. */ }
+          }}>
+            <summary>{renderBlock(group.block)}</summary>{'\n'}
+            {renderGroups(group.children)}
+          </details>
+        );
+      }
       if (group.type !== 'list-group')
         return (
           <Fragment key={group.block.id}>
