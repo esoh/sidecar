@@ -6,6 +6,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFile, writeFile, realpath, mkdir, rm, stat } from 'node:fs/promises';
 import { basename, join, dirname, relative, isAbsolute, extname } from 'node:path';
 import { notifyCodex } from './agent.ts';
+import { reconcileCodexQueue } from './codex-queue.ts';
 import { observeCodex, readCodexActivity, resetCodexSession, type CodexObserver, type NativeResetResult } from './codex-stream.ts';
 import { ReplyStream, isStreamEvent } from './stream.ts';
 import { parseReply } from './reply-metadata.ts';
@@ -112,6 +113,9 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   const announced = new Set<string>();
   let dispatching = false;
   let dispatchWork: Promise<void> | undefined;
+  let nativeQueueWork: Promise<void> | undefined;
+  let nativeCleanupVersion = 0, nativeCleanedVersion = 0;
+  const pendingNativeCleanup = new Set<string>();
   let connectionError: string | null = null;
   let compacting = false;
   let agentActivity = 'unknown';
@@ -166,6 +170,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       if (stream !== active) return;
       try {
         await store.update(state => stopRequest(state, active.route.requestId, partial));
+        if (owner.agent === 'codex') { nativeCleanupVersion++; pendingNativeCleanup.add(active.route.requestId); }
         if (stream === active) { stream = undefined; stopObserver?.(); stopObserver = undefined; }
         clearStop(true); stopError = undefined;
       } catch { stopFailed(active); }
@@ -189,7 +194,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     void confirmation.catch(() => {});
     const attempt = { id: randomUUID(), status: 'checking' as const, confirm, reject };
     reset = attempt;
-    const inFlight = dispatchWork;
+    const inFlight = Promise.all([dispatchWork, nativeQueueWork]);
     resetWork = (async () => {
       const abort = new AbortController();
       const cancel = () => { abort.abort(); reject(new Error('Could not verify the attached session. Reconnect it and try Reset again.')); };
@@ -197,7 +202,14 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       transportAbort.signal.addEventListener('abort', cancel, { once: true });
       try {
         await inFlight;
-        const targets = Object.values(store.read().requests).filter(r => (!r.batchId || r.batchId === r.id) && ['claimed', 'uncertain'].includes(r.status)).map(r => r.id);
+        const requests = Object.values(store.read().requests);
+        const targets = requests.filter(r => (!r.batchId || r.batchId === r.id) && (['claimed', 'uncertain'].includes(r.status) || (r.status === 'queued' && r.acceptedAt))).map(r => r.id);
+        if (owner.agent === 'codex') {
+          // Withdraw native deliveries before interrupting: otherwise an old queued
+          // submission can start after Sidecar has already marked it Stopped.
+          const cancelled = [...new Set([...targets, ...terminalCodexRequests()])];
+          await reconcileCodexQueue(owner.sessionId, { cancelRequestIds: cancelled }, abort.signal);
+        }
         const result = owner.agent === 'codex' ? await resetCodexSession(owner.sessionId, abort.signal) : await confirmation;
         await capture(async () => {
           if (closed || abort.signal.aborted) throw new Error('Reset could not be confirmed.');
@@ -211,7 +223,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
           await store.update(state => {
             for (const id of targets) {
               const request = state.requests[id];
-              if (!request || !['claimed', 'uncertain'].includes(request.status)) continue;
+              if (!request || !(['claimed', 'uncertain'].includes(request.status) || (request.status === 'queued' && request.acceptedAt))) continue;
               // Explicit Reset also releases a delivery left uncertain by an app restart.
               for (const member of requestBatch(state, id)) { member.status = 'claimed'; delete member.replyRecovery; }
               stopRequest(state, id, stream?.route.requestId === id ? stream.text : '');
@@ -219,6 +231,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
           });
           if (stream && targets.includes(stream.route.requestId)) { stream = undefined; stopObserver?.(); stopObserver = undefined; clearStop(true); stopError = undefined; }
           if (reset === attempt) reset.status = 'done';
+          connectionError = null;
         });
       } catch (error) {
         if (reset === attempt) { reset.status = 'failed'; reset.error = error instanceof Error ? error.message : 'Reset failed.'; }
@@ -250,6 +263,9 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       input.proposalTargets = highlights.map(h => h.proposal ? prepareProposal(data?.markdown ?? null, data?.version ?? null, h.proposal) : null);
     }
     await store.update(state => reply(state, input));
+    // Do not wait for dispatch here: recovery preparation also uses the capture
+    // queue. Reconcile after any in-flight native enqueue has settled instead.
+    if (owner.agent === 'codex') { nativeCleanupVersion++; pendingNativeCleanup.add(input.requestId); }
   }
   function streamChanged() { if (!closed && !streamTimer) streamTimer = setTimeout(() => { streamTimer = undefined; changed(); }, 50); }
   async function acceptStream(event: import('./stream.ts').StreamEvent) {
@@ -338,7 +354,10 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       const { id } = recovering.replyRecovery;
       try {
         const event = await prepareRecovery(recovering.id, id);
-        if (event.type && !closed && get(store.read().requests, recovering.id).status === 'claimed') await notifyCodex(owner, event, transportAbort.signal);
+        if (event.type && !closed && get(store.read().requests, recovering.id).status === 'claimed') {
+          await notifyCodex(owner, event, transportAbort.signal);
+          await startCodexDelivery(recovering.id);
+        }
       } catch {
         await recoveryFailed(recovering.id, id);
       } finally { dispatching = false; changed(); }
@@ -354,6 +373,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       await notifyCodex(owner, notification, transportAbort.signal);
       await store.update(state => { if (state.requests[request.id]) markAccepted(state, request.id); });
       connectionError = null;
+      await startCodexDelivery(request.id);
     } catch (error) {
       if (!closed) {
         // A failed queue command may already have delivered. Do not automatically execute it twice.
@@ -366,6 +386,36 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         connectionError = 'Codex notification failed. Restart Sidecar to retry; the question is retained.';
       }
     } finally { dispatching = false; changed(); }
+  }
+  function waitingCodexDelivery() {
+    if (owner.agent !== 'codex' || (stream?.hasStarted && stream.isTurnActive)) return;
+    return Object.values(store.read().requests).find(r => (!r.batchId || r.batchId === r.id) && ['queued', 'claimed'].includes(r.status) && r.acceptedAt);
+  }
+  function terminalCodexRequests() {
+    // Closing a document can remove its saved requests while a recovery enqueue
+    // is finishing. Retain those identities until native withdrawal succeeds.
+    return [...new Set([...pendingNativeCleanup, ...Object.values(store.read().requests).filter(r => ['completed', 'failed', 'stopped'].includes(r.status)).map(r => r.id)])];
+  }
+  async function startCodexDelivery(id?: string) {
+    if (closed || isResetting() || nativeQueueWork) return;
+    const request = id ? store.read().requests[id] : undefined;
+    const canStart = () => !closed && !isResetting() && !!id && ['queued', 'claimed', 'uncertain'].includes(store.read().requests[id]?.status);
+    const startRequestId = request && canStart() ? id : undefined;
+    const cancelRequestIds = terminalCodexRequests(), cleanupVersion = nativeCleanupVersion;
+    if (!startRequestId && !cancelRequestIds.length) return;
+    nativeQueueWork = (async () => {
+      try {
+        await reconcileCodexQueue(owner.sessionId, { startRequestId, cancelRequestIds, canStart }, transportAbort.signal);
+        nativeCleanedVersion = cleanupVersion;
+        for (const requestId of cancelRequestIds) pendingNativeCleanup.delete(requestId);
+        if (connectionError?.startsWith('Codex accepted')) { connectionError = null; changed(); }
+      } catch {
+        // Delivery already succeeded. Never submit the message again because the
+        // subsequent start/check failed or raced with another native turn.
+        if (!closed) { connectionError = 'Codex accepted the message, but its queue could not be started. Reconnect the agent or try Reset.'; changed(); }
+      }
+    })();
+    try { await nativeQueueWork; } finally { nativeQueueWork = undefined; }
   }
   function changed() {
     if (closed) return;
@@ -932,10 +982,12 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   }, pollMs);
   let readingActivity = false;
   const activityPolling = owner.agent === 'codex' ? setInterval(() => {
-    if (closed || readingActivity || !viewers.size) return;
+    if (closed || readingActivity || (!viewers.size && !waitingCodexDelivery() && nativeCleanupVersion === nativeCleanedVersion)) return;
     readingActivity = true;
     void readCodexActivity(owner.sessionId, transportAbort.signal).then(activity => {
       if (!closed && activity !== agentActivity) { agentActivity = activity; changed(); }
+      const waiting = waitingCodexDelivery();
+      if (!dispatching && ((activity === 'idle' && waiting) || nativeCleanupVersion !== nativeCleanedVersion)) return startCodexDelivery(waiting?.id);
     }).finally(() => { readingActivity = false; });
   }, 1000) : undefined;
   const heartbeat = setInterval(() => {
@@ -950,7 +1002,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       const timer = setTimeout(() => server.closeAllConnections(), 100); timer.unref();
       server.close(error => { clearTimeout(timer); if (error) reject(error); else resolveClose(); });
     });
-    await closePromise; await dispatchWork; await resetWork; await captureWork; await finalizing; await proposalService.drain(); finish();
+    await closePromise; await dispatchWork; await nativeQueueWork; await resetWork; await captureWork; await finalizing; await proposalService.drain(); finish();
   }
   changed();
   return { url, close, instanceId, done };
