@@ -70,22 +70,27 @@ export function createProposalService({ store, directory, changed }: { store: St
     };
     if (plan.applied.length) {
       const prepared = await prepareFileWrite(source, plan.markdown);
+      const recordAccepted = (state: State, decidedAt: number) => {
+        recordUnapplied(state);
+        for (const applied of plan.applied) {
+          Object.assign(get(state.proposals, applied.id), { status: 'accepted', decidedAt, appliedVersion: prepared.afterVersion, appliedRange: applied.range });
+          delete state.proposals[applied.id].reason;
+        }
+        recheck(state, documentId, plan.markdown);
+      };
       try {
         await saveDocumentVersion(directory, documentId, source);
-        await saveDocumentVersion(directory, documentId, { markdown: prepared.markdown, version: prepared.afterVersion });
-        const write = { id: randomUUID(), documentId, status: 'prepared' as const, proposalIds: plan.applied.map(p => p.id), decidedAt: Date.now(), beforeVersion: prepared.beforeVersion, afterVersion: prepared.afterVersion, appliedRanges: Object.fromEntries(plan.applied.map(p => [p.id, p.range])) };
-        await store.update(state => { state.proposalWrites[write.id] = write; });
-        publishFileWrite(prepared);
-        await store.update(state => {
-          recordUnapplied(state);
-          for (const applied of plan.applied) {
-            const proposal = get(state.proposals, applied.id);
-            Object.assign(proposal, { status: 'accepted', decidedAt: write.decidedAt, appliedVersion: write.afterVersion, appliedRange: applied.range });
-            delete proposal.reason;
-          }
-          delete state.proposalWrites[write.id];
-          recheck(state, documentId, plan.markdown);
-        });
+        if (prepared.beforeVersion === prepared.afterVersion) {
+          // Adjacent valid replacements can cancel out. Only the decisions change:
+          // there is no file publication to journal or recover after a failed save.
+          await store.update(state => recordAccepted(state, Date.now()));
+        } else {
+          await saveDocumentVersion(directory, documentId, { markdown: prepared.markdown, version: prepared.afterVersion });
+          const write = { id: randomUUID(), documentId, status: 'prepared' as const, proposalIds: plan.applied.map(p => p.id), decidedAt: Date.now(), beforeVersion: prepared.beforeVersion, afterVersion: prepared.afterVersion, appliedRanges: Object.fromEntries(plan.applied.map(p => [p.id, p.range])) };
+          await store.update(state => { state.proposalWrites[write.id] = write; });
+          publishFileWrite(prepared);
+          await store.update(state => { recordAccepted(state, write.decidedAt); delete state.proposalWrites[write.id]; });
+        }
       } finally { await discardFileWrite(prepared); }
     } else await store.update(recordUnapplied);
     changed();

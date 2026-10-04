@@ -83,6 +83,30 @@ test('bulk versus individual acceptance applies once while another claimed reque
   assert.equal(f.store.read().requests[request.id].status, 'claimed');
 });
 
+for (const failsSave of [false, true]) test(`aggregate no-op acceptance preserves valid restart state${failsSave ? ' after a failed save' : ''}`, async t => {
+  const f = await setup(t, 'Hello world');
+  const proposed = await f.propose([{ before: 'Hello ', after: 'Hello' }, { before: 'world', after: ' world' }]);
+  const original = await stat(f.file);
+  if (failsSave) {
+    f.injectFailure('final');
+    await assert.rejects(f.service.acceptReply(proposed.request.threadId, proposed.message.id));
+  } else {
+    assert.deepEqual((await f.service.acceptReply(proposed.request.threadId, proposed.message.id)).accepted, proposed.proposals.map(p => p.id));
+  }
+  const reopened = await openStore(f.directory, f.owner);
+  assert.deepEqual(reopened.read().proposalWrites, {}, 'an unchanged aggregate result needs no file-write journal');
+  assert.ok(Object.values(reopened.read().proposals).every(p => p.status === (failsSave ? 'pending' : 'accepted')));
+  assert.equal(await readFile(f.file, 'utf8'), 'Hello world');
+  assert.equal((await stat(f.file)).ino, original.ino, 'do not replace a file with identical bytes');
+  const { createProposalService } = await import('../src/proposal-service.ts');
+  const restarted = createProposalService({ store: reopened, directory: f.directory, changed() {} });
+  await restarted.recover();
+  await restarted.acceptReply(proposed.request.threadId, proposed.message.id);
+  assert.ok(Object.values(reopened.read().proposals).every(p => p.status === 'accepted'));
+  assert.deepEqual(readSavedState(reopened.read()), reopened.read());
+  assert.equal((await stat(f.file)).ino, original.ino);
+});
+
 for (const boundary of ['snapshots', 'journal', 'final'] as const) test(`proposal recovery after ${boundary} failure never applies twice`, async t => {
   const f = await setup(t), proposed = await f.propose([{ before: 'Original content', after: 'Revised content' }]), id = proposed.proposals[0].id;
   if (boundary === 'snapshots') await writeFile(join(f.directory, 'versions'), 'blocked');

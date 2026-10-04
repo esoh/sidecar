@@ -10,7 +10,7 @@
 
 **Spec:** [Approved design](../specs/2026-10-03-proposed-document-edits-design.md), approved by the user on 2026-10-03.
 
-**As built, 2026-10-04:** Tasks 1–5 are implemented and locally committed. Task 6's combined verification passed: 163 backend tests, 89 browser tests, backend/web typechecks and diff checks. Both native fixtures now prove acceptance during another streamed reply. The implemented Chrome preview also demonstrates the original-passage chooser and restored highlight. Release follows the independent whole-branch review; shared review context made separate `PinnedWindows.tsx`/`api.ts` changes unnecessary. Snapshot writing was extracted for reuse, and recovery of an unreadable document defers to its next decision without blocking other documents; see the spec's As built section.
+**As built, 2026-10-04:** Tasks 1–5 are implemented and locally committed. Task 6's combined verification passed: 165 backend tests, 89 browser tests, backend/web typechecks and diff checks. Both native fixtures now prove acceptance during another streamed reply. The implemented Chrome preview also demonstrates the original-passage chooser and restored highlight. The independent whole-branch review found one aggregate no-op recovery defect, reproduced and fixed with restart regressions; no findings were deferred. Shared review context made separate `PinnedWindows.tsx`/`api.ts` changes unnecessary. Snapshot writing was extracted for reuse, and recovery of an unreadable document defers to its next decision without blocking other documents; see the spec's As built section.
 
 ## Global Constraints
 
