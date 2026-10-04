@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import Highlighter from '@plannotator/web-highlighter';
-import type { Quote, RequestRecord } from '../src/store.ts';
+import type { Quote, RequestRecord, Thread } from '../src/store.ts';
 import { api, errorText, type ViewerState, type ClosedDocument } from './api.ts';
 import {
   AgentStatus,
@@ -15,8 +15,6 @@ import { useQuestionDrafts, forgetDocument, type QuestionDraft, type QuestionDra
 import { locateQuote, quoteRange, selectionText, selectionSentence, excludedSelection } from './selection.ts';
 import { MarkdownDocument, WorkspaceLinks, type OpenWorkspaceLink } from './MarkdownDocument.tsx';
 import { resolveWorkspaceLink, splitLineSuffix } from './links.ts';
-import { CodeFilePopout } from '@plannotator/ui/components/CodeFilePopout';
-import { useCodeFilePopout } from '@plannotator/ui/hooks/useCodeFilePopout';
 import { setDocPreviewFetcher } from '@plannotator/ui/components/InlineMarkdown';
 import { DocumentLibrary } from './DocumentLibrary.tsx';
 import { SettingsProvider, TextSettings } from './TextSettings.tsx';
@@ -24,7 +22,9 @@ import { PinnedWindows } from './PinnedWindows.tsx';
 import { DocumentHeader } from './DocumentHeader.tsx';
 import { OriginalDocument } from './OriginalDocument.tsx';
 import { FilesPanel } from './FilesPanel.tsx';
-import { FilePreview } from './FilePreview.tsx';
+import { isAnnotatableDocPath } from '@plannotator/core/annotatable';
+import type { OpenFile } from './FilePreview.tsx';
+import type { FileQuote } from '../src/quote.ts';
 import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
 import { ResizeHandle } from '@plannotator/ui/components/ResizeHandle';
 import { onCodeHighlightSwap } from '@plannotator/ui/utils/codeHighlight';
@@ -83,7 +83,7 @@ function usePosition(
 }
 
 function keepsAttachment(target: EventTarget | null) {
-  return target instanceof Element && !!target.closest('.sidebar .composer, .sidebar-header, .thread-row, .sidebar-toggle');
+  return target instanceof Element && !!target.closest('.sidebar .composer, .sidebar-header, .thread-row, .sidebar-toggle, .files-edge-toggle, .files-panel, .file-preview');
 }
 
 function App() {
@@ -150,9 +150,15 @@ function App() {
     try { localStorage.setItem('sidecar-files-open', String(isFilesShown)); } catch { /* per-browser convenience only */ }
   }, [isFilesShown]);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
-  // Reselecting a file reloads it from disk.
-  const [previewNonce, setPreviewNonce] = useState(0);
-  const [previewRefusal, setPreviewRefusal] = useState<string | null>(null);
+  const [visibleRoot, setVisibleRoot] = useState<string | null>(null);
+  const [fileReveal, setFileReveal] = useState<{ path: string; id: number } | null>(null);
+  const rootVisit = useRef(0);
+  useEffect(() => { rootVisit.current++; setVisibleRoot(null); setFileReveal(null); }, [documentId, current?.workspace]);
+  const browserRoot = visibleRoot ?? current?.workspace;
+  const [files, setFiles] = useState<OpenFile[]>([]);
+  const fileThread = useRef<Promise<Thread> | null>(null);
+  const fileSelectionVisit = useRef(0);
+  useEffect(() => { fileThread.current = null; }, [activeThreadId]);
   const filesResize = useResizablePanel({
     storageKey: 'sidecar-files-width',
     defaultWidth: 280,
@@ -166,6 +172,7 @@ function App() {
   }, [filesResize.width]);
   const openThread = useCallback(
     (id: string | null) => {
+      fileSelectionVisit.current++;
       const focusBeforeOpen = document.activeElement;
       setOriginalMessageId(null);
       drafts.flush();
@@ -236,7 +243,7 @@ function App() {
   const removeAttachment = useCallback(() => {
     if (!activeThreadId) return;
     const draft = drafts.get(activeThreadId);
-    if (draft?.quote || draft?.messageQuote) { const { quote, messageQuote, ...rest } = draft; drafts.set(activeThreadId, rest); }
+    if (draft?.quote || draft?.messageQuote || draft?.fileQuote) { const { quote, messageQuote, fileQuote, ...rest } = draft; drafts.set(activeThreadId, rest); }
   }, [activeThreadId, drafts]);
   const clearPendingSelection = useCallback(() => {
     // Plannotator's handleToolbarClose removes only the pending source, before
@@ -247,20 +254,49 @@ function App() {
     setComposing(false);
     setChoices(null);
   }, []);
-  const openPreview = (path: string, refusal?: string) => {
-    if (!refusal && current?.workspace && `${current.workspace}/${path}` === current.path) { setPreviewPath(null); return; }
-    // Keep passage drafts in passageDrafts; only drop the live selection on the hidden document.
+  const openPreview = (path: string, refusal?: string, kind: OpenFile['kind'] = 'doc', root = current?.workspace) => {
+    // Keep passage drafts; file windows cannot attach selections to the main document.
     clearPendingSelection();
     window.getSelection()?.removeAllRanges();
-    setOriginalMessageId(null);
-    setPreviewRefusal(refusal ?? null);
-    setPreviewPath(path);
-    setPreviewNonce((nonce) => nonce + 1);
+    const absolutePath = root && !refusal ? `${root.replace(/\/$/, '')}/${path}` : path;
+    setPreviewPath(absolutePath);
+    const id = `file:${absolutePath}`;
+    setFiles(previous => {
+      const existing = previous.find(file => file.id === id);
+      const file = { id, path, root, kind, refusal, revision: (existing?.revision ?? 0) + 1 };
+      return existing ? previous.map(value => value.id === id ? file : value) : [...previous, file];
+    });
+    setOpenPins(previous => [...previous, id]);
     if (innerWidth <= 850) setFilesShown(false);
   };
-  const codePopout = useCodeFilePopout({
-    buildUrl: useCallback((codePath: string) => `/api/files/code?document=${encodeURIComponent(documentId)}&path=${encodeURIComponent(codePath)}`, [documentId]),
-  });
+  const insideRoot = (path: string, root: string) => path.startsWith(`${root.replace(/\/$/, '')}/`);
+  async function allowRoot(directory: string) {
+    if (directory === current?.workspace) return directory;
+    return (await api<{ root: string }>('/api/files/root', { documentId, directory })).root;
+  }
+  async function changeVisibleRoot(directory: string, revealPath?: string) {
+    const visit = ++rootVisit.current;
+    try {
+      const root = await allowRoot(directory);
+      if (visit !== rootVisit.current) return;
+      setVisibleRoot(root); setFilesShown(true);
+      if (revealPath) { setPreviewPath(revealPath); setFileReveal(previous => ({ path: revealPath, id: (previous?.id ?? 0) + 1 })); }
+      else setFileReveal(null);
+    } catch (reason) { if (visit === rootVisit.current) setError(errorText(reason)); }
+  }
+  function revealFile(path: string) {
+    const root = browserRoot && insideRoot(path, browserRoot) ? browserRoot : path.slice(0, path.lastIndexOf('/')) || '/';
+    void changeVisibleRoot(root, path);
+  }
+  async function openAbsoluteFile(absolutePath: string, kind?: OpenFile['kind']) {
+    const path = absolutePath.replace(/^\/\/+/, '/');
+    const sourceRoot = browserRoot && insideRoot(path, browserRoot) ? browserRoot
+      : current?.workspace && insideRoot(path, current.workspace) ? current.workspace : path.slice(0, path.lastIndexOf('/')) || '/';
+    try {
+      const root = await allowRoot(sourceRoot);
+      openPreview(path.slice(sourceRoot.replace(/\/$/, '').length + 1), undefined, kind ?? (isAnnotatableDocPath(path) ? 'doc' : 'code'), root);
+    } catch (reason) { setError(errorText(reason)); }
+  }
   const workspaceRoot = useRef<string | undefined>(undefined);
   workspaceRoot.current = current?.workspace;
   const resolveLink = (kind: 'doc' | 'code', target: string, baseDir?: string) => {
@@ -271,13 +307,10 @@ function App() {
   };
   const handleLink = useRef<OpenWorkspaceLink>(() => undefined);
   handleLink.current = (kind, target, baseDir) => {
-    const [file, line] = kind === 'code' ? splitLineSuffix(target) : [target, ''];
+    const [file] = kind === 'code' ? splitLineSuffix(target) : [target];
     const resolved = resolveLink(kind, file, baseDir);
-    codePopout.close();
     if (!resolved) openPreview(file, 'This document has no recorded workspace. Reopen it from your agent.');
-    else if ('outside' in resolved) openPreview(resolved.outside, "Outside this document's workspace");
-    else if (kind === 'code') void codePopout.open(resolved.path + line);
-    else openPreview(resolved.path);
+    else void openAbsoluteFile('outside' in resolved ? resolved.outside : `${workspaceRoot.current}/${resolved.path}`, kind);
   };
   // Stable identity so memoized documents and messages do not re-render on every state tick.
   const openLink = useCallback<OpenWorkspaceLink>((...args) => handleLink.current(...args), []);
@@ -294,6 +327,7 @@ function App() {
     });
   }, [documentId]);
   const clearSelection = useCallback(() => {
+    fileSelectionVisit.current++;
     removeAttachment();
     clearPendingSelection();
   }, [removeAttachment, clearPendingSelection]);
@@ -435,6 +469,9 @@ function App() {
     }
     for (const target of targets) {
       if (!target.quote || painted.current.has(target.id)) continue;
+      // Exact overlaps leave empty text nodes inside the library's marks. A later
+      // partial overlap detaches those nodes while wrapping; normalize only marks.
+      for (const mark of painter.getDoms()) mark.normalize();
       const range = quoteRange(root, target.quote);
       if (!range) continue;
       paintingId = target.id;
@@ -478,8 +515,7 @@ function App() {
   }, [composing, draftKey, clearSelection]);
   // Use Plannotator's editable-target guards; C only acts while the selection toolbar is open.
   useEffect(() => {
-    // A file preview hides the document, so its passage shortcuts stay off.
-    if (!selection || composing || choices || previewPath) return;
+    if (!selection || composing || choices) return;
     const shortcut = (event: KeyboardEvent) => {
       if (
         event.defaultPrevented ||
@@ -491,10 +527,11 @@ function App() {
       )
         return;
       if (
+        window.getSelection()?.anchorNode?.parentElement?.closest('.file-preview') ||
         [event.target, document.activeElement].some(
           (node) =>
             node instanceof Element &&
-            node.closest('input, textarea, select, [role="textbox"], [contenteditable]:not([contenteditable="false"])'),
+            node.closest('.file-preview, input, textarea, select, [role="textbox"], [contenteditable]:not([contenteditable="false"])'),
         )
       )
         return;
@@ -504,9 +541,11 @@ function App() {
     // Copied from Viewer's native copy handler: the highlighter owns the
     // visible selection after mouseup, so supply its captured text to Cmd/Ctrl+C.
     const copy = (event: ClipboardEvent) => {
+      const nativeSelection = window.getSelection();
+      if (nativeSelection && !nativeSelection.isCollapsed && !article.current?.contains(nativeSelection.anchorNode)) return;
       if (
         event.target instanceof Element &&
-        event.target.closest('input, textarea, [contenteditable]:not([contenteditable="false"])')
+        event.target.closest('.file-preview, input, textarea, [contenteditable]:not([contenteditable="false"])')
       )
         return;
       event.preventDefault();
@@ -518,7 +557,7 @@ function App() {
       window.removeEventListener('keydown', shortcut);
       document.removeEventListener('copy', copy);
     };
-  }, [selection, composing, choices, openComment, previewPath]);
+  }, [selection, composing, choices, openComment]);
   // Plannotator dismisses the quick menu and pending highlight on an outside press.
   useEffect(() => {
     if (!selection || composing) return;
@@ -563,7 +602,7 @@ function App() {
     return lastRect.current;
   }, [selection, choices]);
   usePosition(composer, composing ? anchor : null, 384);
-  usePosition(toolbar, !previewPath && ((selection && !composing) || choices) ? anchor : null, choices ? 300 : 76, !choices);
+  usePosition(toolbar, (selection && !composing) || choices ? anchor : null, choices ? 300 : 76, !choices);
 
   function captureSelection() {
     if (sendingComment.current) return;
@@ -604,10 +643,11 @@ function App() {
       version: content.version,
       ...(sentence ? { sentence } : {}),
     };
+    fileSelectionVisit.current++;
     setSelection(quote);
     if (activeThreadId && isSidebarShown) {
       const draft = drafts.get(activeThreadId) ?? { text: '', retry: null };
-      const { messageQuote, ...rest } = draft;
+      const { messageQuote, fileQuote, ...rest } = draft;
       drafts.set(activeThreadId, { ...rest, quote });
     }
     setComposing(false);
@@ -640,11 +680,32 @@ function App() {
     return ids.length > 0;
   }
   const passageChanged = (quote: Quote) => !!documentError || !locateQuote(documentText, quote);
+  async function quoteFile(fileQuote: FileQuote) {
+    const visit = ++fileSelectionVisit.current;
+    clearPendingSelection();
+    ignoreClick.current = true;
+    requestAnimationFrame(() => { ignoreClick.current = false; });
+    try {
+      let target = activeThreadId;
+      if (!target) {
+        fileThread.current ??= api<Thread>('/api/threads', { id: crypto.randomUUID(), documentId });
+        const thread = await fileThread.current;
+        setState(previous => previous ? { ...previous, threads: { ...previous.threads, [thread.id]: thread } } : previous);
+        target = thread.id;
+      }
+      if (visit !== fileSelectionVisit.current) return;
+      const { quote, messageQuote, ...draft } = drafts.get(target) ?? { text: '', retry: null };
+      drafts.set(target, { ...draft, fileQuote });
+      if (activeThreadId !== target || !isSidebarShown) openThread(target);
+    } catch (reason) { fileThread.current = null; setError(errorText(reason)); }
+  }
   const selectionActions = {
+    onOpenFileQuote: (quote: FileQuote) => openLink(quote.kind, quote.path),
     onQuoteMessage: (messageQuote: import('../src/quote.ts').MessageQuote) => {
+      fileSelectionVisit.current++;
       const target = activeThreadId && isSidebarShown ? activeThreadId : messageQuote.threadId;
       clearPendingSelection();
-      const { quote, ...draft } = drafts.get(target) ?? { text: '', retry: null };
+      const { quote, fileQuote, ...draft } = drafts.get(target) ?? { text: '', retry: null };
       drafts.set(target, { ...draft, messageQuote });
       if (activeThreadId !== target || !isSidebarShown) openThread(target);
       ignoreClick.current = true;
@@ -746,18 +807,6 @@ function App() {
         )}
         <AgentStatus state={state} connected={connected} />
         <TextSettings version={state?.appVersion} />
-        {current?.workspace && (
-          <button
-            className="sidebar-toggle"
-            aria-label={isFilesShown ? 'Hide files' : 'Show files'}
-            title={isFilesShown ? 'Hide files' : 'Show files'}
-            aria-expanded={isFilesShown}
-            aria-controls="files-panel"
-            onClick={() => setFilesShown((shown) => !shown)}
-          >
-            <Icon name="folder" />
-          </button>
-        )}
         <button
           className="sidebar-toggle"
           aria-label={isSidebarShown ? 'Hide conversations' : 'Show conversations'}
@@ -774,6 +823,12 @@ function App() {
           </button>
         )}
       </header>
+      {current?.workspace && <button
+        className="files-edge-toggle"
+        aria-label={isFilesShown ? 'Hide files' : 'Show files'} title={isFilesShown ? 'Hide files' : 'Show files'}
+        aria-expanded={isFilesShown} aria-controls="files-panel"
+        onClick={() => setFilesShown(shown => !shown)}
+      ><Icon name="folder" /></button>}
       {error && (
         <p className="app-error" role="alert">
           {error}
@@ -782,7 +837,8 @@ function App() {
       <div className={`layout${isSidebarShown ? '' : ' sidebar-collapsed'}${isFilesShown && current?.workspace ? ' files-open' : ''}`}>
         {isFilesShown && current?.workspace && (
           <>
-            <FilesPanel documentId={documentId} root={current.workspace} activePath={previewPath} onSelect={openPreview} />
+            <FilesPanel key={`${documentId}:${browserRoot}`} documentId={documentId} root={browserRoot ?? current.workspace} workspace={current.workspace}
+              activePath={previewPath} reveal={fileReveal} onSelect={path => { void openAbsoluteFile(path); }} onRootChange={(path, revealPath) => { void changeVisibleRoot(path, revealPath); }} />
             <ResizeHandle
               {...filesResize.handleProps}
               className="files-resize"
@@ -796,10 +852,7 @@ function App() {
         <div className="document-workspace" ref={workspace}>
         <main className="canvas">
           <div className="reading-width">
-            {previewPath && (
-              <FilePreview key={`${current?.workspace}\n${previewPath}\n${previewNonce}`} documentId={documentId} root={current?.workspace} path={previewPath} refusal={previewRefusal ?? undefined} onReturn={() => setPreviewPath(null)} />
-            )}
-            {!previewPath && originalMessage?.quote && (
+            {originalMessage?.quote && (
               <OriginalDocument
                 key={originalMessage.id}
                 documentId={documentId}
@@ -808,7 +861,7 @@ function App() {
                 onReturn={() => setOriginalMessageId(null)}
               />
             )}
-            {!previewPath && !originalMessage && (documentError || !current) && (
+            {!originalMessage && (documentError || !current) && (
               <p data-testid="document-error" role="alert">
                 {documentError || 'Open a document from your agent.'}
               </p>
@@ -816,7 +869,7 @@ function App() {
             <article
               className="document-card w-full bg-card rounded-xl p-5 md:p-8 lg:p-10 xl:p-12 shadow-xl border border-border/50"
               id="document"
-              hidden={!!originalMessage || !!previewPath}
+              hidden={!!originalMessage}
               ref={article}
               tabIndex={-1}
               aria-label="Document"
@@ -846,7 +899,10 @@ function App() {
             </article>
           </div>
         </main>
-        <PinnedWindows key={documentId} workspace={workspace} threads={threads} documentId={documentId} openRequests={openPins} onOpened={ids => setOpenPins(previous => previous.filter(id => !ids.includes(id)))} {...selectionActions} onGoToMessage={goToMessage} />
+        <PinnedWindows key={documentId} workspace={workspace} threads={threads} files={files} root={current?.workspace} documentId={documentId} onQuoteFile={quoteFile} onRevealFile={revealFile} openRequests={openPins} onOpened={ids => setOpenPins(previous => previous.filter(id => !ids.includes(id)))} onCloseFile={id => {
+          setFiles(previous => previous.filter(file => file.id !== id));
+          setPreviewPath(previous => `file:${previous}` === id ? null : previous);
+        }} {...selectionActions} onGoToMessage={goToMessage} />
         </div>
         {isSidebarShown && (
           <ResizeHandle
@@ -884,7 +940,7 @@ function App() {
           messageJump={messageJump}
         />
       </div>
-      {!previewPath && ((selection && !composing) || choices) &&
+      {((selection && !composing) || choices) &&
         createPortal(
           <div
             ref={toolbar}
@@ -928,7 +984,6 @@ function App() {
         )}
       {composing &&
         selection &&
-        !previewPath &&
         createPortal(
           <section ref={composer} className="floating comment-popover" role="dialog" aria-label="Comment on selection">
             <QuestionForm
@@ -949,7 +1004,6 @@ function App() {
           </section>,
           document.body,
         )}
-      {codePopout.popoutProps && <CodeFilePopout {...codePopout.popoutProps} />}
     </WorkspaceLinks.Provider>
   );
 }

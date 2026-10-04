@@ -38,6 +38,7 @@ test('listing follows Plannotator file types, exclusions and folder-first order'
     { name: 'docs', path: 'docs', type: 'folder' }, { name: '.env.example', path: '.env.example', type: 'file' },
     { name: 'config.yaml', path: 'config.yaml', type: 'file' }, { name: 'page.html', path: 'page.html', type: 'file' },
     { name: 'README.md', path: 'README.md', type: 'file' },
+    { name: 'src.ts', path: 'src.ts', type: 'file' },
   ]));
   assert.deepEqual(names(listing.tree.find(node => node.name === 'docs')!.children!), ['flow.mmd', 'plan.md']);
   assert.equal(listing.tree.find(node => node.name === 'docs')!.children!.find(node => node.name === 'plan.md')!.path, 'docs/plan.md');
@@ -93,7 +94,7 @@ test('previews stay inside the workspace and say how to render', async t => {
   assert.equal(await status(''), 400);
 });
 
-test('viewer file routes read only the stored document workspace', async t => {
+test('viewer file routes default to the workspace and allow an explicit browsing directory', async t => {
   const root = await workspace(t);
   await write(root, { 'notes.md': '# Notes' });
   const f = await fixture(t), doc = await f.register();
@@ -102,6 +103,18 @@ test('viewer file routes read only the stored document workspace', async t => {
   const listing = await (await f.view(`/api/files?document=${doc.id}&dirPath=${encodeURIComponent('/etc')}`)).json();
   assert.equal(listing.root, root);
   assert.deepEqual(names(listing.tree), ['notes.md']);
+  const outside = await workspace(t);
+  await write(outside, { 'nested/app.ts': 'export const outside = true;', 'note.md': '# Outside' });
+  const directory = encodeURIComponent(outside);
+  assert.equal((await f.view(`/api/files?document=${doc.id}&directory=${directory}`)).status, 403);
+  assert.equal((await f.view('/api/files/root', { documentId: doc.id, directory: outside })).status, 200);
+  const browsed = await (await f.view(`/api/files?document=${doc.id}&directory=${directory}`)).json();
+  assert.equal(browsed.root, outside);
+  assert.deepEqual(names(browsed.tree), ['nested/', 'note.md']);
+  assert.equal((await (await f.view(`/api/files/code?document=${doc.id}&directory=${directory}&path=nested/app.ts`)).json()).contents, 'export const outside = true;');
+  assert.equal((await f.view(`/api/files?document=${doc.id}&directory=relative`)).status, 400);
+  assert.equal((await fetch(`${f.url}/api/files?document=${doc.id}&directory=${directory}`)).status, 403);
+  assert.equal((await (await f.view('/api/state')).json()).documents[doc.id].workspace, root);
   assert.deepEqual(await (await f.view(`/api/files/content?document=${doc.id}&path=notes.md`)).json(), { path: 'notes.md', text: '# Notes', renderAs: 'markdown' });
   assert.equal((await f.view(`/api/files/content?document=${doc.id}&path=${encodeURIComponent('../notes.md')}`)).status, 403);
   assert.equal((await fetch(`${f.url}/api/files?document=${doc.id}`)).status, 403);

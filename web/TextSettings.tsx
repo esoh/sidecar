@@ -112,7 +112,7 @@ export function TextSettings({ version }: { version?: string }) {
         <fieldset className="message-settings"><legend>Copy messages as</legend>
           {(['markdown', 'rich', 'plain'] as const).map(format => <label key={format}><input type="radio" name="copy-format" value={format} checked={format === copyFormat} onChange={() => setCopyFormat(format)} />{format === 'markdown' ? 'Raw Markdown' : format === 'rich' ? 'Rich text' : 'Plain text'}</label>)}
         </fieldset>
-        <fieldset className="message-settings"><legend>Pinned windows</legend>
+        <fieldset className="message-settings"><legend>Windows</legend>
           <label><input type="radio" name="window-mode" checked={windowMode === 'single'} onChange={() => setWindowMode('single')} />One at a time</label>
           <label><input type="radio" name="window-mode" checked={windowMode === 'multiple'} onChange={() => setWindowMode('multiple')} />Multiple</label>
         </fieldset>

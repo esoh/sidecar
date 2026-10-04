@@ -134,6 +134,8 @@ A user input has at most one selection. Earlier inputs may refer to different pa
 
 An optional `messageQuote` instead quotes a sent chat message: `{threadId, messageId, exact}` identifies its source and selected rendered text. It is context for the current question, not a document passage or an instruction to edit that text. It is mutually exclusive with `quote`. The source can be another conversation in this document; retrieve context only if needed.
 
+An optional `fileQuote` quotes a browsed local file: `{path, kind, exact, startLine?, endLine?}`. It may be outside the document's workspace when the user explicitly opened another folder/file. `path` is the absolute file path, `kind` selects its document or code viewer, and line numbers are present for source-code selections. It is mutually exclusive with `quote` and `messageQuote`, and can appear on each input in a batch. Use this file—not the registered discussion document—when the user's question or revision refers to the attachment. The excerpt is the user's saved selection; the file and line numbers may have changed since selection. Read the current file before editing it. Selecting text alone does not authorize an edit. The same reply markers and metadata rules apply in Codex and Claude.
+
 ### Stopped replies
 
 The viewer's Stop button interrupts only a native turn identified by this request's reply markers. It preserves progress and partial text with a Stopped status; a missing closing marker is expected. Do not automatically retry, emit a late replacement, or undo edits already made for a stopped request. Continue only from a new user request. This differs from an unexpected capture failure, which retains the recovery path above.
@@ -146,7 +148,7 @@ Immediately after the final opening marker, optionally emit one line `[[sidecar-
 
 - `threadTitle`: short name, 1–80 characters on one line, only for an unnamed thread.
 - `isError`: `true` when the request failed; include a useful explanation in the answer. Streaming failure replies need no separate `reply --error` call.
-- `highlights`: **only when the user explicitly asks you to identify or highlight something in the document**. Contextual questions such as “where?”, “show me where”, or “which passage?” count: use a highlight and a selection link in your answer, without requiring the user to name the highlight feature. For an insertion-point question, highlight the existing anchor paragraph or heading and say **before** or **after** it; do not edit the document merely to point at it. Do not attach highlights to ordinary explanations or routine edits. Each item has `exact` (visible document text, without Markdown formatting delimiters), optional `prefix`/`suffix` (immediately surrounding visible text to disambiguate), and an optional short `label`. Up to 20 highlights per agent reply, each exact text at most 16,384 characters; prefix/suffix at most 512 each and label at most 80 on one line. Only supply text you know from the document; retrieve context if needed. Use sufficient context for a unique match—Sidecar never chooses arbitrarily between repeated passages. These are viewer annotations: **do not edit the Markdown to create a highlight**.
+- `highlights`: use when the user explicitly asks you to identify or highlight something in the document, **or when your edit summary names the section or passage you changed**. Contextual questions such as “where?”, “show me where”, or “which passage?” count: include a highlight and a selection link without requiring the user to name the feature. When reporting an edit location, supply that link proactively in the final reply; do not wait for a separate “where?” question. For navigation, prefer the **shortest unique existing heading or label** and say **under**, **before**, or **after** it. Use a longer exact selection only when discussing or comparing that specific wording; smaller anchors are less likely to become stale after edits. For insertion-point questions, anchor to existing text; do not edit the document merely to point at it. Avoid unrelated highlights on ordinary explanations or edits that do not name a location. Each item has `exact` (visible document text, without Markdown formatting delimiters), optional `prefix`/`suffix` (immediately surrounding visible text to disambiguate), and an optional short `label`. Up to 20 highlights per agent reply, each exact text at most 16,384 characters; prefix/suffix at most 512 each and label at most 80 on one line. Only supply text you know from the current document after any edits; retrieve context if needed. Use sufficient context for a unique match—Sidecar never chooses arbitrarily between repeated passages. These are viewer annotations: **do not edit the Markdown to create a highlight**.
 
 Sidecar generates stable `selection-1`, `selection-2`, etc. slugs in array order, scoped to that reply. Link with `[friendly text](#selection-1)`; labels are optional and do not determine slugs. Each selection gets its own eye control. The app saves one shared document snapshot per version, not a document copy per highlight. Links navigate without changing visibility; changed passages retain their original view. Metadata does not execute shell commands, edit files, or resolve threads. The complete-reply fallback accepts the same optional metadata line on stdin, followed by prose.
 
@@ -163,7 +165,16 @@ If you suggest adding a paragraph and the user asks “where?”, anchor to exis
 
 ```text
 [[sidecar:SUPPLIED_NONCE]]
-[[sidecar-meta {"highlights":[{"exact":"The timeout is ten seconds.","label":"Insertion point"}]}]]
-Add it after [this paragraph](#selection-1).
+[[sidecar-meta {"highlights":[{"exact":"Timeout behavior"}]}]]
+Add it under [Timeout behavior](#selection-1), after the existing paragraph.
+[[/sidecar:SUPPLIED_NONCE]]
+```
+
+When an edit summary names the changed section, link the existing heading without waiting for another question:
+
+```text
+[[sidecar:SUPPLIED_NONCE]]
+[[sidecar-meta {"highlights":[{"exact":"Admission checks"}]}]]
+Updated the comparison under [Admission checks](#selection-1).
 [[/sidecar:SUPPLIED_NONCE]]
 ```

@@ -54,13 +54,16 @@ Source: https://github.com/backnotprop/plannotator/tree/772c620302f584654c3d8e17
 
 The Files panel imports `FileBrowser` and `useFileBrowser` from the published
 `@plannotator/ui` 0.47.0, connected to Sidecar through its `setFileTreeBackend`
-seam. The preview banner reuses Sidecar's original-document styling.
+seam. File previews use Sidecar's shared floating windows and dock.
+Code previews directly use `@pierre/diffs` 1.3.6's `File` renderer, as Plannotator's
+`CodeFilePopout.tsx` does. `web/CodeFileView.tsx` adapts its rendering options,
+theme integration and shadow-DOM selection handling to Sidecar's composer.
 
 Local file links use the `onOpenLinkedDoc`/`onOpenCodeFile` callbacks and
-`setDocPreviewFetcher` of `@plannotator/ui` 0.47.0 `InlineMarkdown`, and open
-code in its `CodeFilePopout` through `useCodeFilePopout`. The code-link file
-types in `src/files.ts` are copied from `@plannotator/core` 0.25.7
-`code-file.ts`.
+`setDocPreviewFetcher` of `@plannotator/ui` 0.47.0 `InlineMarkdown`. The code-link
+file types in `src/files.ts` are copied from `@plannotator/core` 0.25.7
+`code-file.ts`. Source previews reuse `guideLanguageForPath` from that package's
+`guide-format.ts` and the document renderer's syntax highlighting.
 
 Inter and Geist Mono are served from Plannotator's Fontsource dependencies;
 the fonts use the SIL Open Font License 1.1 distributed with those packages.

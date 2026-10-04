@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { writeFile, rename, unlink, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { readFile, writeFile, rename, unlink, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -36,6 +36,36 @@ async function answer(text: string) {
   await f.agent(`/agent/requests/${request.id}/claim`, {});
   await f.agent('/agent/replies', { requestId: request.id, documentId: request.documentId, threadId: request.threadId, text });
 }
+
+test('the agent popover resets idle mismatches without losing output or a draft', async ({ page }) => {
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Explain'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  const request = await lastRequest();
+  const prepared = await (await f.agent(`/agent/requests/${request.id}/prepare`, {})).json();
+  const key = ownerKey(f.owner);
+  await f.agent('/agent/stream-events', { ownerKey: key, turnId: 'old-turn', messageId: 'partial', index: 0, delta: prepared.stream.prefix + 'Partial answer', final: false });
+  await f.agent('/agent/lifecycle', { ownerKey: key, event: 'agent-idle' });
+  await input.fill('Keep this draft');
+  await page.getByRole('button', { name: 'Claude session details', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Reset', exact: true })).toBeEnabled();
+  await page.screenshot({ path: '/private/tmp/sidecar-reset-popover.png' });
+  await page.getByRole('button', { name: 'Reset', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Resetting…' })).toBeDisabled();
+  expect((await state()).requests[request.id].status).toBe('claimed');
+  const poll = await (await f.agent('/agent/control', { ownerKey: key, event: 'poll', turnId: 'idle' })).json();
+  await f.agent('/agent/control', { ownerKey: key, event: 'reset-idle', resetId: poll.reset.id, turnId: 'idle' });
+  await expect(page.getByText('Reset complete.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Reset', exact: true })).toBeEnabled();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('log')).toContainText('Partial answer');
+  await expect(page.getByRole('log')).toContainText('Stopped');
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
+  await page.reload();
+  await expect(page.getByRole('log')).toContainText('Partial answer');
+});
 
 test('queued previews wait for batch delivery and keep selections, order and drafts', { tag: '@manual-delivery' }, async ({ page }) => {
   const doc = await f.register();
@@ -296,7 +326,7 @@ test('pinned references retain selections and dock expansion after the last tab 
   await page.mouse.move(edge.x - 67, edge.y + 40, { steps: 5 }); await page.mouse.up();
   expect((await floating.boundingBox())!.width).toBeGreaterThan(beforeResize.width + 50);
   await floating.getByRole('button', { name: 'Dock window', exact: true }).click();
-  const dock = page.getByRole('region', { name: 'Pinned dock', exact: true });
+  const dock = page.getByRole('region', { name: 'Window dock', exact: true });
   await expect(dock.getByRole('tabpanel')).toBeVisible();
   await page.getByRole('button', { name: 'Threads', exact: true }).click();
   await dock.getByRole('button', { name: 'Go to message', exact: true }).click();
@@ -397,7 +427,7 @@ test('pin list condenses, tabs reorder, and single-window mode keeps the latest 
     await pins.getByRole('button', { name, exact: true }).click();
     await page.getByRole('dialog', { name: 'Pinned message', exact: true }).getByRole('button', { name: 'Dock window', exact: true }).click();
   }
-  const dock = page.getByRole('region', { name: 'Pinned dock', exact: true });
+  const dock = page.getByRole('region', { name: 'Window dock', exact: true });
   await expect(dock.getByRole('tab')).toHaveText(['First question', 'First answer', 'Second question']);
   const last = await dock.getByRole('tab', { name: 'Second question', exact: true }).boundingBox();
   const first = await dock.getByRole('tab').first().boundingBox();
@@ -444,15 +474,15 @@ test('collapsed dock accepts only its bar, previews insertion, and stays collaps
   const pins = page.getByRole('navigation', { name: 'Pinned messages' });
   await pins.getByRole('button', { name: 'Question', exact: true }).click();
   await page.getByRole('button', { name: 'Minimize window', exact: true }).click();
-  const dock = page.getByRole('region', { name: 'Pinned dock', exact: true });
-  await expect(dock.getByRole('button', { name: 'Expand pinned dock', exact: true })).toHaveText('1 window');
+  const dock = page.getByRole('region', { name: 'Window dock', exact: true });
+  await expect(dock.getByRole('button', { name: 'Expand dock', exact: true })).toHaveText('1 window');
   await pins.getByRole('button', { name: 'Answer', exact: true }).click();
   const floating = page.getByRole('dialog', { name: 'Pinned message', exact: true });
   await floating.getByRole('button', { name: 'Dock window', exact: true }).click();
   await expect(dock.getByRole('tabpanel')).toHaveText('Answer');
   await expect(dock.getByRole('tab', { name: 'Answer', exact: true })).toHaveAttribute('aria-selected', 'true');
   await dock.getByRole('button', { name: 'Move out of dock', exact: true }).last().click();
-  await dock.getByRole('button', { name: 'Collapse pinned dock', exact: true }).click();
+  await dock.getByRole('button', { name: 'Collapse dock', exact: true }).click();
   const dockBox = (await dock.boundingBox())!;
   async function startDrag() {
     const title = (await floating.locator('.reference-titlebar').boundingBox())!;
@@ -471,8 +501,8 @@ test('collapsed dock accepts only its bar, previews insertion, and stays collaps
   await page.mouse.move(dockBox.x + 10, dockBox.y + 18, { steps: 10 });
   await page.mouse.up();
   await expect(floating).toHaveCount(0);
-  await expect(dock.getByRole('button', { name: 'Expand pinned dock', exact: true })).toHaveText('2 windows');
-  await dock.getByRole('button', { name: 'Expand pinned dock', exact: true }).click();
+  await expect(dock.getByRole('button', { name: 'Expand dock', exact: true })).toHaveText('2 windows');
+  await dock.getByRole('button', { name: 'Expand dock', exact: true }).click();
   await expect(dock.getByRole('tab')).toHaveText(['Answer', 'Question']);
   const beforeResize = (await dock.boundingBox())!;
   const resize = (await dock.getByRole('separator').boundingBox())!;
@@ -586,6 +616,34 @@ test('clicking a later agent highlight scrolls its own selection card into view'
     const card = await target.boundingBox(), log = await page.getByRole('log').boundingBox();
     return !!card && !!log && card.y >= log.y && card.y + card.height <= log.y + log.height + 1;
   }).toBe(true);
+});
+
+test('inline selection links move the document without scrolling the conversation', async ({ page }) => {
+  const highlights = Array.from({ length: 20 }, (_, i) => ({ exact: `Passage ${i + 1}.` }));
+  const doc = await f.register('inline-highlights.md', '# Landmarks\n\n' + highlights.map(h => `${h.exact}\n\nContext for this paragraph.`).join('\n\n'));
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Show me the landmarks.'); await input.press('Enter');
+  await expect(page.getByRole('log')).toContainText('Show me the landmarks.');
+  await answer(`[[sidecar-meta ${JSON.stringify({ highlights })}]]\nSee [tenth](#selection-10) and [first](#selection-1).`);
+  const log = page.getByRole('log');
+  const link = log.getByRole('link', { name: 'tenth', exact: true });
+  await link.scrollIntoViewIfNeeded();
+  const before = await log.evaluate(node => node.scrollTop);
+  await link.click();
+  await expect(page.locator('#document mark').filter({ hasText: /^Passage 10\.$/ })).toBeInViewport();
+  expect(await page.locator('.canvas').evaluate(node => node.scrollTop)).toBeGreaterThan(100);
+  expect(await log.evaluate(node => node.scrollTop)).toBe(before);
+  await log.getByRole('link', { name: 'first', exact: true }).click();
+  await expect(page.locator('#document mark').filter({ hasText: /^Passage 1\.$/ })).toBeInViewport();
+  expect(await log.evaluate(node => node.scrollTop)).toBe(before);
+  await writeFile(doc.path, '# Updated document\n\nThe old passages have changed.');
+  await expect(page.getByText('Passage changed', { exact: true })).toHaveCount(20);
+  await link.scrollIntoViewIfNeeded();
+  const beforeOriginal = await log.evaluate(node => node.scrollTop);
+  await link.click();
+  await expect(page.getByRole('region', { name: 'Original document' })).toBeVisible();
+  expect(await log.evaluate(node => node.scrollTop)).toBe(beforeOriginal);
 });
 
 test('general questions, follow-ups, late replies and independent document titles', async ({ page }) => {
@@ -2399,6 +2457,228 @@ async function filesWorkspace(files: Record<string, string>) {
   return root;
 }
 
+test('selected code attaches its file and lines, survives drafts, and can be quoted from the dock', async ({ page }) => {
+  const code = 'export function check() {\n  return true;\n}\n';
+  const root = await filesWorkspace({ 'app.ts': code });
+  const doc = await f.register('main.md', `# Main\n\nHello world.\n\n[Code](${root}/app.ts:2)`);
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.locator('#document').getByRole('link', { name: 'Code', exact: true }).click();
+  const file = page.getByRole('dialog', { name: 'File: app.ts', exact: true });
+  await expect(file.locator('pre code')).toContainText('return true;');
+  await expect(file.locator('[data-line-number-content]')).toHaveText(['1', '2', '3', '4']);
+  const capture = async (keyboard = false) => page.locator('.code-file-view').evaluate((root, keyboard) => {
+    const text = root.querySelector('diffs-container')!.shadowRoot!.querySelector('pre code')!;
+    const nodes = document.createTreeWalker(text, NodeFilter.SHOW_TEXT);
+    const start = text.textContent!.indexOf('  return true;'), end = start + '  return true;'.length;
+    let at = 0, started = false, node;
+    const range = document.createRange();
+    while ((node = nodes.nextNode())) {
+      const length = node.textContent!.length;
+      if (!started && at + length > start) { range.setStart(node, start - at); started = true; }
+      if (started && at + length >= end) { range.setEnd(node, end - at); break; }
+      at += length;
+    }
+    getSelection()!.removeAllRanges(); getSelection()!.addRange(range);
+    root.dispatchEvent(keyboard ? new KeyboardEvent('keyup', { key: 'Shift', bubbles: true }) : new MouseEvent('mouseup', { bubbles: true }));
+  }, keyboard);
+  await capture();
+  await expect(page.locator('.draft-selection')).toContainText('app.ts:2');
+  await expect(page.locator('.draft-selection')).toContainText('return true;');
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Explain this line');
+  await page.reload();
+  await expect(input).toHaveValue('Explain this line');
+  await expect(page.locator('.draft-selection')).toContainText('app.ts:2');
+  await input.press('Enter');
+  await expect(page.getByRole('log')).toContainText('Explain this line');
+  const request = await lastRequest();
+  expect(request.fileQuote).toEqual({ path: `${root}/app.ts`, kind: 'code', exact: '  return true;', startLine: 2, endLine: 2 });
+  expect(request.quote).toBeUndefined();
+  await expect(page.locator('#document mark')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Open quoted file: app.ts:2', exact: true }).click();
+  await expect(file.locator('pre code')).toContainText('return true;');
+  await file.getByRole('button', { name: 'Dock window', exact: true }).click();
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await capture(true);
+  await expect(page.locator('.draft-selection')).toContainText('app.ts:2');
+  await expect(page.locator('#threads')).not.toHaveAttribute('data-active-thread', request.threadId);
+  await page.getByRole('button', { name: 'Remove selection', exact: true }).click();
+  await expect(page.locator('.draft-selection')).toHaveCount(0);
+  await select(page, 'Hello world.');
+  await expect(page.locator('.draft-selection')).toContainText('Hello world.');
+  await capture();
+  await expect(page.locator('.draft-selection')).toContainText('app.ts:2');
+  await expect(page.locator('.draft-selection')).not.toContainText('Hello world.');
+  await page.getByRole('button', { name: 'Remove selection', exact: true }).click();
+  await page.locator('.code-file-view [data-column-number="2"]').click();
+  await expect(page.locator('.draft-selection')).toContainText('app.ts:2');
+  await expect(page.locator('.draft-selection')).toContainText('return true;');
+  await page.locator('.code-file-view [data-column-number="4"]').click();
+  await expect(page.locator('.draft-selection')).toContainText('return true;');
+  await page.locator('.code-file-view').evaluate(root => {
+    const shadow = root.querySelector('diffs-container')!.shadowRoot!;
+    const first = shadow.querySelector('[data-line="2"]')!, last = shadow.querySelector('[data-line="3"]')!;
+    const range = document.createRange(); range.setStart(first, 0); range.setEnd(last, last.childNodes.length);
+    getSelection()!.removeAllRanges(); getSelection()!.addRange(range);
+    root.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  });
+  await expect(page.locator('.draft-selection')).toContainText('app.ts:2–3');
+  await page.getByLabel('Message', { exact: true }).fill('Explain these lines');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect.poll(async () => (await lastRequest()).fileQuote?.exact).toBe('  return true;\n}');
+  expect(await readFile(join(root, 'app.ts'), 'utf8')).toBe(code);
+});
+
+test('dragging code text repeatedly attaches the exact snippet in floating and docked windows', async ({ page }) => {
+  const root = await filesWorkspace({ 'app.ts': 'export function check() {\n  return true;\n}\n' });
+  const doc = await f.register('main.md', `# Main\n\n[Code](${root}/app.ts:2)`);
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.locator('#document').getByRole('link', { name: 'Code', exact: true }).click();
+  const file = page.getByRole('dialog', { name: 'File: app.ts', exact: true });
+  await expect(file.locator('[data-line="2"]')).toContainText('return true;');
+  await file.locator('[data-column-number="1"]').click();
+  await file.locator('[data-column-number="4"]').click();
+  await expect(page.locator('.draft-selection .quote-excerpt')).toHaveText('export function check() {');
+  async function drag(line: number, from: number, to: number) {
+    const points = await page.locator(`.code-file-view [data-line="${line}"]`).evaluate((element, offsets) => offsets.map(offset => {
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+      let node = walker.nextNode();
+      while (node && offset > node.textContent!.length) { offset -= node.textContent!.length; node = walker.nextNode(); }
+      const range = document.createRange(); range.setStart(node!, offset); range.collapse(true);
+      const rect = range.getBoundingClientRect();
+      return { x: rect.x, y: rect.y + rect.height / 2 };
+    }), [from, to]);
+    await page.mouse.move(points[0].x, points[0].y);
+    await page.mouse.down();
+    await page.mouse.move(points[1].x, points[1].y, { steps: 12 });
+    await page.mouse.up();
+  }
+  await drag(2, 2, 8);
+  await expect(page.locator('.draft-selection .quote-excerpt')).toHaveText('return');
+  await drag(1, 7, 15);
+  await expect(page.locator('.draft-selection .quote-excerpt')).toHaveText('function');
+  await file.getByRole('button', { name: 'Dock window', exact: true }).click();
+  await drag(2, 13, 9);
+  await expect(page.locator('.draft-selection .quote-excerpt')).toHaveText('true');
+  await page.locator('.code-file-view [data-column-number="1"]').click();
+  await expect(page.locator('.draft-selection .quote-excerpt')).toHaveText('export function check() {');
+  await page.locator('.code-file-view [data-column-number="4"]').click();
+  await expect(page.locator('.draft-selection .quote-excerpt')).toHaveText('export function check() {');
+  await page.getByLabel('Message', { exact: true }).fill('Explain this');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByRole('log')).toContainText('Explain this');
+  expect((await lastRequest()).fileQuote.exact).toBe('export function check() {');
+});
+
+test('file roots navigate, reset, and reveal a nested file without losing drafts or changing workspace', async ({ page }) => {
+  const code = 'export const answer = 42;\n';
+  const base = await filesWorkspace({ 'project/src/deep/target.ts': code, 'outside.md': '# Outside' });
+  for (let i = 0; i < 45; i++) await writeFile(join(base, 'project', 'src', 'deep', `a${i}.ts`), code);
+  const root = `${base}/project`;
+  const doc = await f.register('main.md', `# Main\n\n[Target](${root}/src/deep/target.ts:1)`);
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByLabel('Message', { exact: true }).fill('Keep my draft');
+  const toggle = page.getByRole('button', { name: 'Show files' });
+  const box = await toggle.boundingBox();
+  expect(box!.x).toBe(0); expect(box!.y).toBeGreaterThanOrEqual(49);
+  await expect(page.locator('.topbar').getByRole('button', { name: 'Show files' })).toHaveCount(0);
+  await page.locator('#document').getByRole('link', { name: 'Target' }).click();
+  const file = page.getByRole('dialog', { name: 'File: src/deep/target.ts', exact: true });
+  await expect(file.locator('pre code')).toContainText(code.trim());
+  await file.getByRole('button', { name: 'Show in file browser' }).click();
+  const panel = page.getByRole('complementary', { name: 'Files' });
+  const selected = panel.getByTitle('src/deep/target.ts', { exact: true });
+  await expect(selected).toBeFocused();
+  await expect(selected).toHaveClass(/active/);
+  await expect(selected).toBeInViewport();
+  await expect(panel.getByRole('button', { name: 'Go to parent folder' })).toBeInViewport();
+  await panel.getByRole('button', { name: 'Filter files', exact: true }).click();
+  await panel.getByRole('searchbox', { name: 'Filter files' }).fill('no match');
+  await file.getByRole('button', { name: 'Show in file browser' }).click();
+  await expect(selected).toBeFocused();
+  await panel.getByRole('button', { name: 'Go to parent folder' }).click();
+  await expect(panel.getByRole('button', { name: 'Change visible root' })).toHaveText(base);
+  await expect(panel.getByTitle('outside.md', { exact: true })).toBeVisible();
+  await panel.getByRole('button', { name: 'Change visible root' }).click();
+  await panel.getByRole('textbox', { name: 'Visible root' }).fill(`${root}/src`);
+  await panel.getByRole('textbox', { name: 'Visible root' }).press('Enter');
+  await expect(panel.getByRole('button', { name: 'Change visible root' })).toHaveText(`${root}/src`);
+  await panel.getByRole('button', { name: 'Reset visible root', exact: true }).click();
+  await expect(panel.getByRole('button', { name: 'Change visible root' })).toHaveText(root);
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep my draft');
+  expect((await state()).documents[doc.id].workspace).toBe(root);
+  expect(Object.keys((await state()).documents)).toEqual([doc.id]);
+  await page.screenshot({ path: '/private/tmp/sidecar-file-navigation.png' });
+});
+
+test('file windows share the dock with pinned replies and reopen without duplicates', async ({ page }) => {
+  const root = await filesWorkspace({ 'a.md': '# First file\n', 'b.yml': 'enabled: true\n' });
+  const doc = await f.register('main.md', '# Main document\n\nKeep this visible.');
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByLabel('Message', { exact: true }).fill('A useful reply');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(page.getByRole('log').getByText('A useful reply', { exact: true })).toBeVisible();
+  await answer('Keep this reply handy.');
+  const reply = page.locator('.messages .message.agent');
+  await reply.hover();
+  await reply.getByRole('button', { name: 'Pin message', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Pinned message', exact: true }).getByRole('button', { name: 'Dock window', exact: true }).click();
+  await page.getByLabel('Message', { exact: true }).fill('Unsent draft');
+  await page.getByRole('button', { name: 'Show files' }).click();
+  const panel = page.getByRole('complementary', { name: 'Files' });
+  await panel.getByTitle('a.md', { exact: true }).click();
+  const first = page.getByRole('dialog', { name: 'File: a.md', exact: true });
+  await expect(first.getByRole('heading', { name: 'First file' })).toBeVisible();
+  await expect(page.locator('#document')).toBeVisible();
+  await first.getByRole('button', { name: 'Dock window', exact: true }).click();
+  await panel.getByTitle('b.yml', { exact: true }).click();
+  const second = page.getByRole('dialog', { name: 'File: b.yml', exact: true });
+  await expect(second.locator('pre code')).toContainText('enabled: true');
+  await expect(page.getByRole('tab', { name: 'a.md', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await second.getByRole('button', { name: 'Minimize window', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Expand dock' })).toHaveText('3 windows');
+  // Reopening a docked file expands and selects its existing tab.
+  await panel.getByTitle('a.md', { exact: true }).click();
+  const dock = page.getByRole('region', { name: 'Window dock', exact: true });
+  await expect(dock.getByRole('tab')).toHaveCount(3);
+  await expect(dock.getByRole('tab', { name: 'a.md', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(dock.getByRole('tab', { name: 'a.md', exact: true })).toBeFocused();
+  await expect(dock.getByRole('heading', { name: 'First file' })).toBeVisible();
+  await expect(first).toHaveCount(0);
+  const fileTab = dock.locator('.dock-tab-shell').filter({ has: page.getByRole('tab', { name: 'a.md', exact: true }) });
+  await fileTab.getByRole('button', { name: 'Move out of dock' }).click();
+  await expect(first).toBeVisible();
+  await panel.getByTitle('a.md', { exact: true }).click();
+  await expect(first).toHaveCount(1);
+  await expect(first).toBeFocused();
+  const before = await first.boundingBox();
+  await first.getByRole('group', { name: 'Move file window' }).press('Shift+ArrowRight');
+  await expect.poll(async () => (await first.boundingBox())!.width).toBe(before!.width + 10);
+  await first.getByRole('button', { name: 'Close file window' }).click();
+  await expect(first).toHaveCount(0);
+  await expect(dock.getByRole('tab')).toHaveCount(2);
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Unsent draft');
+  expect(Object.keys((await state()).documents)).toEqual([doc.id]);
+  expect(await readFile(join(root, 'a.md'), 'utf8')).toBe('# First file\n');
+  // The existing one-window setting applies across files and pinned replies.
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('radio', { name: 'One at a time', exact: true }).check();
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await expect(dock.getByRole('tab')).toHaveText(['b.yml']);
+  await panel.getByTitle('a.md', { exact: true }).click();
+  await expect(dock).toHaveCount(0);
+  await expect(first).toBeVisible();
+  await page.setViewportSize({ width: 360, height: 420 });
+  await expect.poll(async () => {
+    const rect = await first.boundingBox();
+    return !!rect && rect.x >= 0 && rect.x + rect.width <= 360 && rect.y >= 0 && rect.y + rect.height <= 420;
+  }).toBe(true);
+});
+
 test('files panel previews workspace files read-only and keeps drafts', async ({ page }) => {
   const root = await filesWorkspace({
     'docs/plan.md': '# Plan heading\n\nPlan body text.\n\n![chart](a.png)\n',
@@ -2415,7 +2695,7 @@ test('files panel previews workspace files read-only and keeps drafts', async ({
   const panel = page.getByRole('complementary', { name: 'Files' });
   await expect(panel.getByTitle('docs/plan.md', { exact: true })).toBeVisible();
   await expect(panel.getByTitle('page.html', { exact: true })).toBeVisible();
-  await expect(panel.getByTitle('src.ts', { exact: true })).toHaveCount(0);
+  await expect(panel.getByTitle('src.ts', { exact: true })).toBeVisible();
 
   await select(page, 'Main body passage');
   await page.getByRole('button', { name: 'Comment', exact: true }).click();
@@ -2424,7 +2704,7 @@ test('files panel previews workspace files read-only and keeps drafts', async ({
   const preview = page.getByRole('region', { name: 'File preview' });
   await expect(preview.getByRole('heading', { name: 'Plan heading' })).toBeVisible();
   await expect(preview).toContainText('docs/plan.md');
-  await expect(page.locator('#document')).toBeHidden();
+  await expect(page.locator('#document')).toBeVisible();
   await expect(page.getByLabel('Comment', { exact: true })).toHaveCount(0);
   await expect(preview.locator('img').first()).toHaveAttribute('src', /[?&]document=&/);
   await page.evaluate(() => {
@@ -2434,15 +2714,17 @@ test('files panel previews workspace files read-only and keeps drafts', async ({
   });
   await page.keyboard.press('c');
   await expect(page.getByLabel('Comment', { exact: true })).toHaveCount(0);
+  await page.getByRole('dialog', { name: 'File: docs/plan.md', exact: true }).getByRole('button', { name: 'Close file window' }).click();
 
   await panel.getByTitle('page.html', { exact: true }).click();
   const frame = page.frameLocator('iframe[title="Preview of page.html"]');
   await expect(frame.locator('#static')).toHaveText('Static HTML');
   await expect(page.locator('iframe[title="Preview of page.html"]')).toHaveAttribute('sandbox', '');
+  await page.getByRole('dialog', { name: 'File: page.html', exact: true }).getByRole('button', { name: 'Close file window' }).click();
   await panel.getByTitle('flow.mmd', { exact: true }).click();
   await expect(preview.locator('svg').first()).toBeVisible();
 
-  await preview.getByRole('button', { name: 'Back to document' }).click();
+  await page.getByRole('dialog', { name: 'File: flow.mmd', exact: true }).getByRole('button', { name: 'Close file window' }).click();
   await expect(page.locator('#document')).toBeVisible();
   await select(page, 'Main body passage');
   await page.getByRole('button', { name: 'Comment', exact: true }).click();
@@ -2452,8 +2734,29 @@ test('files panel previews workspace files read-only and keeps drafts', async ({
   await expect(page.getByRole('complementary', { name: 'Files' })).toBeVisible();
 });
 
+test('JSON and YAML file previews preserve literal content and indentation as highlighted code', async ({ page }) => {
+  const json = '{\n  "label": "**literal** <b>text</b>",\n  "fence": "```",\n  "nested": {\n    "enabled": true\n  }\n}';
+  const yaml = '# Keep this comment\nnested:\n  label: "**literal** <b>text</b>"\n  items:\n    - first\n    - second';
+  const files = { 'data.JSON': json, 'config.YML': yaml, 'config.yaml': yaml };
+  const root = await filesWorkspace(files);
+  const doc = await f.register();
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Show files' }).click();
+  const preview = page.getByRole('region', { name: 'File preview' });
+  for (const [path, source, language] of [['data.JSON', json, 'json'], ['config.YML', yaml, 'yaml'], ['config.yaml', yaml, 'yaml']]) {
+    await page.getByRole('complementary', { name: 'Files' }).getByTitle(path, { exact: true }).click();
+    const code = preview.locator('pre code');
+    await expect(code).toBeVisible();
+    await expect.poll(async () => (await code.locator('[data-line]').allTextContents()).join('\n')).toBe(source);
+    await expect(code.locator('span[style]').first()).toBeVisible();
+    await expect(preview.locator('strong, b, h1, ul')).toHaveCount(0);
+    await page.getByRole('dialog', { name: `File: ${path}`, exact: true }).getByRole('button', { name: 'Close file window' }).click();
+  }
+});
+
 test('files panel handles empty workspaces, its own document and conversation navigation', async ({ page }) => {
-  const empty = await filesWorkspace({ 'src.ts': 'export {};\n' });
+  const empty = await filesWorkspace({ 'ignored.bin': 'not previewable' });
   const root = await filesWorkspace({ 'nav.md': '# Navigation\n\nQuoted passage text.\n', 'a.md': '# A file\n' });
   const doc = await (await f.agent('/agent/documents', { path: join(root, 'nav.md'), workspace: empty })).json();
   await page.goto(`${f.url}/?document=${doc.id}`);
@@ -2479,39 +2782,43 @@ test('files panel handles empty workspaces, its own document and conversation na
   const preview = page.getByRole('region', { name: 'File preview' });
   await expect(preview.getByRole('heading', { name: 'A file' })).toBeVisible();
   await page.getByRole('log').getByText('Quoted passage text').first().click();
-  await expect(preview).toHaveCount(0);
+  await expect(preview).toBeVisible();
   await expect(page.locator('#document')).toBeVisible();
   await panel.getByTitle('a.md', { exact: true }).click();
   await expect(preview).toBeVisible();
-  // Selecting the open document's own file returns to it.
+  // The backing file can also be read in its own window without registering another document.
   await panel.getByTitle('nav.md', { exact: true }).click();
-  await expect(preview).toHaveCount(0);
+  await expect(page.getByRole('dialog', { name: 'File: nav.md', exact: true }).getByRole('heading', { name: 'Navigation' })).toBeVisible();
   await expect(page.locator('#document')).toBeVisible();
 });
 
-test('files preview keeps passage commenting disabled when the conversation pane toggles', async ({ page }) => {
+test('file previews attach a file quote after the conversation pane toggles', async ({ page }) => {
   const root = await filesWorkspace({ 'other.md': '# Other\n\nOther text.\n' });
   const doc = await f.register('main.md', '# Main\n\nAttach this passage please.\n');
   await f.agent('/agent/documents', { path: doc.path, workspace: root });
   await page.goto(`${f.url}/?document=${doc.id}`);
   await expect(page.locator('#document')).toContainText('Attach this passage');
-  await select(page, 'Attach this passage');
-  await expect(page.locator('.draft-selection')).toContainText('Attach this passage');
   await page.getByRole('button', { name: 'Show files' }).click();
   await page.getByRole('complementary', { name: 'Files' }).getByTitle('other.md', { exact: true }).focus();
   await page.keyboard.press('Enter');
   await expect(page.getByRole('region', { name: 'File preview' })).toBeVisible();
   await page.getByRole('button', { name: 'Hide conversations' }).click();
   await page.getByRole('button', { name: 'Show conversations' }).click();
-  await page.waitForTimeout(300);
+  await page.getByRole('dialog', { name: 'File: other.md', exact: true }).focus();
+  await page.evaluate(() => {
+    const text = document.querySelector('.file-preview p')!.firstChild!;
+    const range = document.createRange(); range.selectNodeContents(text);
+    getSelection()!.removeAllRanges(); getSelection()!.addRange(range);
+    document.querySelector('.file-preview article')!.dispatchEvent(new KeyboardEvent('keyup', { key: 'Shift', bubbles: true }));
+  });
   await expect(page.locator('.annotation-toolbar')).toHaveCount(0);
   await page.keyboard.press('c');
-  await page.waitForTimeout(300);
   await expect(page.getByLabel('Comment', { exact: true })).toHaveCount(0);
-  await expect(page.locator('.draft-selection')).toContainText('Attach this passage');
+  await expect(page.locator('.draft-selection')).toContainText('other.md');
+  await expect(page.locator('.draft-selection')).toContainText('Other text.');
 });
 
-test('files preview follows a re-declared workspace and reloads when reselected', async ({ page }) => {
+test('opened files retain their own roots when the document workspace changes', async ({ page }) => {
   const first = await filesWorkspace({ 'a.md': '# From first root\n' });
   const second = await filesWorkspace({ 'a.md': '# From second root\n' });
   const doc = await f.register('main.md', '# Main\n\nBody.\n');
@@ -2522,6 +2829,10 @@ test('files preview follows a re-declared workspace and reloads when reselected'
   await panel.getByTitle('a.md', { exact: true }).click();
   await expect(preview.getByRole('heading', { name: 'From first root' })).toBeVisible();
   await f.agent('/agent/documents', { path: doc.path, workspace: second });
+  await expect(panel.getByRole('button', { name: 'Change visible root' })).toHaveText(second);
+  await expect(preview.getByRole('heading', { name: 'From first root' })).toBeVisible();
+  await page.getByRole('dialog', { name: 'File: a.md', exact: true }).getByRole('button', { name: 'Close file window' }).click();
+  await panel.getByTitle('a.md', { exact: true }).click();
   await expect(preview.getByRole('heading', { name: 'From second root' })).toBeVisible();
   await writeFile(join(second, 'a.md'), '# Edited on disk\n');
   await panel.getByTitle('a.md', { exact: true }).click();
@@ -2543,7 +2854,7 @@ test('files panel never shows Plannotator settings hint while loading', async ({
   expect(await page.evaluate(() => (window as unknown as { sawHint?: boolean }).sawHint ?? false)).toBe(false);
 });
 
-test('file links in documents and replies open previews, code popouts or a refusal', async ({ page, context }) => {
+test('file links in documents and replies open explicitly chosen files beyond the workspace too', async ({ page, context }) => {
   const outside = await filesWorkspace({ 'far.md': '# Far\n' });
   const root = await filesWorkspace({
     'docs/main.md': `# Main\n\nRead [the sibling](sibling.md), [the app](../src/app.ts:1), and \`src/app.ts:1\`.\n\nAlso [far doc](${outside}/far.md).\n`,
@@ -2558,22 +2869,22 @@ test('file links in documents and replies open previews, code popouts or a refus
   await article.getByRole('link', { name: 'the sibling' }).click();
   await expect(preview.getByRole('heading', { name: 'Sibling heading' })).toBeVisible();
   expect(page.url()).toContain(`document=${doc.id}`);
-  await preview.getByRole('button', { name: 'Back to document' }).click();
+  await page.getByRole('dialog', { name: 'File: docs/sibling.md', exact: true }).getByRole('button', { name: 'Close file window' }).click();
 
   await article.getByRole('link', { name: 'the app' }).click();
   await expect(page.getByText('export const answer = 42;')).toBeVisible();
-  await page.keyboard.press('Escape');
+  await page.getByRole('dialog', { name: 'File: src/app.ts', exact: true }).getByRole('button', { name: 'Close file window' }).click();
   await expect(page.getByText('export const answer = 42;')).toHaveCount(0);
   await article.getByText('src/app.ts:1', { exact: true }).click();
   await expect(page.getByText('export const answer = 42;')).toBeVisible();
-  await page.keyboard.press('Escape');
+  await page.getByRole('dialog', { name: 'File: src/app.ts', exact: true }).getByRole('button', { name: 'Close file window' }).click();
 
   await article.getByRole('link', { name: 'far doc' }).click();
-  await expect(preview).toContainText("Outside this document's workspace");
-  await expect(preview).toContainText(`${outside}/far.md`);
-  await preview.getByRole('button', { name: 'Copy path' }).click();
-  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`${outside}/far.md`);
-  await preview.getByRole('button', { name: 'Back to document' }).click();
+  await expect(preview.getByRole('heading', { name: 'Far', exact: true })).toBeVisible();
+  await preview.getByRole('button', { name: 'Show in file browser' }).click();
+  await expect(page.getByRole('button', { name: 'Change visible root' })).toHaveText(outside);
+  await expect(page.locator('.file-tree-item.active')).toHaveAttribute('title', 'far.md');
+  await page.getByRole('dialog', { name: 'File: far.md', exact: true }).getByRole('button', { name: 'Close file window' }).click();
 
   await page.getByLabel('Message', { exact: true }).fill('Where is the guide?');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();

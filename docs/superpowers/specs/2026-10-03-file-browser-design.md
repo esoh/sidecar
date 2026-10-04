@@ -1,5 +1,25 @@
 # File browser and preview
 
+As built on 2026-10-03 after user exploration: file previews now open in draggable,
+resizable windows over the document, sharing the existing pinned-message dock.
+This supersedes the main-pane replacement and separate code-popout behavior below.
+Files use the same minimize, dock, close, tab reorder and single/multiple-window
+controls. Reopening a path reloads and focuses its existing window or dock tab.
+The main document and conversation remain usable; file previews are read-only.
+JSON/JSONC/JSON5 and YAML/YML render as literal highlighted source, as do code
+links. Source language detection reuses `guideLanguageForPath` from Plannotator.
+HTML retains its empty sandbox, and relative images remain disabled. Browser
+window state is transient; file browsing does not register documents or call agents.
+
+User-approved follow-up on 2026-10-03: text selections in file windows and dock tabs
+attach a `fileQuote` to the current conversation's next input, following message
+quoting. A selection from the thread list creates a conversation. Quotes retain
+the absolute source path, exact excerpt and source-code line numbers through draft
+reload, queueing and single/batched delivery to either coding agent. Sent quotes
+reopen their source file. This does not turn external-file quotes into main-document
+highlights or archive browsed files. Sandboxed HTML and diagram graphics retain
+their existing isolation.
+
 User-approved scope, 2026-10-03:
 
 - Add a Files panel that lists the open document's workspace and previews files read-only. Reuse Plannotator's file browser rather than designing a new one.
@@ -51,6 +71,16 @@ Both routes require the existing viewer cookie and Host/Origin checks. The clien
 As built on 2026-10-03: server listing and preview live in `src/files.ts` with Plannotator's Git status copied unchanged into `src/workspace-status.ts`. The file-type predicates are copied from `@plannotator/core` 0.25.7 rather than imported at runtime, because Playwright's loader will not compile TypeScript inside `node_modules`; the package remains a dependency for type imports. The viewer imports `FileBrowser`/`useFileBrowser` from `@plannotator/ui` 0.47.0 through `setFileTreeBackend`; its labels hide `.md`/`.html` extensions as upstream does. HTML previews use an empty sandbox. Relative images in previews are intentionally not resolved.
 
 ## Local file links
+
+### As built: navigation and numbered code (2026-10-03)
+
+The user subsequently approved root navigation and opening explicitly chosen local folders/files outside the workspace. This supersedes the fixed-root/refusal behavior below. The existing Plannotator file tree now lists code as well as documents, behind a small left-edge tab below the app bar. Up changes the visible root; the path is editable; Reset visible root restores the document's workspace. None of these changes alter the registered workspace, repository badge, agent cwd, or document ownership.
+
+Show in file browser (the file-window path button) opens the panel, clears its filter, expands ancestors, scrolls to and highlights the file. For files outside the current visible root it switches to the containing folder. Open windows retain their file's root, so navigating cannot silently retarget their source. The same path focuses the same window across different visible roots.
+
+Authenticated `POST /api/files/root` grants an explicitly selected real directory to the current document for the server's lifetime. File reads may use a `directory` parameter only if it is the document workspace or a granted root. Passive hover previews stay workspace-scoped. Closing the document clears grants. Containment/symlink checks apply within each selected root, along with existing type exclusions and the 2 MiB limit. Directory walking is also capped to bound parent-folder browsing. A file quote may reference the user's chosen local file; it is context, not read/edit authorization.
+
+Code, JSON and YAML use the same Pierre `File` component as Plannotator's code popout, inside Sidecar's windows/dock. Gutter selections attach whole lines; text selections preserve exact source substrings and newlines while excluding line numbers. Rendered Markdown/diagrams/HTML retain their existing paths.
 
 User-approved addition, 2026-10-03: links to local files in documents, previews, replies and pinned windows open inside Sidecar instead of navigating the viewer to `/Users/...`.
 

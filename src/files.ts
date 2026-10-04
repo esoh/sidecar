@@ -1,6 +1,6 @@
 import { readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { filterWorkspaceStatusForDirectory, getWorkspaceStatusForDirectory, getWorkspaceStatusRelativePaths, type WorkspaceFileChange, type WorkspaceStatusPayload } from './workspace-status.ts';
+import { filterWorkspaceStatusForDirectory, getWorkspaceStatusForDirectory, getWorkspaceStatusRelativePaths, type WorkspaceStatusPayload } from './workspace-status.ts';
 import { DomainError } from './store.ts';
 
 // File-type predicates copied from @plannotator/core 0.25.7 annotatable.ts (MIT): the package
@@ -27,13 +27,13 @@ export function isFileBrowserExcludedPath(relativePath: string): boolean {
   return normalized.split('/').filter(Boolean).some(part => FILE_BROWSER_EXCLUDED_NAMES.has(part));
 }
 export interface VaultNode { name: string; path: string; type: 'file' | 'folder'; children?: VaultNode[] }
-export function buildFileTree(relativePaths: string[]): VaultNode[] {
+export function buildFileTree(relativePaths: string[], directories: string[] = []): VaultNode[] {
   const root: VaultNode[] = [];
-  for (const filePath of relativePaths) {
+  for (const { filePath, isDirectory } of [...relativePaths.map(filePath => ({ filePath, isDirectory: false })), ...directories.map(filePath => ({ filePath, isDirectory: true }))]) {
     const parts = filePath.split('/');
     let current = root, pathSoFar = '';
     for (let i = 0; i < parts.length; i++) {
-      const part = parts[i], isFile = i === parts.length - 1;
+      const part = parts[i], isFile = i === parts.length - 1 && !isDirectory;
       pathSoFar = pathSoFar ? `${pathSoFar}/${part}` : part;
       let node = current.find(n => n.name === part && n.type === (isFile ? 'file' : 'folder'));
       if (!node) {
@@ -55,9 +55,9 @@ export function buildFileTree(relativePaths: string[]): VaultNode[] {
 // Walk, cap and changed-file seeding follow handleFileBrowserFiles in Plannotator
 // packages/server/reference-handlers.ts at 772c620 (MIT).
 const DEFAULT_FILE_LIMIT = 5_000;
-const includeWorkspaceFile = (relativePath: string, _change: WorkspaceFileChange) =>
-  ANNOTATABLE_DOC_REGEX.test(relativePath) && !isFileBrowserExcludedPath(relativePath);
-type WalkState = { files: Set<string>; limit: number; truncated: boolean };
+const includeWorkspaceFile = (relativePath: string) =>
+  (ANNOTATABLE_DOC_REGEX.test(relativePath) || CODE_FILE_REGEX.test(relativePath)) && !isFileBrowserExcludedPath(relativePath);
+type WalkState = { files: Set<string>; folders: Set<string>; limit: number; truncated: boolean };
 function addFile(state: WalkState, relativePath: string) {
   if (state.files.has(relativePath)) return;
   if (state.files.size >= state.limit) { state.truncated = true; return; }
@@ -73,8 +73,13 @@ async function walk(dir: string, root: string, state: WalkState): Promise<void> 
     const fullPath = join(dir, entry.name);
     const relativePath = relative(root, fullPath).replace(/\\/g, '/');
     if (entry.isDirectory()) {
-      if (!isFileBrowserExcludedPath(relativePath)) await walk(fullPath, root, state);
-    } else if (entry.isFile() && ANNOTATABLE_DOC_REGEX.test(entry.name) && !isFileBrowserExcludedPath(relativePath)) {
+      if (!isFileBrowserExcludedPath(relativePath)) {
+        // Parent navigation can reach large trees; bound directories as well as files.
+        if (state.folders.size >= state.limit) { state.truncated = true; return; }
+        state.folders.add(relativePath);
+        await walk(fullPath, root, state);
+      }
+    } else if (entry.isFile() && includeWorkspaceFile(relativePath)) {
       addFile(state, relativePath);
     }
   }
@@ -83,7 +88,7 @@ export type FileListing = { root: string; tree: VaultNode[]; workspaceStatus: Wo
 export async function listFiles(root: string, limit = DEFAULT_FILE_LIMIT): Promise<FileListing> {
   if (!(await stat(root).catch(() => null))?.isDirectory())
     throw new DomainError('The workspace directory is unavailable. Reopen the document from your agent.', 404);
-  const state: WalkState = { files: new Set(), limit, truncated: false };
+  const state: WalkState = { files: new Set(), folders: new Set(), limit, truncated: false };
   // Seed changed files first so the cap never hides what the user just touched.
   const workspaceStatus = filterWorkspaceStatusForDirectory(await getWorkspaceStatusForDirectory(root), root, includeWorkspaceFile);
   for (const match of getWorkspaceStatusRelativePaths(workspaceStatus, root, includeWorkspaceFile)) {
@@ -91,7 +96,7 @@ export async function listFiles(root: string, limit = DEFAULT_FILE_LIMIT): Promi
     if (state.truncated) break;
   }
   await walk(root, root, state);
-  return { root, tree: buildFileTree([...state.files].sort()), workspaceStatus, truncated: state.truncated, fileLimit: limit };
+  return { root, tree: buildFileTree([...state.files].sort(), [...state.folders]), workspaceStatus, truncated: state.truncated, fileLimit: limit };
 }
 
 export type FilePreviewData = { path: string; text: string; renderAs: 'markdown' | 'html' | 'mermaid' | 'graphviz' };

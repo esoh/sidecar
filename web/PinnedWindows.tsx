@@ -4,21 +4,30 @@ import type { Thread } from '../src/store.ts';
 import { Icon, MessageContent, PinSymbol, type MessageContentProps } from './conversations.tsx';
 import { useMessageSettings } from './TextSettings.tsx';
 import { messagePreview } from './message-copy.ts';
+import { FilePreview, type OpenFile } from './FilePreview.tsx';
+import type { FileQuote } from '../src/quote.ts';
 
 type WindowPosition = { id: string; x: number; y: number; width: number; height: number; layer: number };
 type Point = { x: number; y: number };
 type DockPreview = { id: string; index: number };
+type WindowEntry = { id: string; label: string } & (
+  { kind: 'message'; threadId: string; message: Thread['messages'][number] } |
+  { kind: 'file'; file: OpenFile }
+);
 const margin = 0, barHeight = 38, minDockHeight = 140;
 function clampWindow(value: WindowPosition): WindowPosition {
   const width = Math.min(value.width, innerWidth - margin * 2), height = Math.min(value.height, innerHeight - margin * 2);
   return { ...value, width, height, x: Math.max(margin, Math.min(value.x, innerWidth - width - margin)), y: Math.max(margin, Math.min(value.y, innerHeight - height - margin)) };
 }
 
-export function PinnedWindows({ workspace, threads, documentId, openRequests, onOpened, onGoToMessage, ...contentProps }: {
+export function PinnedWindows({ workspace, threads, files, root, documentId, openRequests, onOpened, onCloseFile, onQuoteFile, onRevealFile, onGoToMessage, ...contentProps }: {
   workspace: RefObject<HTMLDivElement | null>; threads: Thread[]; documentId: string;
+  files: OpenFile[]; root?: string; onCloseFile: (id: string) => void;
+  onQuoteFile: (quote: FileQuote) => void;
+  onRevealFile: (path: string) => void;
   openRequests: string[]; onOpened: (ids: string[]) => void;
   onGoToMessage: (id: string) => void;
-} & Pick<MessageContentProps, 'activeSelectionId' | 'passageChanged' | 'showPassage' | 'showOriginal' | 'onQuoteMessage'>) {
+} & Pick<MessageContentProps, 'activeSelectionId' | 'passageChanged' | 'showPassage' | 'showOriginal' | 'onQuoteMessage' | 'onOpenFileQuote'>) {
   // Array order records when a window was opened; docking, focus and tab order are independent.
   const [windows, setWindows] = useState<WindowPosition[]>([]);
   const [docked, setDocked] = useState<string[]>([]), [activeDock, setActiveDock] = useState<string | null>(null);
@@ -27,14 +36,27 @@ export function PinnedWindows({ workspace, threads, documentId, openRequests, on
   const [dragging, setDragging] = useState<string | null>(null), [ghost, setGhost] = useState<Point | null>(null);
   const dock = useRef<HTMLElement>(null), tabs = useRef<HTMLDivElement>(null);
   const layer = useRef(0), stopGesture = useRef<(() => void) | null>(null);
+  const pendingFocus = useRef<string | null>(null);
   const { windowMode } = useMessageSettings();
-  const entries = useMemo(() => threads.flatMap(thread => thread.messages.filter(message => message.isPinned).map(message => ({ threadId: thread.id, message }))), [threads]);
-  const labels = useMemo(() => new Map(entries.map(({ message }) => [message.id, messagePreview(message.text)])), [entries]);
-  const ids = entries.map(entry => entry.message.id).join('|');
-  const find = (id: string) => entries.find(entry => entry.message.id === id);
+  const entries = useMemo<WindowEntry[]>(() => [
+    ...threads.flatMap(thread => thread.messages.filter(message => message.isPinned).map(message => ({ kind: 'message' as const, id: message.id, label: messagePreview(message.text), threadId: thread.id, message }))),
+    ...files.map(file => ({ kind: 'file' as const, id: file.id, label: file.path.split('/').pop() ?? file.path, file })),
+  ], [threads, files]);
+  const labels = new Map(entries.map(entry => [entry.id, entry.label]));
+  const ids = JSON.stringify(entries.map(entry => entry.id));
+  const find = (id: string) => entries.find(entry => entry.id === id);
+  const isFile = (id: string) => find(id)?.kind === 'file';
+  const filePath = (id: string) => {
+    const entry = find(id);
+    return entry?.kind === 'file' ? entry.file.path : undefined;
+  };
+  const symbol = (id: string) => {
+    const entry = find(id);
+    return entry?.kind === 'file' ? <Icon name="file" /> : <PinSymbol style={entry?.message.pinStyle} />;
+  };
   useEffect(() => () => stopGesture.current?.(), []);
   useEffect(() => {
-    const valid = new Set(entries.map(entry => entry.message.id));
+    const valid = new Set(entries.map(entry => entry.id));
     setWindows(previous => previous.filter(window => valid.has(window.id)));
     setDocked(previous => previous.filter(id => valid.has(id)));
   }, [ids]);
@@ -43,7 +65,7 @@ export function PinnedWindows({ workspace, threads, documentId, openRequests, on
     stopGesture.current?.();
     setWindows(previous => previous.slice(-1));
   }, [windowMode]);
-  const windowIds = windows.map(window => window.id).join('|');
+  const windowIds = JSON.stringify(windows.map(window => window.id));
   useEffect(() => {
     const valid = new Set(windows.map(window => window.id));
     setDocked(previous => previous.filter(id => valid.has(id)));
@@ -52,19 +74,25 @@ export function PinnedWindows({ workspace, threads, documentId, openRequests, on
     const ready = openRequests.filter(id => find(id));
     if (!ready.length) return;
     const last = ready[ready.length - 1];
-    setActiveDock(last);
-    if (docked.includes(last)) setExpanded(true);
+    pendingFocus.current = last;
+    if (docked.includes(last)) { setActiveDock(last); setExpanded(true); }
     const bounds = workspace.current?.getBoundingClientRect();
     const layers = new Map(ready.map(id => [id, ++layer.current]));
     setWindows(previous => ready.reduce((current, id) => {
       const nextLayer = layers.get(id) ?? 0;
       if (current.some(window => window.id === id)) return current.map(window => window.id === id ? { ...window, layer: nextLayer } : window);
-      const window = clampWindow({ id, x: (bounds?.right ?? innerWidth) - 430 + current.length % 4 * 18, y: 80 + current.length % 4 * 24, width: 410, height: 330, layer: nextLayer });
+      const width = isFile(id) ? Math.min(620, Math.max(240, (bounds?.width ?? innerWidth) - 40)) : 410;
+      const window = clampWindow({ id, x: (bounds?.right ?? innerWidth) - width - 20 + current.length % 4 * 18, y: 80 + current.length % 4 * 24, width, height: isFile(id) ? 480 : 330, layer: nextLayer });
       return [...(windowMode === 'single' ? [] : current), window];
     }, previous));
     onOpened(ready);
-    requestAnimationFrame(() => document.getElementById(`reference-${last}`)?.focus({ preventScroll: true }));
   }, [openRequests, ids]);
+  useLayoutEffect(() => {
+    const id = pendingFocus.current;
+    if (!id) return;
+    const target = document.getElementById(`reference-${id}`) ?? document.getElementById(`dock-tab-${id}`);
+    if (target) { target.focus({ preventScroll: true }); pendingFocus.current = null; }
+  }, [windows, expanded, activeDock]);
   useLayoutEffect(() => {
     const resize = () => setWindows(previous => previous.map(clampWindow));
     window.addEventListener('resize', resize);
@@ -79,11 +107,13 @@ export function PinnedWindows({ workspace, threads, documentId, openRequests, on
   function close(id: string) {
     setWindows(previous => previous.filter(window => window.id !== id));
     setDocked(previous => previous.filter(value => value !== id));
+    if (isFile(id)) onCloseFile(id);
   }
   function moveOut(id: string, point?: Point) {
     setDocked(previous => previous.filter(value => value !== id));
     const bounds = workspace.current?.getBoundingClientRect();
-    updateWindow(id, { x: point ? point.x - 120 : (bounds?.right ?? innerWidth) - 430, y: point ? point.y - 18 : 85, layer: ++layer.current });
+    const width = windows.find(window => window.id === id)?.width ?? 410;
+    updateWindow(id, { x: point ? point.x - 120 : (bounds?.right ?? innerWidth) - width - 20, y: point ? point.y - 18 : 85, layer: ++layer.current });
   }
   function moveIn(id: string, index = docked.length) {
     setDocked(previous => { const next = previous.filter(value => value !== id); next.splice(index, 0, id); return next; });
@@ -158,32 +188,33 @@ export function PinnedWindows({ workspace, threads, documentId, openRequests, on
   const displayedId = preview?.id ?? activeId;
   const isDockOpen = expanded || !!preview;
   const displayTabs = preview ? visibleDock.filter(id => id !== preview.id) : visibleDock;
-  const renderMessage = (id: string, prefix: string) => {
+  const renderContent = (id: string, prefix: string) => {
     const entry = find(id);
+    if (entry?.kind === 'file') return <FilePreview key={entry.id} {...entry.file} documentId={documentId} root={entry.file.root ?? root} onQuoteFile={onQuoteFile} onRevealFile={onRevealFile} />;
     return entry && <div className={`message ${entry.message.role}`}><MessageContent {...contentProps} {...entry} documentId={documentId} prefix={prefix} onGoToMessage={onGoToMessage} /></div>;
   };
 
   return <>
     {createPortal(<div className="reference-layer">{windows.filter(window => !docked.includes(window.id) && find(window.id)).map(value => (
-      <section key={value.id} id={`reference-${value.id}`} className={`reference-window${dragging === value.id ? ' is-dragging' : ''}`} role="dialog" aria-label="Pinned message" tabIndex={-1}
+      <section key={value.id} id={`reference-${value.id}`} className={`reference-window${dragging === value.id ? ' is-dragging' : ''}`} role="dialog" aria-label={isFile(value.id) ? `File: ${filePath(value.id)}` : 'Pinned message'} tabIndex={-1}
         style={{ left: value.x, top: value.y, width: value.width, height: value.height, zIndex: 20 + value.layer }} onPointerDown={() => raise(value.id)}>
-        <header className="reference-titlebar" role="group" tabIndex={0} aria-label="Move pinned window" onPointerDown={event => drag(event, value)} onKeyDown={event => {
+        <header className="reference-titlebar" role="group" tabIndex={0} aria-label={isFile(value.id) ? 'Move file window' : 'Move pinned window'} onPointerDown={event => drag(event, value)} onKeyDown={event => {
             if (event.target !== event.currentTarget) return;
             const delta = { ArrowLeft: [-10, 0], ArrowRight: [10, 0], ArrowUp: [0, -10], ArrowDown: [0, 10] }[event.key];
             if (delta) { event.preventDefault(); updateWindow(value.id, event.shiftKey ? { width: Math.max(240, value.width + delta[0]), height: Math.max(160, value.height + delta[1]) } : { x: value.x + delta[0], y: value.y + delta[1] }); }
           }}>
-          <div className="reference-grip"><PinSymbol style={find(value.id)?.message.pinStyle} /><span>{labels.get(value.id)}</span></div>
+          <div className="reference-grip" title={filePath(value.id)}>{symbol(value.id)}<span>{labels.get(value.id)}</span></div>
           <button aria-label="Minimize window" title="Minimize window" onClick={() => { moveIn(value.id); setExpanded(false); }}><Icon name="minimize" /></button>
           <button aria-label="Dock window" title="Dock window" onClick={() => { moveIn(value.id); setExpanded(true); }}><Icon name="dock" /></button>
-          <button aria-label="Close pinned window" title="Close window" onClick={() => close(value.id)}><Icon name="close" /></button>
+          <button aria-label={isFile(value.id) ? 'Close file window' : 'Close pinned window'} title="Close window" onClick={() => close(value.id)}><Icon name="close" /></button>
         </header>
-        <div className="reference-body">{renderMessage(value.id, 'reference')}</div>
-        <footer className="reference-footer"><button onClick={() => onGoToMessage(value.id)}>Go to message<Icon name="arrowUpRight" /></button></footer>
+        <div className="reference-body">{renderContent(value.id, 'reference')}</div>
+        {!isFile(value.id) && <footer className="reference-footer"><button onClick={() => onGoToMessage(value.id)}>Go to message<Icon name="arrowUpRight" /></button></footer>}
         {['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'].map(edge => <div key={edge} className={`resize-edge resize-${edge}`} onPointerDown={event => resize(event, value, edge)} />)}
       </section>
     ))}</div>, document.body)}
-    {(visibleDock.length > 0 || dragging) && <section ref={dock} className={`pinned-dock${isDockOpen ? ' is-expanded' : ''}${preview ? ' is-preview' : ''}`} aria-label="Pinned dock" style={isDockOpen ? { height: `min(${dockContentHeight}px, calc(100% - 50px))` } : undefined}>
-      {isDockOpen && <div className="dock-resize" role="separator" tabIndex={0} aria-label="Resize pinned dock" aria-orientation="horizontal" aria-valuenow={dockContentHeight} aria-valuemin={minDockHeight} aria-valuemax={Math.max(minDockHeight, innerHeight - 100)} onKeyDown={event => {
+    {(visibleDock.length > 0 || dragging) && <section ref={dock} className={`pinned-dock${isDockOpen ? ' is-expanded' : ''}${preview ? ' is-preview' : ''}`} aria-label="Window dock" style={isDockOpen ? { height: `min(${dockContentHeight}px, calc(100% - 50px))` } : undefined}>
+      {isDockOpen && <div className="dock-resize" role="separator" tabIndex={0} aria-label="Resize dock" aria-orientation="horizontal" aria-valuenow={dockContentHeight} aria-valuemin={minDockHeight} aria-valuemax={Math.max(minDockHeight, innerHeight - 100)} onKeyDown={event => {
         if (event.key === 'ArrowUp' || event.key === 'ArrowDown') { event.preventDefault(); setHeight(Math.max(minDockHeight, Math.min(innerHeight - 100, height + (event.key === 'ArrowUp' ? 20 : -20)))); }
       }} onPointerDown={event => {
         const start = event.clientY, original = height;
@@ -194,7 +225,7 @@ export function PinnedWindows({ workspace, threads, documentId, openRequests, on
         if (event.target === event.currentTarget && value) drag(event, value, true);
       }}>
         {isDockOpen ? <>
-          <div className="dock-tabs" ref={tabs} role="tablist" aria-label="Docked messages">
+          <div className="dock-tabs" ref={tabs} role="tablist" aria-label="Docked windows">
             {Array.from({ length: displayTabs.length + 1 }, (_, index) => <div className="dock-tab-position" key={displayTabs[index] ?? 'end'}>
               {preview?.index === index && <span className="dock-insertion" />}
               {displayTabs[index] && (() => {
@@ -208,21 +239,21 @@ export function PinnedWindows({ workspace, threads, documentId, openRequests, on
                       const at = visibleDock.indexOf(id), next = event.key === 'Home' ? 0 : event.key === 'End' ? visibleDock.length - 1 : Math.max(0, Math.min(visibleDock.length - 1, at + (event.key === 'ArrowRight' ? 1 : -1)));
                       if (event.altKey) { moveIn(id, next); requestAnimationFrame(() => document.getElementById(`dock-tab-${id}`)?.focus()); }
                       else { const target = visibleDock[next]; setActiveDock(target); document.getElementById(`dock-tab-${target}`)?.focus(); }
-                    }}><PinSymbol style={find(id)?.message.pinStyle} /><span>{labels.get(id)}</span></button>
+                    }} title={filePath(id)}>{symbol(id)}<span>{labels.get(id)}</span></button>
                   <button aria-label="Move out of dock" title="Move out of dock" onClick={() => moveOut(id)}><Icon name="arrowUpRight" /></button>
-                  <button aria-label="Close pinned window" title="Close window" onClick={() => close(id)}><Icon name="close" /></button>
+                  <button aria-label={isFile(id) ? 'Close file window' : 'Close pinned window'} title="Close window" onClick={() => close(id)}><Icon name="close" /></button>
                 </div>;
               })()}
             </div>)}
           </div>
-          <button className="dock-toggle" aria-label="Collapse pinned dock" aria-expanded="true" onClick={() => setExpanded(false)}><Icon name="chevron" /></button>
-        </> : <button className="dock-collapsed" aria-label="Expand pinned dock" aria-expanded="false" onClick={() => setExpanded(true)}><Icon name="pin" /><span>{visibleDock.length} {visibleDock.length === 1 ? 'window' : 'windows'}</span><Icon name="chevron" /></button>}
+          <button className="dock-toggle" aria-label="Collapse dock" aria-expanded="true" onClick={() => setExpanded(false)}><Icon name="chevron" /></button>
+        </> : <button className="dock-collapsed" aria-label="Expand dock" aria-expanded="false" onClick={() => setExpanded(true)}><Icon name="dock" /><span>{visibleDock.length} {visibleDock.length === 1 ? 'window' : 'windows'}</span><Icon name="chevron" /></button>}
       </header>
       {isDockOpen && <div className="reference-body" role="tabpanel" id={`dock-panel-${displayedId}`} aria-labelledby={preview ? undefined : `dock-tab-${displayedId}`} aria-label={preview ? 'Dock preview' : undefined}>
-        {displayedId ? renderMessage(displayedId, 'dock') : <p className="dock-empty">Drop a window here</p>}
+        {displayedId ? renderContent(displayedId, 'dock') : <p className="dock-empty">Drop a window here</p>}
       </div>}
-      {isDockOpen && displayedId && !preview && <footer className="reference-footer"><button onClick={() => onGoToMessage(displayedId)}>Go to message<Icon name="arrowUpRight" /></button></footer>}
+      {isDockOpen && displayedId && !preview && !isFile(displayedId) && <footer className="reference-footer"><button onClick={() => onGoToMessage(displayedId)}>Go to message<Icon name="arrowUpRight" /></button></footer>}
     </section>}
-    {ghost && dragging && createPortal(<div className="dock-drag-preview" style={{ left: ghost.x, top: ghost.y }} aria-hidden="true" inert>{renderMessage(dragging, 'drag-preview')}</div>, document.body)}
+    {ghost && dragging && createPortal(<div className="dock-drag-preview" style={{ left: ghost.x, top: ghost.y }} aria-hidden="true" inert>{renderContent(dragging, 'drag-preview')}</div>, document.body)}
   </>;
 }
