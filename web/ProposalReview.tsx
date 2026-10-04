@@ -114,7 +114,7 @@ function ProposalWindow({ dialog, anchor, bounds, title, children, footer, onClo
   const [geometry, setGeometry] = useState<ProposalGeometry | null>(null);
   const [textSize, setTextSize] = useState(() => {
     const saved = Number(storage.getItem('sidecar-proposal-text-size'));
-    return Number.isInteger(saved) && saved >= 80 && saved <= 150 && saved % 5 === 0 ? saved : 100;
+    return Number.isInteger(saved) && saved >= 25 && saved <= 100 && saved % 5 === 0 ? saved : 100;
   });
   const stopGesture = useRef<(() => void) | null>(null);
   // Anchoring owns initial placement only; scroll and diff layout changes must not undo a gesture.
@@ -169,7 +169,7 @@ function ProposalWindow({ dialog, anchor, bounds, title, children, footer, onClo
     </header>
     <div className="proposal-text-size">
       <label htmlFor="proposal-text-size">Text size</label>
-      <input id="proposal-text-size" type="range" aria-label="Proposal text size" aria-valuetext={`${textSize}%`} min={80} max={150} step={5} value={textSize} onChange={event => setTextSize(event.target.valueAsNumber)} />
+      <input id="proposal-text-size" type="range" aria-label="Proposal text size" aria-valuetext={`${textSize}%`} min={25} max={100} step={5} value={textSize} onChange={event => setTextSize(event.target.valueAsNumber)} />
       <output htmlFor="proposal-text-size">{textSize}%</output>
       <button aria-label="Reset proposal text size" disabled={textSize === 100} onClick={() => setTextSize(100)}>Reset</button>
     </div>
