@@ -456,7 +456,7 @@ export function ConversationSidebar({
   }, []);
   const creatingId = useRef<string | null>(null),
     createBusy = useRef(false);
-  const positions = useRef(new Map<string, number>());
+  const positions = useRef(new Map<string, { top: number; isAtBottom: boolean }>());
   const conversation = useRef<HTMLElement>(null);
   const messages = useRef<HTMLDivElement>(null),
     back = useRef<HTMLButtonElement>(null),
@@ -522,10 +522,12 @@ export function ConversationSidebar({
     const node = messages.current;
     if (active && node) {
       if (previousId.current !== active.id) {
-        node.scrollTop = positions.current.get(active.id) ?? 0;
+        const saved = positions.current.get(active.id);
+        node.scrollTop = !saved || saved.isAtBottom ? node.scrollHeight : saved.top;
         back.current?.focus({ preventScroll: true });
       } else if (atBottom.current) node.scrollTop = node.scrollHeight;
       atBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 24;
+      positions.current.set(active.id, { top: node.scrollTop, isAtBottom: atBottom.current });
     } else if (previousId.current) filterInput.current?.focus({ preventScroll: true });
     previousId.current = active?.id ?? null;
   }, [active?.id, deliveredMessages.length, queuedMessages.length, text, isShown]);
@@ -696,8 +698,8 @@ export function ConversationSidebar({
             aria-label="Conversation messages"
             onScroll={(event) => {
               const node = event.currentTarget;
-              positions.current.set(active.id, node.scrollTop);
               atBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 24;
+              positions.current.set(active.id, { top: node.scrollTop, isAtBottom: atBottom.current });
             }}
           >
             {!active.messages.length && (
