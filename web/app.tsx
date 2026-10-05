@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import Highlighter from '@plannotator/web-highlighter';
 import type { Quote, RequestRecord, Thread } from '../src/store.ts';
-import { api, errorText, type ViewerState, type ClosedDocument } from './api.ts';
+import { api, errorText, mergeRuntime, type ViewerState, type ViewerRuntime, type ClosedDocument } from './api.ts';
 import { randomId } from './id.ts';
 import { confirmCloseDocument } from './close-document.ts';
 import {
@@ -310,7 +310,10 @@ function App() {
     let stopped = false,
       refreshing = false,
       again = false,
-      version = '';
+      version = '',
+      connectionGeneration = 0,
+      snapshotGeneration = 0;
+    let latestRuntime: ViewerRuntime | undefined;
     async function refresh() {
       if (refreshing) {
         again = true;
@@ -320,9 +323,21 @@ function App() {
       try {
         do {
           again = false;
+          const generation = connectionGeneration;
           const next = await api<ViewerState>('/api/state');
           if (stopped) return;
-          setState(next);
+          if (generation !== connectionGeneration) { again = true; continue; }
+          // A slow history response must not rewind newer text/status received over SSE.
+          if (!latestRuntime || next.runtimeRevision >= latestRuntime.runtimeRevision) {
+            const { stateRevision, runtimeRevision, stream, activity, reset, connectionError } = next;
+            latestRuntime = { stateRevision, runtimeRevision, stream, activity, reset, connectionError };
+          }
+          const runtime = latestRuntime, hadSnapshot = snapshotGeneration === generation;
+          snapshotGeneration = generation;
+          setState(current => mergeRuntime(
+            hadSnapshot && current && current.runtimeRevision > next.runtimeRevision ? { ...next, stream: current.stream } : next,
+            runtime,
+          ));
           const id = requestedDocument ?? Object.keys(next.documents)[0] ?? '';
           const doc = next.documents[id];
           if (!doc) { setContent({ html: '', markdown: '', version: '' }); continue; }
@@ -346,12 +361,21 @@ function App() {
         refreshing = false;
       }
     }
-    const events = new EventSource('/api/events');
+    const events = new EventSource('/api/events?updates=1');
     events.onopen = () => {
+      // Revisions belong to one server lifetime; a reconnect may follow an upgrade.
+      connectionGeneration++; latestRuntime = undefined;
       setConnected(true);
       void refresh();
     };
     events.onerror = () => setConnected(false);
+    events.addEventListener('runtime', (event) => {
+      const runtime: ViewerRuntime = JSON.parse(event.data);
+      if (stopped || (latestRuntime && runtime.runtimeRevision < latestRuntime.runtimeRevision)) return;
+      latestRuntime = runtime;
+      // Keep live text until its saved progress/final replacement is in history.
+      setState(current => current ? mergeRuntime(current, runtime) : current);
+    });
     events.addEventListener('change', () => {
       void refresh();
     });
@@ -360,7 +384,6 @@ function App() {
       if (result.documentId === documentId) { stopped = true; events.close(); }
       documentClosed(result);
     });
-    void refresh();
     return () => {
       stopped = true;
       events.close();

@@ -16,6 +16,7 @@ export class ReplyStream {
   readonly suffix: string;
   readonly progress: { prefix: string; suffix: string };
   text = '';
+  private progressMessageId: string | undefined;
   metadata: ReplyMetadata = {};
   error: string | null = null;
   done = false;
@@ -65,6 +66,7 @@ export class ReplyStream {
         if ((!this.prefix.startsWith(candidate.raw) && !this.progress.prefix.startsWith(candidate.raw)) || next.final) { candidate.ignored = true; this.received -= candidate.raw.length; candidate.raw = ''; if (next.final || [...candidate.pending.values()].some(event => event.final)) this.messages.delete(key); candidate.pending.clear(); return; }
         continue;
       }
+      this.progressMessageId = isProgress ? `progress:${this.route.requestId}:${key}` : undefined;
       this.started = true;
       this.turnId = event.turnId;
       const suffix = isProgress ? this.progress.suffix : this.suffix;
@@ -76,6 +78,7 @@ export class ReplyStream {
         this.completedProgress.add(key);
         this.messages.delete(key);
         this.text = '';
+        this.progressMessageId = undefined;
         this.metadata = {};
         return update;
       }
@@ -105,5 +108,5 @@ export class ReplyStream {
     if (!this.done || this.error) throw new DomainError(this.error ?? 'The reply is still streaming', 409);
     return this.text;
   }
-  snapshot() { return { ...this.route, text: this.text, done: this.done, error: this.error }; }
+  snapshot() { return { ...this.route, text: this.text, progressMessageId: this.progressMessageId, done: this.done, error: this.error }; }
 }

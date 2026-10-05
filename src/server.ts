@@ -1,7 +1,8 @@
 import { build } from 'esbuild';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual, createHash } from 'node:crypto';
+import { gzip } from 'node:zlib';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { networkInterfaces } from 'node:os';
 import { readFile, writeFile, realpath, mkdir, rm, stat, rename } from 'node:fs/promises';
@@ -72,9 +73,35 @@ async function bodyOf(request: IncomingMessage): Promise<Record<string, unknown>
 function sameSecret(value: unknown, secret: string): boolean {
   return typeof value === 'string' && Buffer.byteLength(value) === Buffer.byteLength(secret) && timingSafeEqual(Buffer.from(value), Buffer.from(secret));
 }
+function sendBody(response: ServerResponse, body: string | Uint8Array, isAsset = false): void {
+  const bytes = Buffer.from(body);
+  response.setHeader('Vary', 'Accept-Encoding');
+  if (isAsset) {
+    const etag = `W/"${createHash('sha256').update(bytes).digest('hex')}"`;
+    // Revalidate after authentication, including after an upgrade or passphrase change.
+    response.setHeader('Cache-Control', 'private, no-cache');
+    response.setHeader('ETag', etag);
+    if (response.req.headers['if-none-match']?.split(',').map(value => value.trim()).some(value => value === etag || value === '*')) {
+      response.writeHead(304); response.end(); return;
+    }
+  }
+  const encodings = (response.req.headers['accept-encoding'] ?? '').toLowerCase().split(',').map(value => value.trim().split(/;\s*/));
+  const encoding = encodings.find(([name]) => name === 'gzip') ?? encodings.find(([name]) => name === '*');
+  const quality = encoding?.slice(1).find(value => value.startsWith('q='))?.slice(2);
+  const canCompress = !!encoding && (quality === undefined || (Number(quality) > 0 && Number(quality) <= 1));
+  const finish = (data: Buffer) => { response.setHeader('Content-Length', data.length); response.end(data); };
+  if (canCompress && bytes.length >= 1024) {
+    gzip(bytes, (error, compressed) => {
+      if (response.destroyed) return;
+      if (error) { response.destroy(error); return; }
+      response.setHeader('Content-Encoding', 'gzip'); finish(compressed);
+    });
+  } else finish(bytes);
+}
 function json(response: ServerResponse, value: unknown, status = 200): void {
-  response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
-  response.end(JSON.stringify(value));
+  response.statusCode = status;
+  response.setHeader('Content-Type', 'application/json; charset=utf-8');
+  sendBody(response, JSON.stringify(value));
 }
 function closeListener(server: ReturnType<typeof createServer>): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -109,7 +136,9 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   const cookieName = `sidecar_${ownerKey(owner).replaceAll('-', '_')}`;
   const cache = new Map<string, Cached>();
   const documentReads = new Set<{ documentId: string; done: Promise<void> }>();
-  const viewers = new Set<ServerResponse>();
+  const viewers = new Map<ServerResponse, boolean>();
+  let appBundle: Promise<Uint8Array> | undefined;
+  let stateRevision = 0, runtimeRevision = 0, sentRuntimeRevision = 0, lastRuntime = '';
   const agents = new Map<ServerResponse, Set<string>>();
   let url = '';
   let closed = false;
@@ -274,7 +303,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     // queue. Reconcile after any in-flight native enqueue has settled instead.
     if (owner.agent === 'codex') { nativeCleanupVersion++; pendingNativeCleanup.add(input.requestId); }
   }
-  function streamChanged() { if (!closed && !streamTimer) streamTimer = setTimeout(() => { streamTimer = undefined; changed(); }, 50); }
+  function streamChanged() { if (!closed && !streamTimer) streamTimer = setTimeout(() => { streamTimer = undefined; runtimeChanged(); }, 50); }
   async function acceptStream(event: import('./stream.ts').StreamEvent) {
     const active = stream;
     if (!active || closed) return;
@@ -282,6 +311,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     // Matching output is proof of receipt even if the handoff acknowledgement was lost.
     if (active.hasStarted && !store.read().requests[active.route.requestId]?.acceptedAt) {
       await store.update(state => markAccepted(state, active.route.requestId));
+      changed();
     }
     if (progress) {
       try { await store.update(state => recordProgress(state, { ...active.route, ...progress })); }
@@ -424,9 +454,30 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     })();
     try { await nativeQueueWork; } finally { nativeQueueWork = undefined; }
   }
+  function runtimeSnapshot() {
+    const runtime = { stateRevision, reset: reset ? { status: reset.status, error: reset.error } : null,
+      stream: stream ? { ...stream.snapshot(), turnId: controlTurn(), canStop: canStop(), stopping: stopping?.stream === stream, stopError } : null,
+      lastLifecycle, activity: compacting ? 'compacting' : agentActivity,
+      connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError };
+    const encoded = JSON.stringify(runtime);
+    if (encoded !== lastRuntime) { lastRuntime = encoded; runtimeRevision++; }
+    return { ...runtime, runtimeRevision };
+  }
+  function runtimeChanged() {
+    if (closed) return;
+    const runtime = runtimeSnapshot();
+    if (runtime.runtimeRevision === sentRuntimeRevision) return;
+    sentRuntimeRevision = runtime.runtimeRevision;
+    const event = `event: runtime\ndata: ${JSON.stringify(runtime)}\n\n`;
+    for (const [response, supportsRuntime] of viewers) if (!response.destroyed)
+      response.write(supportsRuntime ? event : 'event: change\ndata: {}\n\n');
+  }
   function changed() {
     if (closed) return;
-    for (const response of viewers) if (!response.destroyed) response.write('event: change\ndata: {}\n\n');
+    clearTimeout(streamTimer); streamTimer = undefined;
+    stateRevision++;
+    runtimeChanged();
+    for (const response of viewers.keys()) if (!response.destroyed) response.write('event: change\ndata: {}\n\n');
     for (const [response, sent] of agents) notifyAgent(response, sent);
     if (!dispatching) dispatchWork = dispatchCodex();
   }
@@ -436,7 +487,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     const delivered = directRequestId && state.requests[directRequestId];
     if (delivered && delivered.status === 'claimed' && !delivered.replyRecovery && !delivered.acceptedAt && !stream?.hasStarted) for (const member of requestBatch(state, delivered.id)) member.status = 'queued';
     for (const request of Object.values(state.requests)) if (request.status === 'queued' && request.acceptedAt) request.status = 'claimed';
-    return { ...state, appVersion, reset: reset ? { status: reset.status, error: reset.error } : null, stream: stream ? { ...stream.snapshot(), turnId: controlTurn(), canStop: canStop(), stopping: stopping?.stream === stream, stopError } : null, lastLifecycle, activity: compacting ? 'compacting' : agentActivity, connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError, documents: Object.fromEntries(Object.values(state.documents).map(document => {
+    return { ...state, appVersion, ...runtimeSnapshot(), documents: Object.fromEntries(Object.values(state.documents).map(document => {
       const cached = cache.get(document.id);
       return [document.id, { ...document, title: title(document), version: cached && 'data' in cached ? cached.data.version : null, error: cached && 'error' in cached ? cached.error : null }];
     })) };
@@ -531,7 +582,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       cache.delete(id);
       browsingRoots.delete(id);
       const result = { documentId: id, threadIds, nextDocumentId: Object.keys(store.read().documents)[0] ?? null, ...cleanup };
-      for (const viewer of viewers) if (!viewer.destroyed) viewer.write(`event: document-closed\ndata: ${JSON.stringify(result)}\n\n`);
+      for (const viewer of viewers.keys()) if (!viewer.destroyed) viewer.write(`event: document-closed\ndata: ${JSON.stringify(result)}\n\n`);
       changed(); return result;
     });
   }
@@ -676,10 +727,10 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       }
       if (method === 'GET' && path === '/app.js') {
         response.setHeader('Content-Type', 'text/javascript; charset=utf-8');
-        // ponytail: one ~18 MiB local bundle; split renderer chunks if page startup becomes a problem.
-        // Bundle on load so the CLI remains the only process needed for the viewer.
-        const bundle = await build({ entryPoints: [fileURLToPath(new URL('../web/app.tsx', import.meta.url))], bundle: true, write: false, minify: true, format: 'esm', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' } });
-        response.end(bundle.outputFiles[0].contents);
+        // One build per server; the browser revalidates the content hash on later loads.
+        appBundle ??= build({ entryPoints: [fileURLToPath(new URL('../web/app.tsx', import.meta.url))], bundle: true, write: false, minify: true, format: 'esm', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' } })
+          .then(bundle => bundle.outputFiles[0].contents).catch(error => { appBundle = undefined; throw error; });
+        sendBody(response, await appBundle, true);
         return;
       }
       if (method === 'GET' && path === '/renderer.css') {
@@ -687,7 +738,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         const styles = await readFile(new URL(import.meta.resolve('@plannotator/ui/styles.css')), 'utf8');
         const fonts = await Promise.all(Object.entries(rendererFonts).map(async ([family, cssPath]) =>
           (await readFile(cssPath, 'utf8')).replaceAll(/url\((?:\.\/files|fonts)\//g, `url(/renderer-fonts/${family}/`)));
-        response.end([styles, ...fonts].join('\n'));
+        sendBody(response, [styles, ...fonts].join('\n'), true);
         return;
       }
       const font = path.match(/^\/renderer-fonts\/(katex|inter|geist)\/([A-Za-z0-9_-]+\.(?:woff2?|ttf))$/);
@@ -695,7 +746,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         const family = font[1], name = font[2];
         if (family !== 'katex' && family !== 'inter' && family !== 'geist') throw new DomainError('Unknown font', 404);
         response.setHeader('Content-Type', name.endsWith('.woff2') ? 'font/woff2' : name.endsWith('.woff') ? 'font/woff' : 'font/ttf');
-        response.end(await readFile(join(dirname(rendererFonts[family]), family === 'katex' ? 'fonts' : 'files', name)));
+        sendBody(response, await readFile(join(dirname(rendererFonts[family]), family === 'katex' ? 'fonts' : 'files', name)), true);
         return;
       }
       if (method === 'GET' && path === '/api/image') {
@@ -720,11 +771,11 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       }
       if (method === 'GET' && path === '/favicon.svg') {
         response.setHeader('Content-Type', 'image/svg+xml');
-        response.end(await readFile(new URL('../web/favicon.svg', import.meta.url), 'utf8')); return;
+        sendBody(response, await readFile(new URL('../web/favicon.svg', import.meta.url), 'utf8'), true); return;
       }
       if (method === 'GET' && path === '/app.css') {
         response.setHeader('Content-Type', 'text/css; charset=utf-8');
-        response.end(await readFile(new URL('../web/app.css', import.meta.url), 'utf8'));
+        sendBody(response, await readFile(new URL('../web/app.css', import.meta.url), 'utf8'), true);
         return;
       }
       if (method === 'GET' && path === '/api/state') { json(response, snapshot()); return; }
@@ -809,7 +860,12 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         if (isAgent) {
           const sent = new Set<string>(); agents.set(response, sent); notifyAgent(response, sent); changed();
           response.on('close', () => { agents.delete(response); changed(); });
-        } else { viewers.add(response); response.write('event: change\ndata: {}\n\n'); response.on('close', () => viewers.delete(response)); }
+        } else {
+          const supportsRuntime = target.searchParams.get('updates') === '1';
+          viewers.set(response, supportsRuntime);
+          if (!supportsRuntime) response.write('event: change\ndata: {}\n\n');
+          response.on('close', () => viewers.delete(response));
+        }
         return;
       }
       if (method === 'GET' && path === '/agent/status') { json(response, { ownerKey: ownerKey(owner), instanceId, state: 'running', connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError }); return; }
@@ -881,13 +937,13 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
           if (body.activity === 'idle') agentActivity = 'idle';
           else if (body.activity === 'busy' && agentActivity !== 'waiting') agentActivity = 'busy';
           const stop = stopping?.turnId === turnId && stream === stopping.stream ? { requestId: stream.route.requestId, turnId } : undefined;
-          changed(); json(response, { ownerKey: ownerKey(owner), instanceId, ...(stop ? { stop } : {}), ...(isResetting() && reset ? { reset: { id: reset.id } } : {}) }); return;
+          runtimeChanged(); json(response, { ownerKey: ownerKey(owner), instanceId, ...(stop ? { stop } : {}), ...(isResetting() && reset ? { reset: { id: reset.id } } : {}) }); return;
         }
         if (event === 'started') {
           const marker = text(body, 'marker');
           if (stream && !stream.done && [stream.prefix, stream.progress.prefix].includes(marker)) {
             claudeControl = { turnId, seenAt: Date.now(), requestId: stream.route.requestId };
-            changed();
+            runtimeChanged();
           }
           json(response, { ok: true }); return;
         }
@@ -918,7 +974,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
           else if (event === 'agent-unknown' || event === 'agent-disconnected') activityTurnId = undefined;
         }
         lastLifecycle = { event, turnId };
-        changed(); json(response, { ok: true }); return;
+        runtimeChanged(); json(response, { ok: true }); return;
       }
       if (method === 'POST' && path === '/agent/documents') {
         const repoInfo = body.repoInfo;
@@ -1096,7 +1152,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   url = `http://127.0.0.1:${address.port}`;
   await Promise.all(Object.values(store.read().documents).map(refresh));
   const polling = setInterval(() => {
-    if (claudeControl?.seenAt && Date.now() - claudeControl.seenAt >= 2500) { claudeControl.seenAt = 0; changed(); }
+    if (claudeControl?.seenAt && Date.now() - claudeControl.seenAt >= 2500) { claudeControl.seenAt = 0; runtimeChanged(); }
     if (closed || refreshing) return;
     refreshing = true;
     void (async () => {
@@ -1108,19 +1164,19 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     if (closed || readingActivity || (!viewers.size && !waitingCodexDelivery() && nativeCleanupVersion === nativeCleanedVersion)) return;
     readingActivity = true;
     void readCodexActivity(owner.sessionId, transportAbort.signal).then(activity => {
-      if (!closed && activity !== agentActivity) { agentActivity = activity; changed(); }
+      if (!closed && activity !== agentActivity) { agentActivity = activity; runtimeChanged(); }
       const waiting = waitingCodexDelivery();
       if (!dispatching && ((activity === 'idle' && waiting) || nativeCleanupVersion !== nativeCleanedVersion)) return startCodexDelivery(waiting?.id);
     }).finally(() => { readingActivity = false; });
   }, 1000) : undefined;
   const heartbeat = setInterval(() => {
-    for (const response of viewers) if (!response.destroyed) response.write(': keepalive\n\n');
+    for (const response of viewers.keys()) if (!response.destroyed) response.write(': keepalive\n\n');
     for (const response of agents.keys()) if (!response.destroyed) response.write('\n');
   }, 5000);
   async function close(): Promise<void> {
     if (closePromise) return closePromise;
     closed = true; stopObserver?.(); clearStop(); clearTimeout(streamTimer); transportAbort.abort(); clearInterval(polling); clearInterval(heartbeat); clearInterval(activityPolling);
-    for (const response of [...viewers, ...agents.keys()]) response.end();
+    for (const response of [...viewers.keys(), ...agents.keys()]) response.end();
     closePromise = Promise.all([closeListener(server), lanChange.then(async () => {
       if (lanServer) { const listener = lanServer; lanServer = undefined; await closeListener(listener); }
     })]).then(() => {});

@@ -3805,3 +3805,95 @@ test('file links in documents and replies open explicitly chosen files beyond th
   await page.locator('#document').getByRole('link', { name: 'a file' }).click();
   await expect(preview).toContainText('This document has no recorded workspace');
 });
+
+
+test('streaming and control heartbeats do not redownload history; delayed refreshes cannot rewind a reply', async ({ page }) => {
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Stream efficiently'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  const request = await lastRequest();
+  await f.agent(`/agent/requests/${request.id}/claim`, {});
+  const route = { requestId: request.id, documentId: doc.id, threadId: request.threadId };
+  const markers = await (await f.agent('/agent/streams', route)).json();
+  const emit = (index: number, delta: string, final = false) => f.agent('/agent/stream-events', {
+    ownerKey: ownerKey(f.owner), messageId: 'efficient-reply', turnId: 'efficient-turn', index, delta, final,
+  });
+  await emit(0, markers.prefix + 'Start');
+  await expect(page.locator('.message.agent').getByText('Start', { exact: true })).toBeVisible();
+  // Let initial document registration/selection settle before counting stream traffic.
+  await page.waitForTimeout(150);
+  let downloads = 0;
+  page.on('request', request => { if (new URL(request.url()).pathname === '/api/state') downloads++; });
+  for (let i = 1; i <= 5; i++) {
+    await emit(i, ` chunk${i}`);
+    await f.agent('/agent/control', { ownerKey: ownerKey(f.owner), event: 'poll', turnId: 'efficient-turn', activity: 'busy' });
+    await expect(page.locator('.message.agent')).toContainText(`chunk${i}`);
+  }
+  expect(downloads).toBe(0);
+
+  let release!: () => void, captured!: () => void;
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  const ready = new Promise<void>(resolve => { captured = resolve; });
+  await page.route('**/api/state', async route => {
+    const response = await route.fetch(); captured(); await hold; await route.fulfill({ response });
+  }, { times: 1 });
+  try {
+    await f.view(`/api/documents/${doc.id}/title`, { title: 'Renamed during stream' }, 'PATCH');
+    await ready;
+    await emit(6, ' newest');
+    await expect(page.locator('.message.agent')).toContainText('newest');
+    release();
+    await expect(page).toHaveTitle('Renamed during stream');
+    await expect(page.locator('.message.agent')).toContainText('newest');
+  } finally { release(); }
+  await input.fill('Keep this draft across reconnect');
+  await page.context().setOffline(true);
+  await emit(7, ' offline');
+  await page.context().setOffline(false);
+  await expect(page.locator('.message.agent')).toContainText('newest offline');
+  await expect(input).toHaveValue('Keep this draft across reconnect');
+  await emit(8, ' complete' + markers.suffix, true);
+  await expect(page.locator('.message.agent')).toContainText('newest offline complete');
+  await expect.poll(async () => (await state()).requests[request.id].status).toBe('completed');
+  await expect(page.locator('.message.agent')).toHaveCount(1);
+});
+
+
+test('streamed progress and final text remain visible until their saved messages arrive', async ({ page }) => {
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Keep the reply visible'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  const request = await lastRequest();
+  await f.agent(`/agent/requests/${request.id}/claim`, {});
+  const markers = await (await f.agent('/agent/streams', { requestId: request.id, documentId: doc.id, threadId: request.threadId })).json();
+  const emit = (messageId: string, index: number, delta: string, final = false) => f.agent('/agent/stream-events', {
+    ownerKey: ownerKey(f.owner), messageId, turnId: 'slow-history', index, delta, final,
+  });
+  for (const [messageId, text, boundaries] of [['progress', 'Checking the document', markers.progress], ['final', 'Here is the answer', markers]] as const) {
+    await emit(messageId, 0, boundaries.prefix + text);
+    await expect(page.locator('.message.agent').getByText(text, { exact: true })).toHaveCount(1);
+    let release!: () => void, captured!: () => void, applied!: () => void;
+    const hold = new Promise<void>(resolve => { release = resolve; });
+    const ready = new Promise<void>(resolve => { captured = resolve; });
+    const delivered = new Promise<void>(resolve => { applied = resolve; });
+    const url = '**/api/state';
+    const handler = async (route: import('@playwright/test').Route) => {
+      const response = await route.fetch(); captured(); await hold; await route.fulfill({ response }); applied();
+    };
+    await page.route(url, handler);
+    try {
+      await emit(messageId, 1, boundaries.suffix, true);
+      await ready;
+      // Deliberately leave the saved replacement in flight while the runtime event renders.
+      await page.waitForTimeout(150);
+      await expect(page.locator('.message.agent').getByText(text, { exact: true })).toHaveCount(1);
+      release();
+    } finally { release(); await delivered; await page.unroute(url, handler); }
+    await expect(page.locator('.message.agent').getByText(text, { exact: true })).toHaveCount(1);
+  }
+  await expect(page.locator('.message.agent')).toHaveCount(2);
+});
