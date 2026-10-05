@@ -1568,3 +1568,8 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
 .reply-proposal-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 11px; }
 .reply-proposal-actions:empty { display: none; }
 .reply-proposal-actions [role=status] { font-size: 10px; color: var(--muted-foreground); }
+
+.network-tunnel { border-top: 1px solid var(--border); padding-top: 10px; }
+.network-tunnel h3 { font-size: 12px; margin: 0; }
+.network-tunnel .network-link { margin-bottom: 8px; }
+.network-tunnel label { align-items: start; flex-direction: column; }

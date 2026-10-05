@@ -108,13 +108,13 @@ export async function forwardHook(agent: string | undefined, payload: unknown): 
   });
 }
 async function main() {
-  const { values, positionals } = parseArgs({ allowPositionals: true, options: { help: { type: 'boolean', short: 'h' }, version: { type: 'boolean' }, agent: { type: 'string' }, session: { type: 'string' }, owner: { type: 'string' }, file: { type: 'string' }, title: { type: 'string' }, workspace: { type: 'string' }, document: { type: 'string' }, thread: { type: 'string' }, stdin: { type: 'boolean' }, resume: { type: 'boolean' }, error: { type: 'boolean' }, 'no-browser': { type: 'boolean' }, stream: { type: 'boolean' } } });
+  const { values, positionals } = parseArgs({ allowPositionals: true, options: { help: { type: 'boolean', short: 'h' }, version: { type: 'boolean' }, agent: { type: 'string' }, session: { type: 'string' }, owner: { type: 'string' }, file: { type: 'string' }, title: { type: 'string' }, workspace: { type: 'string' }, document: { type: 'string' }, thread: { type: 'string' }, stdin: { type: 'boolean' }, resume: { type: 'boolean' }, error: { type: 'boolean' }, 'no-browser': { type: 'boolean' }, stream: { type: 'boolean' }, 'public-url': { type: 'string' } } });
   if (values.version) {
     process.stdout.write(`${await readAppVersion()}\n`);
     return;
   }
   if (values.help || !positionals.length) {
-    process.stdout.write('Sidecar — document conversations with your existing agent.\n\nUsage: sidecar COMMAND [options]\nCommands: open, browse, status, request, name-thread, stream, reply, watch, stop, hook\n\nOpen: sidecar open --agent codex|claude --session UUID --file /absolute/document.md [--workspace /absolute/worktree]\nUse the Sidecar skill in the original agent to establish live delivery.\n');
+    process.stdout.write('Sidecar — document conversations with your existing agent.\n\nUsage: sidecar COMMAND [options]\nCommands: open, browse, status, network, request, name-thread, stream, reply, watch, stop, hook\n\nOpen: sidecar open --agent codex|claude --session UUID --file /absolute/document.md [--workspace /absolute/worktree]\nNetwork: sidecar network [on|off] --owner KEY [--public-url https://your-domain.ngrok-free.app]\nUse the Sidecar skill in the original agent to establish live delivery.\n');
     return;
   }
   const [command, requestId] = positionals;
@@ -151,6 +151,12 @@ async function main() {
   const key = ownerKey(parseOwner(values.owner));
   if (command === 'serve') { await serve(key); return; }
   if (command === 'status') { output(await appStatus(key)); return; }
+  if (command === 'network') {
+    if (requestId !== undefined && requestId !== 'on' && requestId !== 'off') throw new Error('Use network [on|off] --owner KEY');
+    if (values['public-url'] !== undefined && requestId !== 'on') throw new Error('--public-url requires network on');
+    output(await agentCall(key, '/agent/network', requestId === undefined ? undefined : { enabled: requestId === 'on', ...(values['public-url'] === undefined ? {} : { publicUrl: values['public-url'] }) }));
+    return;
+  }
   if (command === 'stop') {
     if ((await appStatus(key)).state === 'running') {
       await agentCall(key, '/agent/stop', {});
@@ -182,7 +188,7 @@ async function main() {
   if (command === 'reply' && requestId) {
     output(await agentCall(key, '/agent/replies', { requestId, documentId: values.document, threadId: values.thread, ...(values.stream ? { stream: true } : { text: await stdin() }), isError: Boolean(values.error) })); return;
   }
-  throw new Error('Commands: open, browse, status, request, name-thread, stream, reply, watch, stop, hook');
+  throw new Error('Commands: open, browse, status, network, request, name-thread, stream, reply, watch, stop, hook');
 }
 if (process.argv[1] && resolve(process.argv[1]) === cliPath) {
   main().catch(error => { process.stderr.write((error instanceof Error ? error.message : String(error)) + '\n'); process.exitCode = 1; });

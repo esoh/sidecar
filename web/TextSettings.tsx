@@ -37,14 +37,15 @@ function readHighlightIntensity() {
 
 export function TextSettings({ version }: { version?: string }) {
   const dialog = useRef<HTMLDialogElement>(null);
-  const [network, setNetwork] = useState<{ enabled: boolean; urls: string[]; isLocal: boolean; passphrase?: string | null } | null>(null);
+  const [network, setNetwork] = useState<{ enabled: boolean; urls: string[]; isLocal: boolean; publicUrl: string | null; tunnelTarget?: string | null; passphrase?: string | null } | null>(null);
   const [passphrase, setPassphrase] = useState('');
+  const [publicUrl, setPublicUrl] = useState('');
   const [networkError, setNetworkError] = useState(''), [isUpdatingNetwork, setUpdatingNetwork] = useState(false), [copiedUrl, setCopiedUrl] = useState('');
-  async function updateNetwork(enabled?: boolean, nextPassphrase?: string) {
+  async function updateNetwork(enabled?: boolean, changes?: { passphrase?: string; publicUrl?: string }) {
     setUpdatingNetwork(true); setNetworkError(''); setCopiedUrl('');
     try {
-      const next = await api<NonNullable<typeof network>>('/api/network', enabled === undefined ? undefined : { enabled, ...(nextPassphrase === undefined ? {} : { passphrase: nextPassphrase }) });
-      setNetwork(next); setPassphrase(next.passphrase ?? '');
+      const next = await api<NonNullable<typeof network>>('/api/network', enabled === undefined ? undefined : { enabled, ...changes });
+      setNetwork(next); setPassphrase(next.passphrase ?? ''); setPublicUrl(next.publicUrl ?? '');
     }
     catch (reason) { setNetworkError(errorText(reason)); }
     finally { setUpdatingNetwork(false); }
@@ -83,11 +84,22 @@ export function TextSettings({ version }: { version?: string }) {
             <label><input type="checkbox" checked={network.enabled} disabled={isUpdatingNetwork || !network.isLocal} onChange={event => { void updateNetwork(event.target.checked); }} />Allow access on local network</label>
             <p>{network.isLocal ? 'Requires the passphrase below. Network access turns off when Sidecar restarts.' : 'Manage network access from Sidecar on your Mac.'}</p>
             {network.enabled && network.isLocal && <div className="network-passphrase">
-              <label>Passphrase<input aria-label="Network passphrase" value={passphrase} minLength={8} maxLength={128} spellCheck={false} autoComplete="off" onChange={event => setPassphrase(event.target.value)} /></label>
-              <button type="button" disabled={isUpdatingNetwork || passphrase === network.passphrase || passphrase.length < 8} onClick={() => { void updateNetwork(true, passphrase); }}>Save passphrase</button>
+              <label>Passphrase<input aria-label="Network passphrase" disabled={isUpdatingNetwork} value={passphrase} minLength={8} maxLength={128} spellCheck={false} autoComplete="off" onChange={event => setPassphrase(event.target.value)} /></label>
+              <button type="button" disabled={isUpdatingNetwork || passphrase === network.passphrase || passphrase.length < 8} onClick={() => { void updateNetwork(true, { passphrase }); }}>Save passphrase</button>
               <p>Changing it signs out remembered browsers.</p>
             </div>}
-            {network.urls.map(base => {
+            {network.enabled && network.isLocal && network.tunnelTarget && <div className="network-passphrase network-tunnel">
+              <h3>Internet (ngrok)</h3>
+              <p>Ask your agent to open Sidecar through ngrok, or run this on your Mac and save the HTTPS address it prints.</p>
+              <div className="network-link"><input aria-label="ngrok command" readOnly value={`ngrok http ${network.tunnelTarget} --inspect=false`} /><button type="button" onClick={async () => {
+                const command = `ngrok http ${network.tunnelTarget} --inspect=false`;
+                if (await copyTextToClipboard(command)) setCopiedUrl(command);
+                else setNetworkError('Could not copy. Select the command to copy it.');
+              }}>{copiedUrl.startsWith('ngrok ') ? 'Copied' : 'Copy command'}</button></div>
+              <label>Public HTTPS URL<input type="url" aria-label="Public HTTPS URL" disabled={isUpdatingNetwork} value={publicUrl} placeholder="https://your-domain.ngrok-free.app" autoComplete="off" spellCheck={false} onChange={event => setPublicUrl(event.target.value)} /></label>
+              <button type="button" disabled={isUpdatingNetwork || publicUrl === (network.publicUrl ?? '')} onClick={() => { void updateNetwork(true, { publicUrl }); }}>Save URL</button>
+            </div>}
+            {[...network.urls, ...(network.publicUrl ? [network.publicUrl] : [])].map(base => {
               const url = base + '/' + location.search + location.hash;
               return <div className="network-link" key={base}><a href={url} target="_blank" rel="noopener noreferrer">{url}</a><button type="button" onClick={async () => {
                 if (await copyTextToClipboard(url)) { setCopiedUrl(url); setNetworkError(''); }
