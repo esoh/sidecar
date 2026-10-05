@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import Highlighter from '@plannotator/web-highlighter';
 import type { Quote, RequestRecord, Thread } from '../src/store.ts';
 import { api, errorText, type ViewerState, type ClosedDocument } from './api.ts';
+import { randomId } from './id.ts';
 import { confirmCloseDocument } from './close-document.ts';
 import {
   AgentStatus,
@@ -644,7 +645,7 @@ function App() {
     try {
       let target = activeThreadId;
       if (!target) {
-        fileThread.current ??= api<Thread>('/api/threads', { id: crypto.randomUUID(), documentId });
+        fileThread.current ??= api<Thread>('/api/threads', { id: randomId(), documentId });
         const thread = await fileThread.current;
         setState(previous => previous ? { ...previous, threads: { ...previous.threads, [thread.id]: thread } } : previous);
         target = thread.id;

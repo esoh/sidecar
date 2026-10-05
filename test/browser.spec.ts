@@ -37,6 +37,60 @@ async function answer(text: string) {
   await f.agent('/agent/replies', { requestId: request.id, documentId: request.documentId, threadId: request.threadId, text });
 }
 
+test('phone access enables from settings and sends conversations over plain LAN HTTP', { tag: '@manual-delivery' }, async ({ page, browser }) => {
+  test.setTimeout(30000);
+  const doc = await f.register('phone.md', '# Phone review\n\nHello from the same document.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const setting = page.getByRole('checkbox', { name: 'Allow access on local network' });
+  await expect(setting).not.toBeChecked(); await setting.click();
+  await expect(setting).toBeChecked();
+  const link = page.getByRole('link', { name: /^http:\/\// }).first();
+  await expect(link).toBeVisible();
+  const phoneContext = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  cleanup.unshift(() => phoneContext.close());
+  const phone = await phoneContext.newPage();
+  phone.on('pageerror', error => pageErrors.push(error.message));
+  await phone.goto((await link.getAttribute('href'))!);
+  await phone.getByLabel('Passphrase', { exact: true }).fill('wrong phrase');
+  await phone.getByRole('button', { name: 'Unlock', exact: true }).click();
+  await expect(phone.getByRole('alert')).toContainText('Incorrect passphrase');
+  await phone.getByLabel('Passphrase', { exact: true }).fill(await page.getByLabel('Network passphrase', { exact: true }).inputValue());
+  await phone.getByRole('button', { name: 'Unlock', exact: true }).click();
+  expect(await phone.evaluate(() => window.isSecureContext)).toBe(false);
+  expect(await phone.evaluate(() => typeof crypto.randomUUID)).toBe('undefined');
+  await phone.getByRole('button', { name: 'Show conversations', exact: true }).click();
+  await expect(phone.getByLabel('Message', { exact: true })).toBeVisible();
+  const input = phone.getByLabel('Message', { exact: true });
+  await input.fill('Can you read this from my phone?'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer('Yes, **same document and agent**.');
+  await expect(phone.locator('.sidebar').getByText('same document and agent', { exact: true })).toBeVisible();
+  await phone.getByRole('button', { name: 'Threads', exact: true }).click();
+  await phone.getByRole('button', { name: 'New conversation', exact: true }).click();
+  await input.fill('Second thread from the phone'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer('Second thread works too.');
+  await expect(phone.getByText('Second thread works too.', { exact: true })).toBeVisible();
+  await phone.getByRole('button', { name: 'Hide conversations', exact: true }).click();
+  await phone.getByRole('button', { name: 'Copy file', exact: true }).click();
+  await expect(phone.getByRole('button', { name: 'Copied!', exact: true })).toBeVisible();
+  await phone.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(phone.getByRole('checkbox', { name: 'Allow access on local network' })).toBeDisabled();
+  await page.getByLabel('Network passphrase', { exact: true }).fill('my new home phrase');
+  await page.getByRole('button', { name: 'Save passphrase', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Save passphrase', exact: true })).toBeDisabled();
+  await phone.reload();
+  await expect(phone.getByLabel('Passphrase', { exact: true })).toBeVisible();
+  await phone.getByLabel('Passphrase', { exact: true }).fill('my new home phrase');
+  await phone.getByRole('button', { name: 'Unlock', exact: true }).click();
+  await expect(phone.getByRole('button', { name: 'Show conversations', exact: true })).toBeVisible();
+  await setting.click();
+  await expect(setting).not.toBeChecked();
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
+});
+
 async function proposalReply(page: Page, markdown = '# Retry policy\n\nThe client retries **failed requests** three times.\n') {
   const doc = await f.register('proposal.md', markdown);
   await page.goto(`${f.url}/?document=${doc.id}`);

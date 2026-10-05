@@ -3,7 +3,8 @@ import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readFile, writeFile, realpath, mkdir, rm, stat } from 'node:fs/promises';
+import { networkInterfaces } from 'node:os';
+import { readFile, writeFile, realpath, mkdir, rm, stat, rename } from 'node:fs/promises';
 import { basename, join, dirname, relative, isAbsolute, extname } from 'node:path';
 import { notifyCodex } from './agent.ts';
 import { reconcileCodexQueue } from './codex-queue.ts';
@@ -74,6 +75,12 @@ function sameSecret(value: unknown, secret: string): boolean {
 function json(response: ServerResponse, value: unknown, status = 200): void {
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   response.end(JSON.stringify(value));
+}
+function closeListener(server: ReturnType<typeof createServer>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => server.closeAllConnections(), 100); timer.unref();
+    server.close(error => { clearTimeout(timer); if (error) reject(error); else resolve(); });
+  });
 }
 function requestContext(state: State, id: string) {
   const requests = requestBatch(state, id), request = get(state.requests, id), thread = get(state.threads, request.threadId);
@@ -529,24 +536,111 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     });
   }
 
-  const server = createServer((request, response) => { void handle(request, response); });
-  server.requestTimeout = 10000;
-  server.headersTimeout = 10000;
-  async function handle(request: IncomingMessage, response: ServerResponse) {
+  function createListener(isLan = false) {
+    const listener = createServer((request, response) => { void handle(request, response, isLan); });
+    listener.requestTimeout = 10000;
+    listener.headersTimeout = 10000;
+    return listener;
+  }
+  const server = createListener();
+  let lanServer: ReturnType<typeof createServer> | undefined;
+  let lanChange: Promise<void> = Promise.resolve();
+  let lanAuth: { passphrase: string; token: string } | undefined;
+  let failedLogins = 0, loginWindow = 0;
+  const lanCookieName = `${cookieName}_lan`;
+  // No Sidecar sign-in timeout. Renew persistent browser storage on authenticated visits.
+  const networkCookie = () => `${lanCookieName}=${lanAuth?.token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=34560000`;
+  async function prepareNetworkAuth(passphrase?: string) {
+    const path = join(directory, 'network-auth.json');
+    if (!lanAuth) {
+      try {
+        const saved: unknown = JSON.parse(await readFile(path, 'utf8'));
+        if (!isObject(saved) || typeof saved.passphrase !== 'string' || saved.passphrase.length < 8 || saved.passphrase.length > 128 || typeof saved.token !== 'string' || !/^[a-f0-9]{64}$/.test(saved.token)) throw new Error('Saved network credentials are invalid');
+        lanAuth = { passphrase: saved.passphrase, token: saved.token };
+      } catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error; }
+    }
+    if (lanAuth && (passphrase === undefined || passphrase === lanAuth.passphrase)) return;
+    const next = { passphrase: passphrase ?? randomBytes(6).toString('hex'), token: randomBytes(32).toString('hex') };
+    const temporary = `${path}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, JSON.stringify(next), { mode: 0o600, flag: 'wx' });
+      await rename(temporary, path);
+    } finally { await rm(temporary, { force: true }); }
+    lanAuth = next; failedLogins = 0;
+    // Revoke connected browsers too, so an old SSE connection cannot keep receiving updates.
+    lanServer?.closeAllConnections();
+  }
+  const lanAddresses = () => [...new Set(Object.values(networkInterfaces()).flatMap(addresses =>
+    addresses?.filter(address => address.family === 'IPv4' && !address.internal).map(address => address.address) ?? []))];
+  function networkStatus(isLocal: boolean) {
+    const address = lanServer?.address();
+    const urls = address && typeof address !== 'string' ? lanAddresses().map(ip => `http://${ip}:${address.port}`) : [];
+    return { enabled: !!lanServer, urls, isLocal, ...(isLocal ? { passphrase: lanServer ? lanAuth?.passphrase ?? null : null } : {}) };
+  }
+  function setNetworkAccess(enabled: boolean, passphrase?: string) {
+    if (passphrase !== undefined && (passphrase.length < 8 || passphrase.length > 128)) throw new DomainError('Use a passphrase between 8 and 128 characters.');
+    // Serialize toggles so a late enable cannot reopen access after Disable.
+    const change = lanChange.then(async () => {
+      if (closed) throw new DomainError('Sidecar is stopping', 503);
+      if (enabled) await prepareNetworkAuth(passphrase);
+      if (enabled && !lanServer) {
+        if (!lanAddresses().length) throw new DomainError('No local IPv4 network found. Connect to Wi-Fi or Ethernet and try again.');
+        const listener = createListener(true);
+        await new Promise<void>((resolve, reject) => {
+          listener.once('error', reject);
+          listener.listen(0, '0.0.0.0', () => { listener.off('error', reject); resolve(); });
+        });
+        lanServer = listener;
+      } else if (!enabled && lanServer) {
+        const listener = lanServer; lanServer = undefined;
+        await closeListener(listener);
+      }
+    });
+    lanChange = change.catch(() => {});
+    return change;
+  }
+  async function handle(request: IncomingMessage, response: ServerResponse, isLan: boolean) {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
     response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
     try {
       if (closed) throw new DomainError('Sidecar is stopping. Reopen it from your agent.', 503);
-      if (request.headers.host !== new URL(url).host) throw new DomainError('Invalid host', 403);
-      if (request.headers.origin !== undefined && request.headers.origin !== url) throw new DomainError('Foreign origin', 403);
-      const target = new URL(request.url ?? '/', url);
-      if (target.origin !== url) throw new DomainError('Foreign request target', 403);
+      const origin = isLan ? `http://${request.headers.host}` : url;
+      if (isLan ? !networkStatus(false).urls.includes(origin) : request.headers.host !== new URL(url).host) throw new DomainError('Invalid host', 403);
+      if (request.headers.origin !== undefined && request.headers.origin !== origin) throw new DomainError('Foreign origin', 403);
+      const target = new URL(request.url ?? '/', origin);
+      if (target.origin !== origin) throw new DomainError('Foreign request target', 403);
       const path = decodeURIComponent(target.pathname);
       const method = request.method ?? 'GET';
+      const name = isLan ? lanCookieName : cookieName;
+      const cookie = request.headers.cookie?.split(';').map(part => part.trim()).find(part => part.startsWith(`${name}=`))?.slice(name.length + 1);
+      const hasViewer = isLan ? !!lanAuth && sameSecret(cookie, lanAuth.token) : sameSecret(cookie, viewerToken);
+      if (isLan && hasViewer) response.setHeader('Set-Cookie', networkCookie());
+      async function unlockPage(error = '', status = 200) {
+        response.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+        response.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' });
+        response.end((await readFile(new URL('../web/unlock.html', import.meta.url), 'utf8')).replace('<!-- error -->', error ? `<p role="alert">${error}</p>` : ''));
+      }
+      if (isLan && path === '/' && method === 'POST') {
+        if (request.headers.origin !== origin) throw new DomainError('Origin required', 403);
+        if (request.headers['content-type']?.split(';')[0] !== 'application/x-www-form-urlencoded') throw new DomainError('Expected a login form', 415);
+        const chunks: Buffer[] = []; let size = 0;
+        for await (const chunk of request) { size += chunk.length; if (size > 2048) throw new DomainError('Login form is too large', 413); chunks.push(chunk); }
+        const form = new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
+        // ponytail: one login budget per viewer; use per-client limits if shared beyond a home network.
+        if (Date.now() - loginWindow >= 60000) { failedLogins = 0; loginWindow = Date.now(); }
+        if (failedLogins >= 10) { response.setHeader('Retry-After', '60'); await unlockPage('Too many attempts. Try again in a minute.', 429); return; }
+        if (!lanAuth || !sameSecret(form.get('passphrase'), lanAuth.passphrase)) {
+          failedLogins++; await unlockPage('Incorrect passphrase.', 401); return;
+        }
+        failedLogins = 0;
+        response.setHeader('Set-Cookie', networkCookie());
+        response.writeHead(303, { Location: '/' + target.search }); response.end(); return;
+      }
       if (method === 'GET' && path === '/') {
         if (['cross-site', 'same-site'].includes(String(request.headers['sec-fetch-site']))) throw new DomainError('Open Sidecar from the agent', 403);
-        response.setHeader('Set-Cookie', `${cookieName}=${viewerToken}; HttpOnly; SameSite=Strict; Path=/`);
+        if (isLan && !hasViewer) { await unlockPage(); return; }
+        if (!isLan) response.setHeader('Set-Cookie', `${cookieName}=${viewerToken}; HttpOnly; SameSite=Strict; Path=/`);
         response.setHeader('Content-Type', 'text/html; charset=utf-8');
         let html = '<!doctype html><html lang="en"><title>Sidecar</title><body><p>Sidecar document server is running.</p></body></html>';
         try { html = await readFile(new URL('../web/index.html', import.meta.url), 'utf8'); }
@@ -556,11 +650,11 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       }
       const isAgent = path.startsWith('/agent/');
       if (isAgent) {
+        if (isLan) throw new DomainError('Agent endpoints are local only', 403);
         if (!sameSecret(request.headers['x-sidecar-token'], agentToken)) throw new DomainError('Agent capability required', 403);
       } else {
-        const cookie = request.headers.cookie?.split(';').map(part => part.trim()).find(part => part.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1);
-        if (!sameSecret(cookie, viewerToken)) throw new DomainError('Open Sidecar from the agent', 403);
-        if (method !== 'GET' && method !== 'HEAD' && request.headers.origin !== url) throw new DomainError('Origin required', 403);
+        if (!hasViewer) throw new DomainError(isLan ? 'Reload this page to enter the network passphrase.' : 'Open Sidecar from the agent', isLan ? 401 : 403);
+        if (method !== 'GET' && method !== 'HEAD' && request.headers.origin !== origin) throw new DomainError('Origin required', 403);
       }
       if (method === 'GET' && path === '/app.js') {
         response.setHeader('Content-Type', 'text/javascript; charset=utf-8');
@@ -616,7 +710,13 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         return;
       }
       if (method === 'GET' && path === '/api/state') { json(response, snapshot()); return; }
-      if (method === 'GET' && path === '/api/library') { json(response, await listLibrary(dirname(directory))); return; }
+      if (method === 'GET' && path === '/api/network') { json(response, networkStatus(!isLan)); return; }
+      if (method === 'GET' && path === '/api/library') {
+        const library = await listLibrary(dirname(directory));
+        // Other owners have their own opt-in listener; never send a phone to its own localhost.
+        if (isLan) for (const session of library.sessions) session.url = session.ownerKey === ownerKey(owner) ? origin : null;
+        json(response, library); return;
+      }
       if (method === 'GET' && (path === '/api/files' || path === '/api/files/content' || path === '/api/files/code')) {
         const document = get(store.read().documents, target.searchParams.get('document') ?? '');
         if (!document.workspace) throw new DomainError('This document has no recorded workspace. Reopen it from your agent.', 404);
@@ -697,6 +797,11 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       if (method === 'GET' && path === '/agent/status') { json(response, { ownerKey: ownerKey(owner), instanceId, state: 'running', connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError }); return; }
       if (method === 'POST' && path === '/agent/stop') { json(response, { ok: true }); setImmediate(() => { void close(); }); return; }
       const body = ['POST', 'PATCH'].includes(method) ? await bodyOf(request) : {};
+      if (method === 'POST' && path === '/api/network') {
+        if (isLan) throw new DomainError('Manage network access from the local viewer', 403);
+        await setNetworkAccess(boolean(body, 'enabled'), optionalText(body, 'passphrase'));
+        json(response, networkStatus(true)); return;
+      }
       const agentClose = path.match(/^\/agent\/documents\/([^/]+)\/close$/);
       if (method === 'POST' && agentClose) {
         if (body.instanceId !== instanceId) throw new DomainError('The original viewer changed. Refresh the list and try again.', 409);
@@ -998,10 +1103,9 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     if (closePromise) return closePromise;
     closed = true; stopObserver?.(); clearStop(); clearTimeout(streamTimer); transportAbort.abort(); clearInterval(polling); clearInterval(heartbeat); clearInterval(activityPolling);
     for (const response of [...viewers, ...agents.keys()]) response.end();
-    closePromise = new Promise<void>((resolveClose, reject) => {
-      const timer = setTimeout(() => server.closeAllConnections(), 100); timer.unref();
-      server.close(error => { clearTimeout(timer); if (error) reject(error); else resolveClose(); });
-    });
+    closePromise = Promise.all([closeListener(server), lanChange.then(async () => {
+      if (lanServer) { const listener = lanServer; lanServer = undefined; await closeListener(listener); }
+    })]).then(() => {});
     await closePromise; await dispatchWork; await nativeQueueWork; await resetWork; await captureWork; await finalizing; await proposalService.drain(); finish();
   }
   changed();

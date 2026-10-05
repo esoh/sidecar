@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Popover, PopoverContent, PopoverTrigger } from '@plannotator/ui/components/Popover';
+import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
 import type { Owner } from '../src/store.ts';
 import { api, errorText, type ViewerState } from './api.ts';
 
@@ -14,8 +15,8 @@ export function AgentSession({ owner, reset }: { owner: Owner; reset?: ViewerSta
       <PopoverContent className="agent-session-popover" align="end" sideOffset={8} aria-label={`${name} session`}>
         <span>Session ID</span>
         <div><code>{owner.sessionId}</code><button type="button" onClick={async () => {
-          try { await navigator.clipboard.writeText(owner.sessionId); setCopied(true); setError(''); }
-          catch { setError('Copy failed. Select the session ID to copy it.'); }
+          if (await copyTextToClipboard(owner.sessionId)) { setCopied(true); setError(''); }
+          else setError('Copy failed. Select the session ID to copy it.');
         }}>{copied ? 'Copied' : 'Copy'}</button></div>
         {reset !== undefined && <button type="button" className="agent-reset" disabled={resetting}
           title="Interrupt this agent if working and release stuck requests. Saved messages stay."
