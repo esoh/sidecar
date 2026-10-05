@@ -6,6 +6,7 @@ import { Tooltip } from '@plannotator/ui/components/Tooltip';
 import { Popover, PopoverContent, PopoverTrigger } from '@plannotator/ui/components/Popover';
 import type { Message, MessageSelection as SavedSelection, Quote, RequestRecord, Thread } from '../src/store.ts';
 import { api, errorText, type ViewerState } from './api.ts';
+import { randomId } from './id.ts';
 import { AgentSession } from './AgentSession.tsx';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
 import { copyMessage, messagePreview } from './message-copy.ts';
@@ -125,7 +126,7 @@ export function QuestionForm({
         if (disabled || sending.current || !text.trim() || !documentId) return;
         const body = { documentId, text, ...(threadId ? { threadId } : {}), ...attachment };
         const signature = JSON.stringify(body);
-        if (retry.current?.signature !== signature) retry.current = { signature, id: crypto.randomUUID() };
+        if (retry.current?.signature !== signature) retry.current = { signature, id: randomId() };
         const submittedDraft = { text, retry: retry.current, ...attachment };
         updateDraft(submittedDraft, true);
         sending.current = true;
@@ -554,7 +555,7 @@ export function ConversationSidebar({
     if (createBusy.current || !documentId) return;
     createBusy.current = true;
     setCreating(true);
-    creatingId.current ??= crypto.randomUUID();
+    creatingId.current ??= randomId();
     try {
       const thread = await api<Thread>('/api/threads', { id: creatingId.current, documentId });
       creatingId.current = null;

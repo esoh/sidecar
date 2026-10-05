@@ -86,6 +86,18 @@ Only one process writes an owner's state. Dead owner locks are recovered without
 
 Standalone HTML input, independent model sessions, and compaction cancellation are outside this version. The dated [acceptance record](docs/acceptance.md) covers both native agents and the remaining limits.
 
+## Open on a phone or another computer
+
+In the Mac's viewer, open **Settings → Open on phone → Allow access on local network**. Open the displayed address on another device connected to the same network and enter the generated passphrase. It uses the same documents, threads, and attached Codex or Claude conversation. Change the passphrase in the same settings (8–128 characters); saving it signs out network browsers, including connected streams, without affecting localhost access or the agent.
+
+Network access is off by default and turns off when Sidecar stops or restarts. The setting opens a separate IPv4 listener; turning it off disconnects network viewers without restarting the local app or interrupting the agent. Keep the Mac awake and allow Node through the firewall if macOS asks. Guest Wi-Fi isolation can prevent devices from connecting.
+
+Trusted browsers stay signed in with no Sidecar time limit, including after app restarts. Sidecar renews its persistent cookie on visits; browsers may still expire or clear their own storage. Changing the passphrase revokes all remembered browsers. Credentials are saved privately per owner in `network-auth.json`; localhost access does not require the passphrase.
+
+Anyone with the passphrase can use the viewer, including sending requests to the agent, editing documents through proposals, browsing files, and closing saved documents. Use it on a trusted network. The agent credential and agent-only endpoints remain local; viewer cookies and same-origin checks also apply over the LAN. HTTP traffic, including the passphrase, is not encrypted.
+
+The phone's document library opens this agent's documents normally. Other agents' documents use read-only previews; enable access from their own viewer to interact with those agents. Unsent drafts and reading preferences stay in each browser. Rich-text copying falls back to plain text when the browser requires HTTPS.
+
 ## Browse all documents
 
 Ask Codex or Claude to “open Sidecar’s document library,” or run `sidecar browse` inside an agent’s native session environment. The explicit form is `sidecar browse --agent codex|claude --session NATIVE_UUID`; `--no-browser` prints its URL. No file path is needed. **Settings → View all documents** opens the same library in a new tab, preserving the current viewer and draft.

@@ -1479,6 +1479,14 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
     display: none;
   }
 }
+.network-settings p { font-size: 11px; line-height: 1.5; color: var(--subtle); margin: 4px 0; }
+.network-link { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.network-link a { min-width: 0; overflow-wrap: anywhere; font-size: 11px; color: var(--primary); }
+.network-link button { margin-left: auto; flex-shrink: 0; }
+.network-passphrase { margin: 8px 0; }
+.network-passphrase label { display: flex; gap: 8px; align-items: center; }
+.network-passphrase input { width: 100%; min-width: 0; font: 12px/1.5 monospace; padding: 5px 8px; border: 1px solid var(--border); border-radius: 4px; }
+.network-passphrase button { margin-top: 6px; }
 .file-refusal {
   display: flex;
   flex-wrap: wrap;

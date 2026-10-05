@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Unlock Sidecar</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100dvh; display: grid; place-items: center; padding: 24px; background: #18181b; color: #fafafa; font: 15px/1.5 system-ui, sans-serif; color-scheme: dark; }
+  main { width: min(100%, 340px); }
+  h1 { font-size: 24px; margin: 0 0 24px; }
+  label { display: block; }
+  input[type=password] { width: 100%; font: inherit; padding: 10px 12px; margin: 8px 0 16px; border: 1px solid #52525b; border-radius: 6px; background: #27272a; }
+  .remember { font-size: 13px; color: #d4d4d8; }
+  button { margin-top: 20px; width: 100%; padding: 10px; border: 0; border-radius: 6px; background: #c4b5fd; color: #18181b; font: inherit; cursor: pointer; }
+  [role=alert] { color: #fca5a5; }
+</style>
+</head>
+<body><main>
+  <h1>Sidecar</h1>
+  <!-- error -->
+  <form method="post">
+    <label>Passphrase<input name="passphrase" type="password" autocomplete="current-password" required maxlength="128" autofocus></label>
+    <p class="remember">This browser stays trusted until you change the passphrase or clear browser data.</p>
+    <button type="submit">Unlock</button>
+  </form>
+</main></body>
+</html>

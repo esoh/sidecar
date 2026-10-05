@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from 'react';
 import { guideLanguageForPath } from '@plannotator/core/guide-format';
+import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
 import type { CodeFileData, FilePreviewData } from '../src/files.ts';
 import { api, errorText } from './api.ts';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
@@ -54,8 +55,9 @@ export function FilePreview({ documentId, root, path, kind, refusal, revision, o
       <p>{refusal}</p>
       <p className="file-refusal">
         <code>{path}</code>
-        <button onClick={() => { void navigator.clipboard.writeText(path).then(() => setCopied(true)); }}>{isCopied ? 'Copied' : 'Copy path'}</button>
+        <button onClick={async () => { if (await copyTextToClipboard(path)) setCopied(true); else setError('Could not copy path.'); }}>{isCopied ? 'Copied' : 'Copy path'}</button>
       </p>
+      {error && <p role="alert">{error}</p>}
     </section>
   );
   return (

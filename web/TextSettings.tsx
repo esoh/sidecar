@@ -1,7 +1,9 @@
 import { createContext, useContext, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { storage } from '@plannotator/ui/utils/storage';
+import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
 import { Icon } from './conversations.tsx';
 import type { CopyFormat } from './message-copy.ts';
+import { api, errorText } from './api.ts';
 
 const MessageSettings = createContext({ copyFormat: 'markdown' as CopyFormat, windowMode: 'multiple', setCopyFormat: (_value: CopyFormat) => {}, setWindowMode: (_value: string) => {} });
 export const useMessageSettings = () => useContext(MessageSettings);
@@ -35,6 +37,18 @@ function readHighlightIntensity() {
 
 export function TextSettings({ version }: { version?: string }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const [network, setNetwork] = useState<{ enabled: boolean; urls: string[]; isLocal: boolean; passphrase?: string | null } | null>(null);
+  const [passphrase, setPassphrase] = useState('');
+  const [networkError, setNetworkError] = useState(''), [isUpdatingNetwork, setUpdatingNetwork] = useState(false), [copiedUrl, setCopiedUrl] = useState('');
+  async function updateNetwork(enabled?: boolean, nextPassphrase?: string) {
+    setUpdatingNetwork(true); setNetworkError(''); setCopiedUrl('');
+    try {
+      const next = await api<NonNullable<typeof network>>('/api/network', enabled === undefined ? undefined : { enabled, ...(nextPassphrase === undefined ? {} : { passphrase: nextPassphrase }) });
+      setNetwork(next); setPassphrase(next.passphrase ?? '');
+    }
+    catch (reason) { setNetworkError(errorText(reason)); }
+    finally { setUpdatingNetwork(false); }
+  }
   const { copyFormat, windowMode, setCopyFormat, setWindowMode } = useMessageSettings();
   const [highlightIntensity, setHighlightIntensity] = useState(readHighlightIntensity);
   useLayoutEffect(() => {
@@ -57,13 +71,32 @@ export function TextSettings({ version }: { version?: string }) {
   }, [sizes]);
   return (
     <>
-      <button className="settings-toggle" aria-label="Settings" title="Settings" onClick={() => dialog.current?.showModal()}>
+      <button className="settings-toggle" aria-label="Settings" title="Settings" onClick={() => { dialog.current?.showModal(); void updateNetwork(); }}>
         <Icon name="settings" />
       </button>
       <dialog ref={dialog} className="text-settings" aria-label="Reading settings" onClick={event => { if (event.target === event.currentTarget) dialog.current?.close(); }}>
         <div className="settings-content">
         <div className="settings-title"><h2>Settings</h2><button aria-label="Close settings" onClick={() => dialog.current?.close()}><Icon name="close" /></button></div>
         {!new URLSearchParams(location.search).has('library') && <a className="library-menu-link" href="/?library=1" target="_blank" rel="noopener noreferrer">View all documents</a>}
+        <fieldset className="message-settings network-settings"><legend>Open on phone</legend>
+          {network && <>
+            <label><input type="checkbox" checked={network.enabled} disabled={isUpdatingNetwork || !network.isLocal} onChange={event => { void updateNetwork(event.target.checked); }} />Allow access on local network</label>
+            <p>{network.isLocal ? 'Requires the passphrase below. Network access turns off when Sidecar restarts.' : 'Manage network access from Sidecar on your Mac.'}</p>
+            {network.enabled && network.isLocal && <div className="network-passphrase">
+              <label>Passphrase<input aria-label="Network passphrase" value={passphrase} minLength={8} maxLength={128} spellCheck={false} autoComplete="off" onChange={event => setPassphrase(event.target.value)} /></label>
+              <button type="button" disabled={isUpdatingNetwork || passphrase === network.passphrase || passphrase.length < 8} onClick={() => { void updateNetwork(true, passphrase); }}>Save passphrase</button>
+              <p>Changing it signs out remembered browsers.</p>
+            </div>}
+            {network.urls.map(base => {
+              const url = base + '/' + location.search + location.hash;
+              return <div className="network-link" key={base}><a href={url} target="_blank" rel="noopener noreferrer">{url}</a><button type="button" onClick={async () => {
+                if (await copyTextToClipboard(url)) { setCopiedUrl(url); setNetworkError(''); }
+                else setNetworkError('Could not copy. Select the address to copy it.');
+              }}>{copiedUrl === url ? 'Copied' : 'Copy'}</button></div>;
+            })}
+          </>}
+          {networkError && <p role="alert">{networkError}</p>}
+        </fieldset>
         <div className="text-settings-heading">
           <span>Text size</span>
           <button
