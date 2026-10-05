@@ -98,6 +98,25 @@ Anyone with the passphrase can use the viewer, including sending requests to the
 
 The phone's document library opens this agent's documents normally. Other agents' documents use read-only previews; enable access from their own viewer to interact with those agents. Unsent drafts and reading preferences stay in each browser. Rich-text copying falls back to plain text when the browser requires HTTPS.
 
+### Over the internet with ngrok
+
+Ask the attached agent: **“Open this Sidecar document through ngrok.”** The shared skill checks for ngrok and an existing matching tunnel, starts one when needed, and returns the public document URL and Sidecar passphrase. ngrok must already be installed and authenticated; the agent will explain missing setup rather than installing or replacing existing tunnels silently.
+
+For manual setup, enable **Allow access on local network** in Settings. Under **Internet (ngrok)**, run the displayed command, then paste ngrok's HTTPS address into **Public HTTPS URL** and save. Open the displayed public document link and enter the same passphrase. The command targets the separate protected port, disables request inspection, and preserves Host/Origin headers. Do not tunnel the regular localhost viewer port or use `--host-header=rewrite`.
+
+The equivalent owner-scoped commands are:
+
+```sh
+sidecar network --owner KEY                    # inspect current network settings
+sidecar network on --owner KEY                 # returns protected tunnelTarget
+ngrok http http://127.0.0.1:PROTECTED_PORT --inspect=false
+sidecar network on --owner KEY --public-url https://YOUR_NGROK_HOST
+sidecar network on --owner KEY --public-url '' # remove public access; keep LAN
+sidecar network off --owner KEY                # close all network access
+```
+
+The public address is an explicit allowlist entry, not a tunnel launcher. Only HTTPS requests proxied through loopback to the protected listener are accepted for it. Passphrase login, same-origin checks, and the local-only agent boundary remain in effect; HTTPS viewer cookies are Secure. Keep the Mac awake and Sidecar, its native agent, and ngrok running. Disabling network access or restarting Sidecar clears the public address and disconnects remote viewers; stop your ngrok process separately. After restart, check the new protected port before reusing a tunnel. HTTPS encrypts the public connection; ngrok terminates TLS and forwards it over its tunnel to this Mac.
+
 ## Browse all documents
 
 Ask Codex or Claude to “open Sidecar’s document library,” or run `sidecar browse` inside an agent’s native session environment. The explicit form is `sidecar browse --agent codex|claude --session NATIVE_UUID`; `--no-browser` prints its URL. No file path is needed. **Settings → View all documents** opens the same library in a new tab, preserving the current viewer and draft.

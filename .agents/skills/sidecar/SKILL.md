@@ -1,6 +1,6 @@
 ---
 name: sidecar
-description: Use when the user wants to browse saved Sidecar documents, open Markdown for live questions or revisions, or handle a sidecar.request notification.
+description: Use when the user wants to browse saved Sidecar documents, open Markdown for live questions or revisions, access Sidecar from a phone or through ngrok, or handle a sidecar.request notification.
 hooks:
   MessageDisplay:
     - hooks:
@@ -93,6 +93,20 @@ For Claude, invoke this skill through the native Skill tool so its streaming and
 To open the all-agent library without registering a file, run `sidecar browse --agent codex|claude --session UUID`. Use this conversation’s native identity as above; never substitute a document’s other owner. `sidecar browse` can infer the agent when exactly one native session environment is present. `--no-browser` prints the URL without opening it. The viewer’s Settings menu also has **View all documents**, which opens the same library in a new tab and preserves the current draft.
 
 The library lists saved documents across local Codex and Claude sessions. A live entry opens its original Sidecar viewer. A stopped session opens a read-only document preview; browsing does not start or resume its coding agent, claim requests, or transfer ownership. Ask the user to return to the original agent for conversation or revision work. Clicking a **Codex/Claude** label shows the original session ID and a Copy button. Browsing alone does not authorize this agent to answer another owner’s threads or re-arm its watcher.
+
+## Phone and internet access
+
+Only enable remote access when the user asks. Use this conversation's ownerKey; the same commands work in Codex and Claude. `sidecar network --owner KEY` reads status; `sidecar network on --owner KEY` enables the passphrase-protected network listener. The result includes LAN `urls`, `passphrase`, `tunnelTarget`, and `publicUrl`. For home Wi-Fi, share the LAN document URL and passphrase. Network access is off after an app restart.
+
+When asked to run ngrok or access Sidecar over the internet:
+
+1. Check `ngrok version` and `ngrok config check`. If missing or not authenticated, explain the specific install/account setup needed; do not print ngrok credentials, silently install software, or create an account. Use the existing authenticated configuration.
+2. Enable Sidecar network access with `network on --owner KEY`. **Tunnel only the returned `tunnelTarget`** (the protected listener on loopback), never the ordinary localhost viewer URL, which has no passphrase. Keep the returned target and passphrase for this owner.
+3. Inspect running ngrok endpoints through its local agent API (normally `http://127.0.0.1:4040/api/tunnels`; a custom `web_addr` can change this). Reuse an HTTPS endpoint only when its upstream matches this exact `tunnelTarget`, request inspection is disabled, and it preserves Host/Origin. Leave unrelated tunnels and processes alone. If none matches, run `ngrok http TUNNEL_TARGET --inspect=false` as a background command using the host's long-running command support; retain its process handle. Read its HTTPS URL from the process output/log or local API, checking the upstream again. If a running ngrok instance or account limit prevents a new tunnel, report that conflict rather than stopping or retargeting existing tunnels.
+4. Run `sidecar network on --owner KEY --public-url https://THE_NGROK_HOST`. Preserve ngrok's default Host, Origin, and `X-Forwarded-Proto: https`; do not use `--host-header=rewrite` or strip Origin checks. Sidecar accepts only that explicit HTTPS origin through a loopback proxy. The native `/agent/*` routes remain inaccessible through the tunnel.
+5. Verify the public URL shows Sidecar's passphrase page, then provide `PUBLIC_URL/?document=DOCUMENT_ID` (or `/?library=1`) and the passphrase to the user. A configured URL alone does not prove the tunnel is running. ngrok may show its own visit interstitial first. The Mac, Sidecar, native agent, and tunnel must remain running.
+
+`sidecar network on --owner KEY --public-url ''` removes the allowed public origin while keeping LAN access. `sidecar network off --owner KEY` closes all network access without stopping the agent or local viewer. Stop only the ngrok process/endpoint created for this task when requested; never kill all ngrok processes. Public-URL configuration also clears on disable/restart. A tunnel still pointing to an old port must be checked again after restart. The browser's Settings → Open on phone exposes the same configuration and passphrase; changing the passphrase revokes remembered remote browsers.
 
 ## Handle a notification
 

@@ -546,10 +546,11 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   let lanServer: ReturnType<typeof createServer> | undefined;
   let lanChange: Promise<void> = Promise.resolve();
   let lanAuth: { passphrase: string; token: string } | undefined;
+  let publicUrl: string | null = null;
   let failedLogins = 0, loginWindow = 0;
   const lanCookieName = `${cookieName}_lan`;
   // No Sidecar sign-in timeout. Renew persistent browser storage on authenticated visits.
-  const networkCookie = () => `${lanCookieName}=${lanAuth?.token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=34560000`;
+  const networkCookie = (isSecure: boolean) => `${lanCookieName}=${lanAuth?.token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=34560000${isSecure ? '; Secure' : ''}`;
   async function prepareNetworkAuth(passphrase?: string) {
     const path = join(directory, 'network-auth.json');
     if (!lanAuth) {
@@ -575,9 +576,19 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   function networkStatus(isLocal: boolean) {
     const address = lanServer?.address();
     const urls = address && typeof address !== 'string' ? lanAddresses().map(ip => `http://${ip}:${address.port}`) : [];
-    return { enabled: !!lanServer, urls, isLocal, ...(isLocal ? { passphrase: lanServer ? lanAuth?.passphrase ?? null : null } : {}) };
+    return { enabled: !!lanServer, urls, publicUrl, isLocal, ...(isLocal ? {
+      passphrase: lanServer ? lanAuth?.passphrase ?? null : null,
+      tunnelTarget: address && typeof address !== 'string' ? `http://127.0.0.1:${address.port}` : null,
+    } : {}) };
   }
-  function setNetworkAccess(enabled: boolean, passphrase?: string) {
+  function setNetworkAccess(enabled: boolean, passphrase?: string, nextPublicUrl?: string) {
+    if (nextPublicUrl) {
+      let parsed: URL;
+      try { parsed = new URL(nextPublicUrl); } catch { throw new DomainError('Enter an HTTPS address without a path, query, or fragment.'); }
+      if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash || nextPublicUrl.length > 2048)
+        throw new DomainError('Enter an HTTPS address without credentials, a path, query, or fragment.');
+      nextPublicUrl = parsed.origin;
+    }
     if (passphrase !== undefined && (passphrase.length < 8 || passphrase.length > 128)) throw new DomainError('Use a passphrase between 8 and 128 characters.');
     // Serialize toggles so a late enable cannot reopen access after Disable.
     const change = lanChange.then(async () => {
@@ -595,6 +606,8 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         const listener = lanServer; lanServer = undefined;
         await closeListener(listener);
       }
+      const next = enabled ? nextPublicUrl === undefined ? publicUrl : nextPublicUrl || null : null;
+      if (next !== publicUrl) { publicUrl = next; lanServer?.closeAllConnections(); }
     });
     lanChange = change.catch(() => {});
     return change;
@@ -605,8 +618,13 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
     try {
       if (closed) throw new DomainError('Sidecar is stopping. Reopen it from your agent.', 503);
-      const origin = isLan ? `http://${request.headers.host}` : url;
-      if (isLan ? !networkStatus(false).urls.includes(origin) : request.headers.host !== new URL(url).host) throw new DomainError('Invalid host', 403);
+      const isTunnel = !!(isLan && publicUrl && request.headers.host === new URL(publicUrl).host);
+      // Only a loopback proxy for the explicitly allowed HTTPS origin can use this route.
+      // Forwarded headers never select an origin or grant localhost/agent privileges.
+      if (isTunnel && (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(request.socket.remoteAddress ?? '') || request.headers['x-forwarded-proto'] !== 'https'))
+        throw new DomainError('Use an HTTPS tunnel forwarded through localhost', 403);
+      const origin = isTunnel && publicUrl ? publicUrl : isLan ? `http://${request.headers.host}` : url;
+      if (isLan ? !isTunnel && !networkStatus(false).urls.includes(origin) : request.headers.host !== new URL(url).host) throw new DomainError('Invalid host', 403);
       if (request.headers.origin !== undefined && request.headers.origin !== origin) throw new DomainError('Foreign origin', 403);
       const target = new URL(request.url ?? '/', origin);
       if (target.origin !== origin) throw new DomainError('Foreign request target', 403);
@@ -615,7 +633,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       const name = isLan ? lanCookieName : cookieName;
       const cookie = request.headers.cookie?.split(';').map(part => part.trim()).find(part => part.startsWith(`${name}=`))?.slice(name.length + 1);
       const hasViewer = isLan ? !!lanAuth && sameSecret(cookie, lanAuth.token) : sameSecret(cookie, viewerToken);
-      if (isLan && hasViewer) response.setHeader('Set-Cookie', networkCookie());
+      if (isLan && hasViewer) response.setHeader('Set-Cookie', networkCookie(isTunnel));
       async function unlockPage(error = '', status = 200) {
         response.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
         response.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -627,18 +645,18 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         const chunks: Buffer[] = []; let size = 0;
         for await (const chunk of request) { size += chunk.length; if (size > 2048) throw new DomainError('Login form is too large', 413); chunks.push(chunk); }
         const form = new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
-        // ponytail: one login budget per viewer; use per-client limits if shared beyond a home network.
+        // One budget per viewer also limits distributed guesses at the shared passphrase.
         if (Date.now() - loginWindow >= 60000) { failedLogins = 0; loginWindow = Date.now(); }
         if (failedLogins >= 10) { response.setHeader('Retry-After', '60'); await unlockPage('Too many attempts. Try again in a minute.', 429); return; }
         if (!lanAuth || !sameSecret(form.get('passphrase'), lanAuth.passphrase)) {
           failedLogins++; await unlockPage('Incorrect passphrase.', 401); return;
         }
         failedLogins = 0;
-        response.setHeader('Set-Cookie', networkCookie());
+        response.setHeader('Set-Cookie', networkCookie(isTunnel));
         response.writeHead(303, { Location: '/' + target.search }); response.end(); return;
       }
       if (method === 'GET' && path === '/') {
-        if (['cross-site', 'same-site'].includes(String(request.headers['sec-fetch-site']))) throw new DomainError('Open Sidecar from the agent', 403);
+        if (!isLan && ['cross-site', 'same-site'].includes(String(request.headers['sec-fetch-site']))) throw new DomainError('Open Sidecar from the agent', 403);
         if (isLan && !hasViewer) { await unlockPage(); return; }
         if (!isLan) response.setHeader('Set-Cookie', `${cookieName}=${viewerToken}; HttpOnly; SameSite=Strict; Path=/`);
         response.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -710,7 +728,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         return;
       }
       if (method === 'GET' && path === '/api/state') { json(response, snapshot()); return; }
-      if (method === 'GET' && path === '/api/network') { json(response, networkStatus(!isLan)); return; }
+      if (method === 'GET' && (path === '/api/network' || path === '/agent/network')) { json(response, networkStatus(!isLan)); return; }
       if (method === 'GET' && path === '/api/library') {
         const library = await listLibrary(dirname(directory));
         // Other owners have their own opt-in listener; never send a phone to its own localhost.
@@ -797,9 +815,9 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       if (method === 'GET' && path === '/agent/status') { json(response, { ownerKey: ownerKey(owner), instanceId, state: 'running', connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError }); return; }
       if (method === 'POST' && path === '/agent/stop') { json(response, { ok: true }); setImmediate(() => { void close(); }); return; }
       const body = ['POST', 'PATCH'].includes(method) ? await bodyOf(request) : {};
-      if (method === 'POST' && path === '/api/network') {
+      if (method === 'POST' && (path === '/api/network' || path === '/agent/network')) {
         if (isLan) throw new DomainError('Manage network access from the local viewer', 403);
-        await setNetworkAccess(boolean(body, 'enabled'), optionalText(body, 'passphrase'));
+        await setNetworkAccess(boolean(body, 'enabled'), optionalText(body, 'passphrase'), optionalText(body, 'publicUrl'));
         json(response, networkStatus(true)); return;
       }
       const agentClose = path.match(/^\/agent\/documents\/([^/]+)\/close$/);

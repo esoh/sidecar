@@ -37,6 +37,28 @@ async function answer(text: string) {
   await f.agent('/agent/replies', { requestId: request.id, documentId: request.documentId, threadId: request.threadId, text });
 }
 
+test('settings configures and clears the public tunnel URL without exposing it to remote control', async ({ page }) => {
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Allow access on local network' }).click();
+  await expect(page.getByRole('checkbox', { name: 'Allow access on local network' })).toBeChecked();
+  const field = page.getByLabel('Public HTTPS URL', { exact: true });
+  await expect(page.getByLabel('ngrok command')).toHaveValue(/^ngrok http http:\/\/127\.0\.0\.1:\d+ --inspect=false$/);
+  await field.fill('http://insecure.example');
+  await page.getByRole('button', { name: 'Save URL', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('HTTPS');
+  await field.fill('https://sidecar.example/');
+  await page.getByRole('button', { name: 'Save URL', exact: true }).click();
+  await expect(field).toHaveValue('https://sidecar.example');
+  await expect(page.getByRole('link', { name: /^https:\/\/sidecar\.example/ })).toHaveAttribute('href', `https://sidecar.example/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(field).toHaveValue('https://sidecar.example');
+  await field.fill(''); await page.getByRole('button', { name: 'Save URL', exact: true }).click();
+  await expect(page.getByRole('link', { name: /^https:\/\/sidecar\.example/ })).toHaveCount(0);
+});
+
 test('phone access enables from settings and sends conversations over plain LAN HTTP', { tag: '@manual-delivery' }, async ({ page, browser }) => {
   test.setTimeout(30000);
   const doc = await f.register('phone.md', '# Phone review\n\nHello from the same document.\n');
