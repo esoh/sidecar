@@ -98,24 +98,48 @@ Anyone with the passphrase can use the viewer, including sending requests to the
 
 The phone's document library opens this agent's documents normally. Other agents' documents use read-only previews; enable access from their own viewer to interact with those agents. Unsent drafts and reading preferences stay in each browser. Rich-text copying falls back to plain text when the browser requires HTTPS.
 
-### Over the internet with ngrok
+### Over the internet with ngrok or Cloudflare
 
-Ask the attached agent: **“Open this Sidecar document through ngrok.”** The shared skill checks for ngrok and an existing matching tunnel, starts one when needed, and returns the public document URL and Sidecar passphrase. ngrok must already be installed and authenticated; the agent will explain missing setup rather than installing or replacing existing tunnels silently.
+Ask the attached Codex or Claude agent: **“Open Sidecar over the internet.”** The shared skill reads your selected provider, checks its setup and existing connectors, starts or reuses a matching tunnel, and returns the public document URL and Sidecar passphrase. The provider must already be installed and authenticated. Ordinary `open`/`browse` commands never publish your viewer automatically.
 
-For manual setup, enable **Allow access on local network** in Settings. Under **Internet (ngrok)**, run the displayed command, then paste ngrok's HTTPS address into **Public HTTPS URL** and save. Open the displayed public document link and enter the same passphrase. The command targets the separate protected port, disables request inspection, and preserves Host/Origin headers. Do not tunnel the regular localhost viewer port or use `--host-header=rewrite`.
+ngrok is the default. To use a locally managed named Cloudflare Tunnel, create `~/.config/sidecar/config.json`:
 
-The equivalent owner-scoped commands are:
-
-```sh
-sidecar network --owner KEY                    # inspect current network settings
-sidecar network on --owner KEY                 # returns protected tunnelTarget
-ngrok http http://127.0.0.1:PROTECTED_PORT --inspect=false
-sidecar network on --owner KEY --public-url https://YOUR_NGROK_HOST
-sidecar network on --owner KEY --public-url '' # remove public access; keep LAN
-sidecar network off --owner KEY                # close all network access
+```json
+{
+  "tunnel": {
+    "provider": "cloudflare",
+    "publicUrl": "https://sidecar.example.com",
+    "configPath": "~/.cloudflared/sidecar.yml"
+  }
+}
 ```
 
-The public address is an explicit allowlist entry, not a tunnel launcher. Only HTTPS requests proxied through loopback to the protected listener are accepted for it. Passphrase login, same-origin checks, and the local-only agent boundary remain in effect; HTTPS viewer cookies are Secure. Keep the Mac awake and Sidecar, its native agent, and ngrok running. Disabling network access or restarting Sidecar clears the public address and disconnects remote viewers; stop your ngrok process separately. After restart, check the new protected port before reusing a tunnel. HTTPS encrypts the public connection; ngrok terminates TLS and forwards it over its tunnel to this Mac.
+`configPath` points to your existing Cloudflare YAML, which holds its tunnel ID, credentials-file path, and ingress rules. It must be absolute or start with `~/` and live outside Git checkouts so worktree cleanup cannot claim a shared connector. Sidecar does not copy credentials into this config. Follow the [own-domain Cloudflare setup guide](docs/cloudflare-tunnel.md) to prepare it.
+
+For ngrok, omit the file or use `{"tunnel":{"provider":"ngrok"}}`. You can add `publicUrl` for a reserved HTTPS address configured in your ngrok account. An explicit request to use another provider overrides the choice for that request without changing the file. Provider-specific settings do not carry over. For a one-off Cloudflare request, the skill uses a private temporary `SIDECAR_CONFIG` file with the supplied Cloudflare settings and leaves your saved preferences unchanged.
+
+`sidecar config` prints the effective preferences and source path without starting an app or tunnel. `SIDECAR_CONFIG` can select another JSON file; otherwise Sidecar respects `XDG_CONFIG_HOME` and falls back to `~/.config`. Invalid settings produce an error instead of silently choosing ngrok. The file stores preferences only; creating or editing it does not enable remote access. Reopen Settings to read changes; no app restart is needed. Keep personal values in this local file, outside Git.
+
+**Settings → Open on phone** shows the provider and configured address. The active public URL remains separate until the agent verifies and enables the tunnel. Settings does not launch connectors. For manual ngrok setup, enable local-network access, run the displayed command, and save the resulting HTTPS address. For Cloudflare, follow the linked guide and verify its ingress first.
+
+The owner-scoped commands remain:
+
+```sh
+sidecar config                               # read provider preferences
+sidecar network --owner KEY                  # inspect current network settings
+sidecar network on --owner KEY               # returns protected tunnelTarget
+ngrok http http://127.0.0.1:PROTECTED_PORT --inspect=false
+sidecar network on --owner KEY --public-url https://sidecar.example.com # ngrok
+sidecar cloudflare --owner KEY                # configured Cloudflare: start/reuse and allow origin
+sidecar network on --owner KEY --public-url '' # remove public access; keep LAN
+sidecar network off --owner KEY               # close remote access
+```
+
+Expose only the returned **passphrase-protected `tunnelTarget`**, never the normal localhost viewer. Preserve Host/Origin and `X-Forwarded-Proto: https`; do not use header rewrites. The allowed public URL is an exact HTTPS origin. Passphrase login, same-origin checks, Secure HTTPS cookies, and local-only agent endpoints still apply. Your tunnel provider terminates public TLS and carries traffic to the Mac.
+
+Keep Sidecar, its native agent, the connector, and the Mac running. Disabling network access or restarting Sidecar clears its active public URL and may change the protected port. Ask the agent to reconnect the tunnel; it must recheck the target before reuse. Each active owner needs its own hostname/endpoint. Cloudflare can share a connector with other local services when its live route matches. The launcher uses a generic startup lock and leaves that connector running when Sidecar exits. Missing/stale routes or unknown replicas produce repair instructions; nothing rewrites shared ingress or restarts another service. Connector shutdown is a separate coordinated action.
+
+For traffic totals, compare the same period in [ngrok Usage](https://dashboard.ngrok.com/usage) and [Billing](https://dashboard.ngrok.com/billing), or follow the [Cloudflare monitoring steps](docs/cloudflare-tunnel.md#monitor-traffic). Provider dashboards can lag. Browser DevTools' Network **Transferred** total measures the current browser session (including local access); it is not account-wide traffic or tunnel overhead. Keep ngrok inspection disabled for Sidecar; account usage does not require request-body capture. See [ngrok's plan limits](https://ngrok.com/docs/pricing-limits/free-plan-limits).
 
 ## Browse all documents
 

@@ -5,7 +5,7 @@
   "type": "module",
   "packageManager": "pnpm@11.0.3",
   "scripts": {
-    "test": "node --import tsx --test test/*.test.ts",
+    "test": "node --import tsx --test test/*.test.ts scripts/*.test.mjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.web.json",
     "sidecar": "node --import tsx src/cli.ts"
   },
@@ -23,6 +23,7 @@
     "@plannotator/ui": "0.47.0",
     "@plannotator/web-highlighter": "0.8.1",
     "esbuild": "0.28.2",
+    "js-yaml": "5.2.3",
     "markdown-it": "15.0.2",
     "react": "19.3.0",
     "react-dom": "19.3.0",

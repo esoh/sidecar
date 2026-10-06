@@ -4,6 +4,7 @@ import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
 import { Icon } from './conversations.tsx';
 import type { CopyFormat } from './message-copy.ts';
 import { api, errorText } from './api.ts';
+import type { TunnelConfig } from '../src/tunnel-config.ts';
 
 const MessageSettings = createContext({ copyFormat: 'markdown' as CopyFormat, windowMode: 'multiple', setCopyFormat: (_value: CopyFormat) => {}, setWindowMode: (_value: string) => {} });
 export const useMessageSettings = () => useContext(MessageSettings);
@@ -40,16 +41,25 @@ export function TextSettings({ version }: { version?: string }) {
   const [network, setNetwork] = useState<{ enabled: boolean; urls: string[]; isLocal: boolean; publicUrl: string | null; tunnelTarget?: string | null; passphrase?: string | null } | null>(null);
   const [passphrase, setPassphrase] = useState('');
   const [publicUrl, setPublicUrl] = useState('');
+  const [tunnelConfig, setTunnelConfig] = useState<TunnelConfig | null>(null);
+  const [configError, setConfigError] = useState('');
   const [networkError, setNetworkError] = useState(''), [isUpdatingNetwork, setUpdatingNetwork] = useState(false), [copiedUrl, setCopiedUrl] = useState('');
   async function updateNetwork(enabled?: boolean, changes?: { passphrase?: string; publicUrl?: string }) {
     setUpdatingNetwork(true); setNetworkError(''); setCopiedUrl('');
     try {
       const next = await api<NonNullable<typeof network>>('/api/network', enabled === undefined ? undefined : { enabled, ...changes });
       setNetwork(next); setPassphrase(next.passphrase ?? ''); setPublicUrl(next.publicUrl ?? '');
+      if (enabled === undefined && next.isLocal) {
+        setTunnelConfig(null); setConfigError('');
+        try { setTunnelConfig((await api<{ tunnel: TunnelConfig }>('/api/tunnel-config')).tunnel); }
+        catch (reason) { setConfigError(errorText(reason)); }
+      }
     }
     catch (reason) { setNetworkError(errorText(reason)); }
     finally { setUpdatingNetwork(false); }
   }
+  const tunnelCommand = tunnelConfig?.provider === 'ngrok' && network?.tunnelTarget
+    ? `ngrok http ${network.tunnelTarget} --inspect=false${tunnelConfig.publicUrl ? ` --url '${tunnelConfig.publicUrl.replaceAll("'", "'\\''")}'` : ''}` : '';
   const { copyFormat, windowMode, setCopyFormat, setWindowMode } = useMessageSettings();
   const [highlightIntensity, setHighlightIntensity] = useState(readHighlightIntensity);
   useLayoutEffect(() => {
@@ -88,15 +98,17 @@ export function TextSettings({ version }: { version?: string }) {
               <button type="button" disabled={isUpdatingNetwork || passphrase === network.passphrase || passphrase.length < 8} onClick={() => { void updateNetwork(true, { passphrase }); }}>Save passphrase</button>
               <p>Changing it signs out remembered browsers.</p>
             </div>}
-            {network.enabled && network.isLocal && network.tunnelTarget && <div className="network-passphrase network-tunnel">
-              <h3>Internet (ngrok)</h3>
-              <p>Ask your agent to open Sidecar through ngrok, or run this on your Mac and save the HTTPS address it prints.</p>
-              <div className="network-link"><input aria-label="ngrok command" readOnly value={`ngrok http ${network.tunnelTarget} --inspect=false`} /><button type="button" onClick={async () => {
-                const command = `ngrok http ${network.tunnelTarget} --inspect=false`;
-                if (await copyTextToClipboard(command)) setCopiedUrl(command);
+            {network.isLocal && tunnelConfig && <div className="network-passphrase network-tunnel">
+              <h3>Internet ({tunnelConfig.provider === 'cloudflare' ? 'Cloudflare' : 'ngrok'})</h3>
+              <p>Ask your agent to open Sidecar through {tunnelConfig.provider === 'cloudflare' ? 'Cloudflare' : 'ngrok'}.</p>
+              {tunnelConfig.publicUrl && <p>Configured address: {tunnelConfig.publicUrl}</p>}
+              {tunnelCommand && <div className="network-link"><input aria-label="ngrok command" readOnly value={tunnelCommand} /><button type="button" onClick={async () => {
+                if (await copyTextToClipboard(tunnelCommand)) setCopiedUrl(tunnelCommand);
                 else setNetworkError('Could not copy. Select the command to copy it.');
-              }}>{copiedUrl.startsWith('ngrok ') ? 'Copied' : 'Copy command'}</button></div>
-              <label>Public HTTPS URL<input type="url" aria-label="Public HTTPS URL" disabled={isUpdatingNetwork} value={publicUrl} placeholder="https://your-domain.ngrok-free.app" autoComplete="off" spellCheck={false} onChange={event => setPublicUrl(event.target.value)} /></label>
+              }}>{copiedUrl === tunnelCommand ? 'Copied' : 'Copy command'}</button></div>}
+            </div>}
+            {network.enabled && network.isLocal && <div className="network-passphrase network-tunnel">
+              <label>Public HTTPS URL<input type="url" aria-label="Public HTTPS URL" disabled={isUpdatingNetwork} value={publicUrl} placeholder="https://sidecar.example.com" autoComplete="off" spellCheck={false} onChange={event => setPublicUrl(event.target.value)} /></label>
               <button type="button" disabled={isUpdatingNetwork || publicUrl === (network.publicUrl ?? '')} onClick={() => { void updateNetwork(true, { publicUrl }); }}>Save URL</button>
             </div>}
             {[...network.urls, ...(network.publicUrl ? [network.publicUrl] : [])].map(base => {
@@ -107,6 +119,7 @@ export function TextSettings({ version }: { version?: string }) {
               }}>{copiedUrl === url ? 'Copied' : 'Copy'}</button></div>;
             })}
           </>}
+          {network?.isLocal && configError && <p role="alert">{configError}</p>}
           {networkError && <p role="alert">{networkError}</p>}
         </fieldset>
         <div className="text-settings-heading">
