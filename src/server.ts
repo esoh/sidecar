@@ -17,6 +17,7 @@ import { prepareProposal } from './proposals.ts';
 import { createProposalService } from './proposal-service.ts';
 import { saveDocumentVersion } from './snapshots.ts';
 import { readAppVersion } from './version.ts';
+import { readTunnelConfig } from './tunnel-config.ts';
 import { libraryDocument, listLibrary, recordDocumentOpen, closeLibraryDocument, cleanupClosedDocument } from './library.ts';
 import { listFiles, readCode, readPreview } from './files.ts';
 import { claim, createThread, closeDocument, discardEmptyThread, nameThread, pinMessage, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, reanchorSelection, setSelectionVisibility, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput, type ReplyInput } from './store.ts';
@@ -632,7 +633,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       tunnelTarget: address && typeof address !== 'string' ? `http://127.0.0.1:${address.port}` : null,
     } : {}) };
   }
-  function setNetworkAccess(enabled: boolean, passphrase?: string, nextPublicUrl?: string) {
+  function setNetworkAccess(enabled: boolean, passphrase?: string, nextPublicUrl?: string, expectedTunnelTarget?: string, expectedInstanceId?: string) {
     if (nextPublicUrl) {
       let parsed: URL;
       try { parsed = new URL(nextPublicUrl); } catch { throw new DomainError('Enter an HTTPS address without a path, query, or fragment.'); }
@@ -644,6 +645,9 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     // Serialize toggles so a late enable cannot reopen access after Disable.
     const change = lanChange.then(async () => {
       if (closed) throw new DomainError('Sidecar is stopping', 503);
+      if ((expectedInstanceId !== undefined && expectedInstanceId !== instanceId) ||
+          (expectedTunnelTarget !== undefined && expectedTunnelTarget !== networkStatus(true).tunnelTarget))
+        throw new DomainError('Sidecar or its protected listener changed. Recheck the tunnel target before reconnecting.', 409);
       if (enabled) await prepareNetworkAuth(passphrase);
       if (enabled && !lanServer) {
         if (!lanAddresses().length) throw new DomainError('No local IPv4 network found. Connect to Wi-Fi or Ethernet and try again.');
@@ -868,12 +872,16 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         }
         return;
       }
+      if (method === 'GET' && path === '/api/tunnel-config') {
+        if (isLan) throw new DomainError('Manage tunnel settings from the local viewer', 403);
+        json(response, await readTunnelConfig()); return;
+      }
       if (method === 'GET' && path === '/agent/status') { json(response, { ownerKey: ownerKey(owner), instanceId, state: 'running', connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError }); return; }
       if (method === 'POST' && path === '/agent/stop') { json(response, { ok: true }); setImmediate(() => { void close(); }); return; }
       const body = ['POST', 'PATCH'].includes(method) ? await bodyOf(request) : {};
       if (method === 'POST' && (path === '/api/network' || path === '/agent/network')) {
         if (isLan) throw new DomainError('Manage network access from the local viewer', 403);
-        await setNetworkAccess(boolean(body, 'enabled'), optionalText(body, 'passphrase'), optionalText(body, 'publicUrl'));
+        await setNetworkAccess(boolean(body, 'enabled'), optionalText(body, 'passphrase'), optionalText(body, 'publicUrl'), optionalText(body, 'expectedTunnelTarget'), optionalText(body, 'expectedInstanceId'));
         json(response, networkStatus(true)); return;
       }
       const agentClose = path.match(/^\/agent\/documents\/([^/]+)\/close$/);

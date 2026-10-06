@@ -3897,3 +3897,27 @@ test('streamed progress and final text remain visible until their saved messages
   }
   await expect(page.locator('.message.agent')).toHaveCount(2);
 });
+
+
+test('Cloudflare settings show configured provider without publishing it, and malformed config leaves local controls usable', async ({ page }) => {
+  const path = join(f.directory, 'config.json'), previous = process.env.SIDECAR_CONFIG;
+  process.env.SIDECAR_CONFIG = path;
+  cleanup.push(async () => { if (previous === undefined) delete process.env.SIDECAR_CONFIG; else process.env.SIDECAR_CONFIG = previous; });
+  await writeFile(path, JSON.stringify({ tunnel: { provider: 'cloudflare', publicUrl: 'https://sidecar.example.com', configPath: '/private/example/tunnel.yml' } }));
+  const doc = await f.register();
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Internet (Cloudflare)' })).toBeVisible();
+  await expect(page.getByText('Configured address: https://sidecar.example.com', { exact: true })).toBeVisible();
+  await expect(page.getByRole('checkbox', { name: 'Allow access on local network' })).not.toBeChecked();
+  await expect(page.getByRole('link', { name: /^https:\/\/sidecar\.example/ })).toHaveCount(0);
+  await page.getByRole('checkbox', { name: 'Allow access on local network' }).click();
+  await expect(page.getByLabel('Public HTTPS URL', { exact: true })).toHaveValue('');
+  await expect(page.getByLabel('ngrok command')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await writeFile(path, '{broken');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('Sidecar config');
+  await page.getByRole('checkbox', { name: 'Allow access on local network' }).click();
+  await expect(page.getByRole('checkbox', { name: 'Allow access on local network' })).not.toBeChecked();
+});
