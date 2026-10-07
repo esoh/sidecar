@@ -2097,6 +2097,14 @@ test('delivered messages show Working while later inputs stay in the queue', { t
   await expect(firstStatus).toHaveText('Working…');
   await expect(queue).toContainText('Follow-up question');
   await expect(secondStatus).toHaveCount(0);
+  await f.agent('/agent/lifecycle', { ownerKey: `claude-${f.owner.sessionId}`, event: 'compaction-started' });
+  await expect(firstStatus).toHaveText('Compacting…');
+  await expect(queue).toContainText('Follow-up question');
+  await expect(secondStatus).toHaveCount(0);
+  await page.reload();
+  await expect(firstStatus).toHaveText('Compacting…');
+  await f.agent('/agent/lifecycle', { ownerKey: `claude-${f.owner.sessionId}`, event: 'compaction-completed' });
+  await expect(firstStatus).toHaveText('Working…');
   await page.reload();
   await expect(firstStatus).toHaveText('Working…');
   await expect(queue).toContainText('Follow-up question');

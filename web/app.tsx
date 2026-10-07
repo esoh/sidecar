@@ -920,6 +920,7 @@ function App() {
           requests={Object.values(state?.requests ?? {})}
           stream={state?.streams?.filter(reply => reply.threadId === activeThreadId).at(-1) ?? state?.stream ?? null}
           agentControl={state?.agentControl}
+          isCompacting={state?.activity === 'compacting'}
           {...selectionActions}
           isShown={isSidebarShown}
           drafts={drafts}
