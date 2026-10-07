@@ -389,6 +389,7 @@ export function ConversationSidebar({
   requests,
   stream,
   agentControl,
+  isCompacting,
   passageIssue,
   showPassage,
   showOriginal,
@@ -413,6 +414,7 @@ export function ConversationSidebar({
   requests: RequestRecord[];
   stream: ViewerState['stream'];
   agentControl?: ViewerState['agentControl'];
+  isCompacting: boolean;
   passageIssue: (quote: Quote) => string | null;
   showPassage: (selection: SavedSelection) => void;
   showOriginal: (messageId: string) => void;
@@ -725,7 +727,7 @@ export function ConversationSidebar({
                   </div>
                   {isLatest && requestId !== recovering?.id && !hasStreamedReply && (status === 'claimed' || status === 'stopped') && (
                     <div className="message-status" role="status">
-                      {status === 'stopped' ? 'Stopped' : 'Working…'}
+                      {status === 'stopped' ? 'Stopped' : isCompacting ? 'Compacting…' : 'Working…'}
                     </div>
                   )}
                 </div>
