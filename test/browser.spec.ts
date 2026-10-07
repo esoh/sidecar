@@ -786,10 +786,11 @@ test('a batch shares one Working/Stopped indicator and preserves partial text wi
   await expect(page.locator('.message-status')).toHaveCount(1);
   await expect(page.locator('.message-status')).toHaveText('Working…');
   await expect(page.locator('.messages .message.user')).toHaveCount(2);
-  const stop = page.getByRole('button', { name: 'Stop response', exact: true });
-  const control = (event: string) => f.agent('/agent/control', { ownerKey: ownerKey(f.owner), event, turnId: 'active-turn' });
-  await control('poll');
+  const stop = page.getByRole('button', { name: 'Stop agent', exact: true });
+  const control = (event: string) => f.agent('/agent/control', { ownerKey: ownerKey(f.owner), event, turnId: 'active-turn', activity: 'busy' });
   await expect(stop).toHaveCount(0);
+  await control('poll');
+  await expect(stop).toBeEnabled();
   await f.agent('/agent/stream-events', { ownerKey: ownerKey(f.owner), turnId: 'active-turn', messageId: 'reply', index: 0, delta: prepared.stream.prefix + 'Partial **answer**', final: false });
   await f.agent('/agent/control', { ownerKey: ownerKey(f.owner), event: 'started', turnId: 'active-turn', marker: prepared.stream.prefix });
   await expect(stop).toBeEnabled();
@@ -800,7 +801,7 @@ test('a batch shares one Working/Stopped indicator and preserves partial text wi
   await input.fill(''); await control('poll'); await expect(stop).toBeEnabled();
   await stop.click(); await expect(stop).toBeDisabled();
   await expect(page.getByText('Stopping…', { exact: true })).toBeVisible();
-  expect((await (await control('poll')).json()).stop).toEqual({ requestId: request.id, turnId: 'active-turn' });
+  expect((await (await control('poll')).json()).stop).toEqual({ turnId: 'active-turn' });
   await control('interrupted');
   await expect(page.getByText('Stopped', { exact: true })).toBeVisible();
   expect((await state()).requests[second.id].status).toBe('stopped');

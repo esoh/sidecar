@@ -73,7 +73,7 @@ export function QuestionForm({
   draftKey,
   onSendingChange,
   onRemoveSelection,
-  stream,
+  agentControl,
 }: {
   documentId: string;
   threadId?: string;
@@ -89,7 +89,7 @@ export function QuestionForm({
   draftKey: string;
   onSendingChange?: (sending: boolean) => void;
   onRemoveSelection?: () => void;
-  stream?: ViewerState['stream'];
+  agentControl?: ViewerState['agentControl'];
 }) {
   const [initialDraft] = useState(() => drafts.get(draftKey));
   const [text, setText] = useState(initialDraft?.text ?? ''),
@@ -98,7 +98,7 @@ export function QuestionForm({
   const input = useRef<HTMLTextAreaElement>(null), sending = useRef(false);
   const retry = useRef(initialDraft?.retry ?? null);
   const [isStopping, setStopping] = useState(false);
-  const hasStop = !floating && !text.length && stream && stream.threadId === threadId && (stream.canStop || stream.stopping);
+  const hasStop = !floating && !text.length && (agentControl?.canStop || agentControl?.stopping);
   const attachment = fileQuote ? { fileQuote } : messageQuote ? { messageQuote } : quote ? { quote } : {};
   const attachedText = fileQuote?.exact ?? messageQuote?.exact ?? quote?.exact;
   const updateDraft = (draft: QuestionDraft, immediately = false) => {
@@ -207,10 +207,10 @@ export function QuestionForm({
           }}
         />
       <div className="composer-actions">
-          {hasStop ? <button type="button" className="send-button" aria-label="Stop response" title={stream?.stopping || isStopping ? 'Stopping…' : 'Stop response'} disabled={isStopping || stream?.stopping} onClick={async () => {
-            if (!stream?.turnId || isStopping) return;
+          {hasStop ? <button type="button" className="send-button" aria-label="Stop agent" title={agentControl?.stopping || isStopping ? 'Stopping…' : 'Stop agent'} disabled={isStopping || agentControl?.stopping} onClick={async () => {
+            if (!agentControl?.turnId || isStopping) return;
             setStopping(true); setError('');
-            try { await api(`/api/requests/${stream.requestId}/stop`, { turnId: stream.turnId }); }
+            try { await api('/api/agent/stop', { turnId: agentControl.turnId }); }
             catch (reason) { setError(errorText(reason)); }
             finally { setStopping(false); }
           }}><Icon name="stop" /></button> : <button
@@ -223,8 +223,8 @@ export function QuestionForm({
         </div>
       </div>
       {(error || drafts.error) && <p role="alert">{error || drafts.error}</p>}
-      {stream && stream.threadId === threadId && stream.stopping && <span role="status">Stopping…</span>}
-      {stream && stream.threadId === threadId && stream.stopError && <p role="alert">{stream.stopError}</p>}
+      {agentControl?.stopping && <span role="status">Stopping…</span>}
+      {agentControl?.error && <p role="alert">{agentControl.error}</p>}
     </form>
   );
 }
@@ -388,6 +388,7 @@ export function ConversationSidebar({
   onCreated,
   requests,
   stream,
+  agentControl,
   passageIssue,
   showPassage,
   showOriginal,
@@ -411,6 +412,7 @@ export function ConversationSidebar({
   onCreated: (thread: Thread) => void;
   requests: RequestRecord[];
   stream: ViewerState['stream'];
+  agentControl?: ViewerState['agentControl'];
   passageIssue: (quote: Quote) => string | null;
   showPassage: (selection: SavedSelection) => void;
   showOriginal: (messageId: string) => void;
@@ -779,7 +781,7 @@ export function ConversationSidebar({
             threadId={active.id}
             drafts={drafts}
             draftKey={active.id}
-            stream={stream}
+            agentControl={agentControl}
             quote={drafts.get(active.id)?.quote}
             messageQuote={drafts.get(active.id)?.messageQuote}
             fileQuote={drafts.get(active.id)?.fileQuote}

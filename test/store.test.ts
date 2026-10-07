@@ -6,6 +6,55 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createState, registerDocument, submit, claim, reply, resolveThread, setTitle, openStore, readSavedState } from '../src/store.ts';
 
+for (const order of ['combined', 'older-first'] as const) test(`mid-turn receipts preserve immutable batches: ${order}`, () => {
+  const { state, input } = setup(), a = submit(state, input);
+  claim(state, a.id, {}); a.acceptedAt = 1;
+  const b = submit(state, { ...input, threadId: a.threadId, text: 'Actually use cobalt', clientMessageId: 'b' });
+  claim(state, b.id, {}); b.acceptedAt = 2;
+  const x = submit(state, { ...input, text: 'Other thread', clientMessageId: 'x' });
+  claim(state, x.id, {}); x.acceptedAt = 3;
+  const c = submit(state, { ...input, threadId: a.threadId, text: 'Not delivered yet', clientMessageId: 'c' });
+  assert.deepEqual(b.covers, [a.id]);
+  assert.equal(a.batchId, a.id); assert.equal(b.batchId, b.id);
+  assert.deepEqual(x.covers, []);
+  const answer = (id: string, text: string) => reply(state, { requestId: id, documentId: a.documentId, threadId: a.threadId, text });
+  if (order === 'older-first') {
+    answer(a.id, 'Earlier answer');
+    assert.equal(b.status, 'claimed');
+  }
+  answer(b.id, 'Cobalt');
+  assert.equal(a.status, 'completed'); assert.equal(b.status, 'completed');
+  assert.equal(x.status, 'claimed'); assert.equal(c.status, 'queued');
+  if (order === 'combined') {
+    assert.equal(a.answeredBy, b.id);
+    answer(a.id, 'Late older final');
+    assert.deepEqual(state.threads[a.threadId].messages.filter(m => m.role === 'agent').map(m => m.text), ['Cobalt']);
+  } else {
+    assert.equal(a.answer?.text, 'Earlier answer');
+    assert.throws(() => answer(a.id, 'Different answer'), /different reply/i);
+  }
+  assert.deepEqual(readSavedState(state), state);
+  for (const coverage of [[x.id], [b.id], [c.id]]) {
+    const invalid = structuredClone(state); invalid.requests[b.id].covers = coverage;
+    assert.throws(() => readSavedState(invalid), /Malformed/);
+  }
+});
+
+test('v4 migration keeps exact backup and interrupted multi-thread deliveries recoverable', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'sidecar-v4-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { state, input } = setup(), a = submit(state, input);
+  claim(state, a.id, {});
+  const raw = JSON.stringify({ ...state, version: 4 }, null, 2) + '\n';
+  await writeFile(join(directory, 'state.json'), raw);
+  const migrated = (await openStore(directory, owner)).read();
+  assert.equal(migrated.version, 5);
+  assert.equal(await readFile(join(directory, 'state.v4.backup.json'), 'utf8'), raw);
+  assert.equal(migrated.requests[a.id].status, 'uncertain');
+  assert.deepEqual(migrated.threads, state.threads);
+  assert.deepEqual(migrated.documents, state.documents);
+});
+
 const owner = { agent: 'codex' as const, sessionId: '11111111-1111-4111-8111-111111111111' };
 
 test('v3 upgrade preserves history and snapshot bytes, including older migration backups', async t => {
@@ -22,7 +71,7 @@ test('v3 upgrade preserves history and snapshot bytes, including older migration
   const snapshots = join(directory, 'versions', request.documentId); await mkdir(snapshots, { recursive: true });
   const bytes = Buffer.from('\uFEFF# Snapshot\r\noriginal\r\n'); await writeFile(join(snapshots, 'original.md'), bytes);
   const migrated = (await openStore(directory, owner)).read();
-  assert.equal(migrated.version, 4);
+  assert.equal(migrated.version, 5);
   assert.deepEqual(migrated.documents, state.documents); assert.deepEqual(migrated.threads, state.threads); assert.deepEqual(migrated.requests, state.requests);
   assert.deepEqual(migrated.proposals, {}); assert.deepEqual(migrated.proposalWrites, {});
   assert.equal(await readFile(join(directory, 'state.v3.backup.json'), 'utf8'), older);
@@ -115,13 +164,14 @@ test('new user messages reopen resolved threads, while invalid submissions and r
   }
 });
 
-test('a claim grants execution once and prevents a second active request', () => {
+test('a claim grants execution once independently in each thread', () => {
   const { state, input } = setup();
   const first = submit(state, input);
   const second = submit(state, { ...input, clientMessageId: 'second' });
   assert.equal(claim(state, first.id, {}).claimStatus, 'claimed');
   assert.equal(claim(state, first.id, {}).claimStatus, 'already-claimed');
-  assert.throws(() => claim(state, second.id, {}));
+  assert.equal(claim(state, second.id, {}).claimStatus, 'claimed');
+  assert.deepEqual(second.covers, []);
 });
 
 test('replies validate routing, deduplicate, and retain user resolution', () => {
@@ -282,7 +332,7 @@ test('v1 selections migrate once to the first user message with a byte-exact bac
   const old = legacySelectionState(), raw = JSON.stringify(old, null, 2) + '\n';
   await writeFile(join(directory, 'state.json'), raw);
   const result = (await openStore(directory, owner)).read();
-  assert.equal(result.version, 4);
+  assert.equal(result.version, 5);
   assert.deepEqual(result.proposals, {}); assert.deepEqual(result.proposalWrites, {});
   const previous = Object.values(old.threads)[0], thread = result.threads[previous.id];
   assert.deepEqual(thread.messages[0].selections, [{ id: 'first-message', slug: 'selection-1', quote: previous.quote, isVisible: false }]);
@@ -313,7 +363,7 @@ test('ambiguous migration and failed publication preserve the original state', a
   assert.equal(await readFile(join(directory, 'state.json'), 'utf8'), raw);
   assert.equal(await readFile(join(directory, 'state.v1.backup.json'), 'utf8'), raw);
   await chmod(directory, 0o700);
-  assert.equal((await openStore(directory, owner)).read().version, 4);
+  assert.equal((await openStore(directory, owner)).read().version, 5);
 });
 
 test('v2 migration preserves each message selection, visibility, and version with an exact backup', async t => {

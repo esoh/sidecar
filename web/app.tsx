@@ -329,13 +329,13 @@ function App() {
           if (generation !== connectionGeneration) { again = true; continue; }
           // A slow history response must not rewind newer text/status received over SSE.
           if (!latestRuntime || next.runtimeRevision >= latestRuntime.runtimeRevision) {
-            const { stateRevision, runtimeRevision, stream, activity, reset, connectionError } = next;
-            latestRuntime = { stateRevision, runtimeRevision, stream, activity, reset, connectionError };
+            const { stateRevision, runtimeRevision, stream, streams, agentControl, activity, reset, connectionError } = next;
+            latestRuntime = { stateRevision, runtimeRevision, stream, streams, agentControl, activity, reset, connectionError };
           }
           const runtime = latestRuntime, hadSnapshot = snapshotGeneration === generation;
           snapshotGeneration = generation;
           setState(current => mergeRuntime(
-            hadSnapshot && current && current.runtimeRevision > next.runtimeRevision ? { ...next, stream: current.stream } : next,
+            hadSnapshot && current && current.runtimeRevision > next.runtimeRevision ? { ...next, stream: current.stream, streams: current.streams } : next,
             runtime,
           ));
           const id = requestedDocument ?? Object.keys(next.documents)[0] ?? '';
@@ -918,7 +918,8 @@ function App() {
             )
           }
           requests={Object.values(state?.requests ?? {})}
-          stream={state?.stream ?? null}
+          stream={state?.streams?.filter(reply => reply.threadId === activeThreadId).at(-1) ?? state?.stream ?? null}
+          agentControl={state?.agentControl}
           {...selectionActions}
           isShown={isSidebarShown}
           drafts={drafts}

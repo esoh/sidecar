@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { fixture } from './support.ts';
 import { writeFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { ReplyStream, ThreadReplyRouter, type StreamEvent } from '../src/stream.ts';
 
 async function setup(t: Parameters<typeof fixture>[0]) {
   const f = await fixture(t);
@@ -308,4 +309,44 @@ for (const finalized of [false, true]) test(`a complete retry replaces an interr
   await f.reopen();
   state = await snapshot();
   assert.equal(state.requests[request.id].answer.text, 'Complete retry.');
+});
+
+test('stable thread tags route several receipt blocks in one native message without crossing replies', () => {
+  const first = new ReplyStream({ requestId: '11111111-1111-4111-8111-111111111111', threadId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', documentId: 'doc' }, true);
+  const second = new ReplyStream({ requestId: '22222222-2222-4222-8222-222222222222', threadId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', documentId: 'doc' }, true);
+  const router = new ThreadReplyRouter(), streams = new Map([[first.route.requestId, first], [second.route.requestId, second]]);
+  assert.ok(first.prefix.startsWith(`[[sidecar:${first.route.threadId}]]\n`));
+  assert.ok(first.prefix.includes(`[[sidecar-reply:${first.route.requestId}]]`));
+  const raw = first.progress.prefix + 'Checking A' + first.progress.suffix + '\n\n' + second.prefix + 'Answer B' + second.suffix + '\n' + first.prefix + 'Answer A' + first.suffix;
+  const updates: string[] = [];
+  const feed = (event: StreamEvent) => {
+    for (const part of router.accept(event, streams)) {
+      const progress = part.stream.accept(part.event);
+      if (progress) updates.push(progress.text);
+    }
+  };
+  const base = { messageId: 'native-message', turnId: 'native-turn' };
+  feed({ ...base, index: 1, delta: raw.slice(70), final: false });
+  feed({ ...base, index: 0, delta: raw.slice(0, 70), final: false });
+  assert.equal(first.done, false); assert.equal(second.done, false);
+  feed({ ...base, index: 2, delta: '', final: true });
+  assert.deepEqual(updates, ['Checking A']);
+  assert.equal(first.text, 'Answer A'); assert.equal(second.text, 'Answer B');
+  assert.equal(first.done, true); assert.equal(second.done, true);
+  feed({ ...base, index: 2, delta: '', final: true });
+  assert.deepEqual(updates, ['Checking A']);
+});
+
+test('native turn end retires unfinished display messages without discarding another live turn', () => {
+  const router = new ThreadReplyRouter();
+  const active = new ReplyStream({ requestId: '11111111-1111-4111-8111-111111111111', threadId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', documentId: 'doc' }, true);
+  const streams = new Map([[active.route.requestId, active]]);
+  router.accept({ messageId: 'live', turnId: 'display-live', index: 0, delta: active.prefix, final: false }, streams, 'native-live');
+  for (let i = 0; i < 70; i++) {
+    router.accept({ messageId: 'partial', turnId: `display-${i}`, index: 0, delta: '[[sidecar:', final: false }, streams, `native-${i}`);
+    router.endTurn(`native-${i}`);
+    assert.deepEqual(router.accept({ messageId: 'partial', turnId: `display-${i}`, index: 1, delta: 'late', final: false }, streams), []);
+  }
+  const output = router.accept({ messageId: 'live', turnId: 'display-live', index: 1, delta: 'Saved' + active.suffix, final: true }, streams, 'native-live');
+  assert.equal(output[0].event.delta, 'Saved' + active.suffix);
 });
