@@ -57,3 +57,37 @@ test('saved progress retires by message identity even when later history is stil
   assert.equal(merged.threads[request.threadId].messages.filter(message => message.role === 'agent').length, 1);
   assert.equal(visible.stream.progressMessageId, firstHistory.threads[request.threadId].messages.at(-1).id);
 });
+
+test('interleaved thread output sends small runtime events without repeating document or history', async t => {
+  const f = await fixture(t, 10000);
+  const doc = await f.register('large.md', '# Large\n' + 'DOCUMENT_BANDWIDTH_SENTINEL '.repeat(10000));
+  for (let i = 0; i < 12; i++) {
+    const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'HISTORY_BANDWIDTH_SENTINEL '.repeat(100), clientMessageId: `history-${i}` })).json();
+    await f.agent(`/agent/requests/${request.id}/claim`, {});
+    await f.agent('/agent/replies', { requestId: request.id, threadId: request.threadId, documentId: doc.id, text: 'Saved answer' });
+  }
+  const abort = new AbortController(); t.after(() => abort.abort());
+  const response = await fetch(f.url + '/api/events?updates=1', { headers: { Cookie: f.cookie }, signal: abort.signal });
+  let received = '';
+  const reading = (async () => { try { for await (const chunk of response.body!) received += new TextDecoder().decode(chunk); } catch { /* Deliberate close after measurement. */ } })();
+  const prepared = [];
+  for (let i = 0; i < 2; i++) {
+    const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'New question', clientMessageId: `live-${i}` })).json();
+    const event = await (await f.agent(`/agent/requests/${request.id}/prepare`, {})).json();
+    await f.agent(`/agent/requests/${request.id}/accepted`, {}); prepared.push(event);
+  }
+  for (let i = 0; i < 25; i++) for (let thread = 0; thread < 2; thread++) {
+    const event = prepared[thread];
+    await f.agent('/agent/stream-events', { ownerKey: `claude-${f.owner.sessionId}`, messageId: `reply-${thread}`, turnId: 'native-turn', index: i, delta: (i === 0 ? event.stream.prefix : '') + 'Small streamed chunk. ', final: false });
+  }
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const measuredBytes = Buffer.byteLength(received);
+  t.diagnostic(`50 interleaved chunks: ${measuredBytes} SSE bytes`);
+  assert.ok(received.includes('event: runtime'));
+  assert.ok(!received.includes('DOCUMENT_BANDWIDTH_SENTINEL') && !received.includes('HISTORY_BANDWIDTH_SENTINEL'));
+  assert.ok(measuredBytes < 32 * 1024, `50 chunks used ${measuredBytes} bytes; history must not ride with output`);
+  const beforeIdle = received;
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(received, beforeIdle, 'idle runtime does not emit repeated state');
+  abort.abort(); await reading;
+});

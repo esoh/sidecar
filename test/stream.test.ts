@@ -336,3 +336,17 @@ test('stable thread tags route several receipt blocks in one native message with
   feed({ ...base, index: 2, delta: '', final: true });
   assert.deepEqual(updates, ['Checking A']);
 });
+
+test('native turn end retires unfinished display messages without discarding another live turn', () => {
+  const router = new ThreadReplyRouter();
+  const active = new ReplyStream({ requestId: '11111111-1111-4111-8111-111111111111', threadId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', documentId: 'doc' }, true);
+  const streams = new Map([[active.route.requestId, active]]);
+  router.accept({ messageId: 'live', turnId: 'display-live', index: 0, delta: active.prefix, final: false }, streams, 'native-live');
+  for (let i = 0; i < 70; i++) {
+    router.accept({ messageId: 'partial', turnId: `display-${i}`, index: 0, delta: '[[sidecar:', final: false }, streams, `native-${i}`);
+    router.endTurn(`native-${i}`);
+    assert.deepEqual(router.accept({ messageId: 'partial', turnId: `display-${i}`, index: 1, delta: 'late', final: false }, streams), []);
+  }
+  const output = router.accept({ messageId: 'live', turnId: 'display-live', index: 1, delta: 'Saved' + active.suffix, final: true }, streams, 'native-live');
+  assert.equal(output[0].event.delta, 'Saved' + active.suffix);
+});

@@ -289,7 +289,8 @@ export function claim(state: State, requestId: string, options: {resume?: boolea
   if (request.status === 'completed' || request.status === 'failed' || request.status === 'stopped') return { claimStatus: 'completed', request };
   if (request.status === 'claimed') return { claimStatus: 'already-claimed', request };
   if (request.status === 'uncertain' && !options.resume) return { claimStatus: 'uncertain', request };
-  request.covers ??= Object.values(state.requests).filter(r => r.id !== requestId && r.batchId === r.id && r.threadId === request.threadId && r.acceptedAt !== undefined && r.status === 'claimed').map(r => r.id);
+  const inputs = Object.values(state.requests);
+  request.covers ??= inputs.slice(0, inputs.indexOf(request)).filter(r => r.batchId === r.id && r.threadId === request.threadId && r.acceptedAt !== undefined && r.status === 'claimed').map(r => r.id);
   for (const member of prepareBatch(state, requestId)) member.status = 'claimed';
   return { claimStatus: 'claimed', request };
 }

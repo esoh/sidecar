@@ -125,10 +125,11 @@ test('restart retains failed recovery and frozen batch; manual retry cannot repl
   const next = await recovery();
   const event = await (await prepare(next.id)).json();
   assert.equal(event.type, 'sidecar.recovery');
-  assert.notEqual(event.stream.prefix, prepared.stream.prefix);
-  await emit(prepared.stream.prefix + 'Stale output' + prepared.stream.suffix);
-  assert.equal((await state()).requests[request.id].answer, undefined);
+  assert.equal(event.stream.prefix, prepared.stream.prefix, 'thread tag and request receipt survive restart');
+  await emit(prepared.stream.prefix + 'Original answer arrived late.' + prepared.stream.suffix);
+  assert.equal((await state()).requests[request.id].answer.text, 'Original answer arrived late.');
   await emit(event.stream.prefix + 'Recovered without editing again.' + event.stream.suffix);
+  assert.equal((await state()).requests[request.id].answer.text, 'Original answer arrived late.', 'the first complete answer wins');
   assert.equal((await state()).requests[request.id].status, 'completed');
   assert.equal((await state()).requests[member.id].status, 'completed');
   assert.equal((await state()).requests[later.id].status, 'queued');

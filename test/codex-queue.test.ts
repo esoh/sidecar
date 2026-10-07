@@ -18,14 +18,17 @@ async function native(t: { after: (fn: () => Promise<void>) => void }, threadId 
   const http = createServer(), ws = new WebSocketServer({ server: http });
   await new Promise<void>(resolve => http.listen(path, resolve));
   t.after(async () => { for (const client of ws.clients) client.terminate(); ws.close(); await new Promise<void>(resolve => http.close(() => resolve())); await rm(root, { recursive: true, force: true }); });
-  const state = { queue: [entry('native-first', 'first'), entry('native-next', 'next')], status: 'idle', threadId, starts: [] as string[], deletes: [] as string[], methods: [] as string[], failDelete: false, raceStart: false, loadQueue: async () => {} };
-  ws.on('connection', socket => socket.on('message', async bytes => {
+  const state = { queue: [entry('native-first', 'first'), entry('native-next', 'next')], status: 'idle', threadId, starts: [] as string[], deletes: [] as string[], methods: [] as string[], steerable: false, steered: [] as Record<string, unknown>[], failDelete: false, raceStart: false, loadQueue: async () => {} };
+  ws.on('connection', socket => { let client = ''; socket.on('message', async bytes => {
     const m = JSON.parse(String(bytes)); state.methods.push(m.method);
     const result = (result: unknown) => socket.send(JSON.stringify({ id: m.id, result }));
     const error = () => socket.send(JSON.stringify({ id: m.id, error: { code: -32000, message: 'Native request refused' } }));
-    if (m.method === 'initialize') { if (m.params.clientInfo.name === 'sidecar-queue') assert.equal(m.params.capabilities.experimentalApi, true); result({}); }
+    if (m.method === 'initialize') { client = m.params.clientInfo.name; if (client === 'sidecar-queue') assert.equal(m.params.capabilities.experimentalApi, true); result({}); }
     if (m.method === 'thread/read' || m.method === 'thread/resume') result({ thread: { id: state.threadId, status: { type: state.status } } });
-    if (m.method === 'thread/turns/list') result({ data: [{ id: 'terminal-work', status: state.status === 'active' ? 'inProgress' : 'completed', items: [] }] });
+    // This fixture exercises queue fallback when the activity sampler cannot
+    // identify a steerable turn. The explicit Reset subsequently verifies it.
+    if (m.method === 'thread/turns/list') result({ data: client === 'sidecar-status' && !state.steerable ? [] : [{ id: 'terminal-work', status: state.status === 'active' ? 'inProgress' : 'completed', items: [] }] });
+    if (m.method === 'turn/steer') { state.steered.push(JSON.parse(m.params.input[0].text)); result({ turnId: 'terminal-work' }); }
     if (m.method === 'turn/interrupt') {
       state.status = 'idle'; result({});
       socket.send(JSON.stringify({ method: 'turn/completed', params: { threadId, turn: { id: 'terminal-work', status: 'interrupted', items: [] } } }));
@@ -49,7 +52,7 @@ async function native(t: { after: (fn: () => Promise<void>) => void }, threadId 
       state.starts.push(m.params.queuedSubmissionId); state.status = 'active';
       result({ turn: { id: 'started-turn', status: 'inProgress' } });
     }
-  }));
+  }); });
   return { root, state, emit: (event: unknown) => { for (const socket of ws.clients) socket.send(JSON.stringify(event)); }, run: (options: { cancelRequestIds?: string[]; startRequestId?: string; canStart?: () => boolean }) => reconcileCodexQueue(threadId, options, AbortSignal.timeout(1000), path) };
 }
 
@@ -146,8 +149,8 @@ for (const mode of ['reset', 'failed-withdrawal', 'idle-after-busy'] as const) t
     n.state.status = 'idle';
     for (let i = 0; i < 200 && !n.state.starts.length; i++) await delay(10);
     assert.deepEqual(n.state.starts, [`native-${first.id}`]);
-    assert.equal((await read()).requests[second.id].status, 'queued');
-    assert.equal((await events()).length, 1);
+    assert.equal((await read()).requests[second.id].status, 'claimed');
+    assert.equal((await events()).length, 2);
     return;
   }
   n.state.failDelete = fails;
@@ -156,14 +159,13 @@ for (const mode of ['reset', 'failed-withdrawal', 'idle-after-busy'] as const) t
   for (let i = 0; i < 200; i++) { saved = await read(); if (['done', 'failed'].includes(saved.reset?.status)) break; await delay(10); }
   assert.equal(saved.reset.status, fails ? 'failed' : 'done');
   if (fails) {
-    assert.equal(saved.requests[first.id].status, 'claimed'); assert.equal(saved.requests[second.id].status, 'queued');
+    assert.equal(saved.requests[first.id].status, 'claimed'); assert.equal(saved.requests[second.id].status, 'claimed');
     assert.deepEqual(n.state.starts, []);
   } else {
-    for (let i = 0; i < 200 && !n.state.starts.length; i++) await delay(10);
-    assert.deepEqual(n.state.deletes, [`native-${first.id}`]);
-    assert.deepEqual(n.state.starts, [`native-${second.id}`]);
+    assert.deepEqual(n.state.deletes, [`native-${first.id}`, `native-${second.id}`]);
+    assert.deepEqual(n.state.starts, []);
     assert.equal((await read()).requests[first.id].status, 'stopped');
-    assert.equal((await read()).requests[second.id].status, 'claimed');
+    assert.equal((await read()).requests[second.id].status, 'stopped');
     assert.equal((await events()).length, 2, 'no message is submitted twice');
   }
 });
@@ -239,4 +241,18 @@ test('closing a completed document retains cleanup of its in-flight recovery', a
   await waitFor(() => n.state.starts.length === 2, 'the deleted document’s recovery blocked new work');
   assert.deepEqual(n.state.starts, [`native-${first.id}`, `native-${next.id}`]);
   assert.equal((await events()).length, 3);
+});
+
+test('the first oversized input steers its ID-only notification into busy CLI work without an earlier reply stream', async t => {
+  const { n, post, read, doc, events } = await delivery(t);
+  n.state.steerable = true;
+  const request = await (await post('/api/questions', { documentId: doc.id, text: 'large '.repeat(9000), clientMessageId: 'large' })).json();
+  await waitFor(async () => !!(await read()).requests[request.id].acceptedAt, 'large request handoff');
+  assert.equal(n.state.steered.length, 1);
+  assert.equal(n.state.steered[0].requestId, request.id);
+  assert.equal(n.state.steered[0].stream, undefined);
+  assert.equal((await read()).requests[request.id].nativeTurnId, 'terminal-work');
+  assert.deepEqual(await events(), [], 'native queue must not replace steering');
+  n.emit({ method: 'turn/completed', params: { threadId: n.state.threadId, turn: { id: 'terminal-work', status: 'interrupted', items: [] } } });
+  await waitFor(async () => (await read()).requests[request.id].status === 'stopped', 'unfetched large input must stop with its native turn');
 });

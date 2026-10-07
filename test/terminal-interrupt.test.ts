@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile, appendFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,10 +28,13 @@ for (const agent of ['codex', 'claude'] as const) {
       await new Promise<void>(resolve => native.listen(join(root, 'app-server-control/app-server-control.sock'), resolve));
       ws.on('connection', socket => {
         sockets.add(socket); socket.on('close', () => sockets.delete(socket));
-        socket.on('message', raw => {
+        socket.on('message', async raw => {
           const m = JSON.parse(String(raw));
           if (m.method === 'initialize') socket.send(JSON.stringify({ id: m.id, result: {} }));
           if (m.method === 'thread/read' || m.method === 'thread/resume') socket.send(JSON.stringify({ id: m.id, result: { thread: { id: owner.sessionId, status: { type: 'active' } } } }));
+          if (m.method === 'thread/turns/list') socket.send(JSON.stringify({ id: m.id, result: { data: [{ id: 'first-turn', status: 'inProgress' }] } }));
+          if (m.method === 'turn/steer') { await appendFile(deliveries, m.params.input[0].text + '\n'); socket.send(JSON.stringify({ id: m.id, result: { turnId: 'first-turn' } })); }
+          if (m.method === 'thread/queue/list') socket.send(JSON.stringify({ id: m.id, result: { data: [], nextCursor: null } }));
         });
       });
       const server = await startServer({ owner, directory, pollMs: 20 });
@@ -94,13 +97,11 @@ for (const agent of ['codex', 'claude'] as const) {
       await emit('first-turn', 'progress', first);
       await waitFor(s => s.threads[request.threadId].messages.some((m: any) => m.text === 'Message one is complete.'));
       assert.deepEqual((await state()).proposals, {});
-      const next = await (await post('/api/questions', { documentId: doc.id, threadId: request.threadId, text: 'Next request', clientMessageId: 'next' })).json();
 
       // Idle/disconnected badges and another native turn are not cancellation evidence.
       for (const lifecycle of ['agent-idle', 'agent-disconnected']) await post('/agent/lifecycle', { ownerKey: key, event: lifecycle });
       await interrupt('unrelated-turn', first);
       assert.equal((await state()).requests[request.id].status, 'claimed');
-      assert.equal((await state()).requests[next.id].status, 'queued');
       let answer = first;
       if (phase !== 'between messages') {
         answer = event.stream.prefix + metadata + 'Message two is partly written';
@@ -122,6 +123,7 @@ for (const agent of ['codex', 'claude'] as const) {
       assert.deepEqual(ended.threads[request.threadId].messages.filter((m: any) => m.role === 'agent').map((m: any) => m.text), expected);
       const saved = JSON.parse(await readFile(join(directory, 'state.json'), 'utf8'));
       assert.equal(saved.requests[request.id].status, ended.requests[request.id].status, 'termination is durable');
+      const next = await (await post('/api/questions', { documentId: doc.id, threadId: request.threadId, text: 'Next request', clientMessageId: 'next' })).json();
       const nextEvent = await eventCount(2);
       assert.equal(nextEvent.type, 'sidecar.request', 'do not replay the interrupted task or recover its reply');
       assert.equal(nextEvent.requestId, next.id);

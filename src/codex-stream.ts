@@ -30,7 +30,7 @@ export async function observeCodex(threadId: string, onEvent: (event: StreamEven
       if (!isObject(p) || p.threadId !== threadId) return;
       if (value.method === 'turn/completed' && isObject(p.turn) && typeof p.turn.id === 'string') {
         if (onTurnEnd || replyTurnId === p.turn.id) {
-          replyTurnId = undefined;
+          if (replyTurnId === p.turn.id) replyTurnId = undefined;
           const last = Array.isArray(p.turn.items) ? p.turn.items.filter(item => isObject(item) && item.type === 'agentMessage').at(-1) : undefined;
           if (onTurnEnd) onTurnEnd(p.turn.id, String(p.turn.status), isObject(last) && typeof last.text === 'string' ? last.text : undefined);
           else onFailure('Agent turn ended before the reply was finalized.');

@@ -123,7 +123,7 @@ for (const loaded of [true, false]) test(`Codex observer ${loaded ? 'streams onl
   stop();
 });
 
-test('a superseded observer startup cannot orphan the next stream socket', { timeout: 5000 }, async () => {
+test('simultaneous stream startup shares one observer and closes it with the app', { timeout: 5000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 's'));
   await mkdir(join(root, 'app-server-control'));
   await writeFile(join(root, 'codex'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
@@ -142,6 +142,8 @@ test('a superseded observer startup cannot orphan the next stream socket', { tim
       if (m.method === 'initialize') socket.send(JSON.stringify({ id: m.id, result: {} }));
       if (m.method === 'thread/read') socket.send(JSON.stringify({ id: m.id, result: { thread: { id: owner.sessionId, status: { type: 'active' } } } }));
       if (m.method === 'thread/resume') resumes[id] = () => socket.send(JSON.stringify({ id: m.id, result: { thread: { id: owner.sessionId } } }));
+      if (m.method === 'thread/turns/list') socket.send(JSON.stringify({ id: m.id, result: { data: [] } }));
+      if (m.method === 'thread/queue/list') socket.send(JSON.stringify({ id: m.id, result: { data: [], nextCursor: null } }));
     });
   });
   const directory = join(root, 'state');
@@ -163,9 +165,8 @@ test('a superseded observer startup cannot orphan the next stream socket', { tim
     await post('/agent/replies', { ...routes[0], text: 'Fallback' });
     await post(`/agent/requests/${routes[1].requestId}/claim`, {});
     const second = post('/agent/streams', routes[1]);
-    while (!resumes[1]) await delay(5);
-    resumes[1](); assert.equal((await second).status, 200);
-    resumes[0](); assert.equal((await first).status, 500);
+    resumes[0](); assert.equal((await second).status, 200);
+    assert.equal((await first).status, 200);
     await delay(20);
     assert.equal(ws.clients.size, 1);
     await sidecar.close();

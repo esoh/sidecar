@@ -114,15 +114,22 @@ export class ReplyStream {
 // One native message can contain replies to several Sidecar threads. Reassemble
 // it once, then feed each receipt's existing parser only its own marked block.
 export class ThreadReplyRouter {
-  private messages = new Map<string, { next: number; raw: string; pending: Map<number, StreamEvent>; blocks: Map<number, { index: number; sent: number; final: boolean }> }>();
+  private messages = new Map<string, { nativeTurnId: string; next: number; raw: string; pending: Map<number, StreamEvent>; blocks: Map<number, { index: number; sent: number; final: boolean }> }>();
   private completed = new Set<string>();
-  accept(event: StreamEvent, streams: ReadonlyMap<string, ReplyStream>): Array<{ stream: ReplyStream; event: StreamEvent }> {
+  private retire(key: string) {
+    this.messages.delete(key); this.completed.add(key);
+    if (this.completed.size > 64) this.completed.delete(this.completed.values().next().value!);
+  }
+  endTurn(turnId: string) {
+    for (const [key, message] of this.messages) if (message.nativeTurnId === turnId) this.retire(key);
+  }
+  accept(event: StreamEvent, streams: ReadonlyMap<string, ReplyStream>, nativeTurnId = event.turnId): Array<{ stream: ReplyStream; event: StreamEvent }> {
     const key = `${event.turnId}/${event.messageId}`, output: Array<{ stream: ReplyStream; event: StreamEvent }> = [];
     if (this.completed.has(key)) return output;
     let message = this.messages.get(key);
     if (!message) {
       if (this.messages.size >= 64) throw new DomainError('Too many unfinished native messages');
-      message = { next: 0, raw: '', pending: new Map(), blocks: new Map() }; this.messages.set(key, message);
+      message = { nativeTurnId, next: 0, raw: '', pending: new Map(), blocks: new Map() }; this.messages.set(key, message);
     }
     if (event.index < message.next || message.pending.has(event.index)) return output;
     if (message.pending.size >= 4096 || message.raw.length + event.delta.length + [...message.pending.values()].reduce((n, e) => n + e.delta.length, 0) > 256 * 1024) throw new DomainError('Native message exceeds the streaming limit');
@@ -144,8 +151,7 @@ export class ThreadReplyRouter {
         block.sent = raw.length; block.final = part.final;
       }
       if (part.final) {
-        this.messages.delete(key); this.completed.add(key);
-        if (this.completed.size > 64) this.completed.delete(this.completed.values().next().value!);
+        this.retire(key);
         break;
       }
     }

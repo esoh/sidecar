@@ -132,7 +132,7 @@ test('unavailable native queue reports a connection error while preserving the r
     if (state.connectionError) break;
     await new Promise(resolve => setTimeout(resolve, 10));
   }
-  assert.match(state.connectionError, /Codex notification failed/);
+  assert.match(state.connectionError, /Codex delivery could not be confirmed/);
   assert.equal(Object.values<any>(state.requests)[0].status, 'queued');
 });
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile, appendFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -26,11 +26,13 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   await new Promise<void>(resolve => native.listen(join(root, 'app-server-control/app-server-control.sock'), resolve));
   ws.on('connection', socket => {
     sockets.add(socket); socket.on('close', () => sockets.delete(socket));
-    socket.on('message', raw => {
+    socket.on('message', async raw => {
       const m = JSON.parse(String(raw));
       if (m.method === 'initialize') socket.send(JSON.stringify({ id: m.id, result: {} }));
       if (m.method === 'thread/read' || m.method === 'thread/resume') socket.send(JSON.stringify({ id: m.id, result: { thread: { id: owner.sessionId, status: { type: 'active' } } } }));
       if (m.method === 'thread/queue/list') socket.send(JSON.stringify({ id: m.id, result: { data: [], nextCursor: null } }));
+      if (m.method === 'thread/turns/list') socket.send(JSON.stringify({ id: m.id, result: { data: [{ id: 'reply', status: 'inProgress' }] } }));
+      if (m.method === 'turn/steer') { await appendFile(deliveries, m.params.input[0].text + '\n'); socket.send(JSON.stringify({ id: m.id, result: { turnId: 'reply' } })); }
     });
   });
   const server = await startServer({ owner, directory });
@@ -73,8 +75,6 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   for (let i = 0; i < 100 && !(await state()).requests[req.id].acceptedAt; i++) await delay(10);
   assert.ok((await state()).requests[req.id].acceptedAt, 'record the successful native handoff');
   assert.equal((await state()).requests[req.id].status, 'claimed', 'successful handoff is shown as Working');
-  const next = await (await post('/api/questions', { documentId: doc.id, threadId: req.threadId, text: 'Why?', clientMessageId: 'second' })).json();
-  const later = await (await post('/api/questions', { documentId: doc.id, threadId: req.threadId, text: 'And after that?', clientMessageId: 'third' })).json();
   if (agent === 'codex') {
     for (const socket of sockets) {
       socket.send(JSON.stringify({ method: 'item/agentMessage/delta', params: { threadId: owner.sessionId, turnId: 'unrelated', itemId: 'ordinary', delta: 'Unrelated terminal answer.' } }));
@@ -97,7 +97,6 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   assert.equal(working.requests[req.id].status, 'claimed');
   assert.equal(working.requests[req.id].answer, undefined, 'progress must not complete the request');
   assert.equal(working.threads[req.threadId].messages.at(-1).text, 'I’ll check the retry setting.');
-  assert.equal(working.requests[next.id].status, 'queued', 'progress must not release the next request');
   assert.deepEqual(working.proposals, {}, 'even complete progress metadata cannot create a proposal');
   const answer = event.stream.prefix + proposalHeader + 'Three retries.' + event.stream.suffix;
   if (agent === 'codex') {
@@ -106,21 +105,21 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
       socket.send(JSON.stringify({ method: 'item/completed', params: { threadId: owner.sessionId, turnId: 'reply', item: { id: 'answer', type: 'agentMessage', text: answer } } }));
     }
   } else await forwardHook('claude', { session_id: owner.sessionId, hook_event_name: 'MessageDisplay', message_id: 'answer', turn_id: 'reply', index: 0, delta: answer, final: true });
+  for (let i = 0; i < 100 && (await state()).requests[req.id].status !== 'completed'; i++) await delay(10);
+  const next = await (await post('/api/questions', { documentId: doc.id, threadId: req.threadId, text: 'Why?', clientMessageId: 'second' })).json();
   const second = await eventCount(2);
   assert.equal(second.requestId, next.id);
   assert.equal(second.documentId, doc.id);
   assert.deepEqual(second.thread, { id: req.threadId, lastRequestId: req.id, title: 'Widget retry behavior' });
-  assert.deepEqual(second.messages, [
-    { requestId: next.id, text: 'Why?' },
-    { requestId: later.id, text: 'And after that?' },
-  ]);
+  assert.equal(second.text, 'Why?');
   assert.equal(second.history, undefined, 'history is available on demand, not repeated in every event');
   const saved = await state();
   assert.equal(saved.requests[req.id].status, 'completed');
   assert.equal(saved.threads[req.threadId].messages.filter((m: any) => m.role === 'agent').length, 2);
-  assert.equal(saved.threads[req.threadId].messages.at(-1).text, 'Three retries.');
-  assert.equal(saved.threads[req.threadId].messages.at(-1).selections[0].label, 'Retry limit');
-  assert.equal(saved.threads[req.threadId].messages.at(-1).selections[0].quote.version, version);
+  const savedAnswer = saved.threads[req.threadId].messages.filter((m: any) => m.role === 'agent').at(-1);
+  assert.equal(savedAnswer.text, 'Three retries.');
+  assert.equal(savedAnswer.selections[0].label, 'Retry limit');
+  assert.equal(savedAnswer.selections[0].quote.version, version);
   const proposed = Object.values<any>(saved.proposals);
   assert.equal(proposed.length, 1);
   assert.equal(proposed[0].status, 'pending');
@@ -157,7 +156,7 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   } else await forwardHook('claude', { session_id: owner.sessionId, hook_event_name: 'MessageDisplay', message_id: 'combined', turn_id: 'batch-reply', index: 1, delta: combined.slice(partialAnswer.length), final: true });
   const third = await eventCount(3);
   assert.equal(third.requestId, afterDelivery.id);
-  assert.equal(third.thread.lastRequestId, later.id, 'use the last batched input, never a later queued request');
+  assert.equal(third.thread.lastRequestId, next.id, 'use the previous input');
   const history = await (await post(`/agent/requests/${afterDelivery.id}/claim`, {})).json();
   assert.equal(history.claimStatus, 'already-claimed');
   assert.deepEqual(history.stream, third.stream, 'context recovery retains the same progress and final markers');
@@ -165,7 +164,6 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   assert.deepEqual(history.proposals, acceptedProposals, 'full context includes proposal decisions without enlarging native events');
   const afterBatch = await state();
   assert.equal(afterBatch.requests[next.id].status, 'completed');
-  assert.equal(afterBatch.requests[later.id].status, 'completed');
   assert.equal(afterBatch.threads[req.threadId].messages.at(-1).text, 'Because the retry limit is three, then it stops.');
   await post('/agent/replies', { requestId: afterDelivery.id, documentId: doc.id, threadId: req.threadId, text: 'Then it stops retrying.' });
   const exact = 'The widget retries three times.';
