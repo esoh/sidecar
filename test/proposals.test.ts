@@ -51,7 +51,7 @@ function answered() {
 
 test('a completed reply persists independently routed proposals exactly once', () => {
   const { state, doc, request, input } = answered();
-  assert.equal(state.version, 4);
+  assert.equal(state.version, 5);
   assert.equal(Object.keys(state.proposals).length, 1);
   const saved = Object.values(state.proposals)[0], message = state.threads[request.threadId].messages.at(-1)!;
   assert.equal(saved.status, 'pending');

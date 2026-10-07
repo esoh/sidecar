@@ -194,7 +194,7 @@ for (const version of [1, 2, 3]) test(`library normalizes saved v${version} with
   const bytes = JSON.stringify(saved, null, 2) + '\n';
   await writeFile(join(directory, 'state.json'), bytes);
   const normalized = await readLibrarySession(root, key);
-  assert.equal(normalized.version, 4);
+  assert.equal(normalized.version, 5);
   assert.deepEqual(normalized.proposals, {});
   assert.deepEqual(normalized.proposalWrites, {});
   assert.equal(await readFile(join(directory, 'state.json'), 'utf8'), bytes);
