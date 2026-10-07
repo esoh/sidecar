@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocketServer } from 'ws';
-import { observeCodex, resetCodexSession } from '../src/codex-stream.ts';
+import { observeCodex, resetCodexSession, readCodexControl } from '../src/codex-stream.ts';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { startServer } from '../src/server.ts';
@@ -242,4 +242,33 @@ test('Codex captures a complete retry after the interrupted turn ends', async t 
   for (let i = 0; i < 100 && !reply.done; i++) await delay(5);
   assert.equal(reply.finish(reply.route), 'Saved retry.');
   assert.equal(reply.error, null);
+});
+
+for (const mode of ['accepted', 'ended', 'changed', 'lost-ack', 'stale-stop'] as const) test(`native pre-output control: ${mode}`, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'sc-control-')), path = join(root, 'native.sock');
+  const http = createServer(), ws = new WebSocketServer({ server: http });
+  await new Promise<void>(resolve => http.listen(path, resolve));
+  t.after(async () => { for (const socket of ws.clients) socket.terminate(); ws.close(); await new Promise<void>(resolve => http.close(() => resolve())); await rm(root, { recursive: true, force: true }); });
+  const steers: unknown[] = [], interrupts: unknown[] = [];
+  ws.on('connection', socket => socket.on('message', bytes => {
+    const m = JSON.parse(String(bytes)), reply = (result: unknown) => socket.send(JSON.stringify({ id: m.id, result }));
+    if (m.method === 'initialize') reply({});
+    if (m.method === 'thread/read' || m.method === 'thread/resume') reply({ thread: { id: 'original', status: { type: mode === 'ended' ? 'idle' : 'active' } } });
+    if (m.method === 'thread/turns/list') reply({ data: [{ id: mode === 'changed' || mode === 'stale-stop' ? 'new-turn' : 'cli-turn', status: 'inProgress' }] });
+    if (m.method === 'turn/steer') { steers.push(m.params); if (mode === 'lost-ack') socket.terminate(); else reply({ turnId: 'cli-turn' }); }
+    if (m.method === 'turn/interrupt') { interrupts.push(m.params); reply({}); }
+  }));
+  assert.deepEqual(await readCodexControl('original', AbortSignal.timeout(2000), path), mode === 'ended' ? { activity: 'idle' } : { activity: 'busy', turnId: mode === 'changed' || mode === 'stale-stop' ? 'new-turn' : 'cli-turn' });
+  if (mode === 'stale-stop') {
+    await assert.rejects(resetCodexSession('original', AbortSignal.timeout(2000), path, 'cli-turn'), /changed/);
+    assert.deepEqual(interrupts, []); return;
+  }
+  const observer = await observeCodex('original', () => {}, () => {}, path);
+  t.after(() => observer());
+  const notification = { type: 'sidecar.request', requestId: 'receipt' };
+  const result = observer.steer('cli-turn', notification, 'stable-input-id');
+  if (mode === 'lost-ack') await assert.rejects(result);
+  else assert.equal(await result, mode === 'accepted' ? 'accepted' : 'not-active');
+  assert.deepEqual(steers, ['accepted', 'lost-ack'].includes(mode) ? [{ threadId: 'original', expectedTurnId: 'cli-turn', clientUserMessageId: 'stable-input-id', input: [{ type: 'text', text: JSON.stringify(notification) }] }] : []);
+  assert.deepEqual(interrupts, []);
 });

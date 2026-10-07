@@ -5,7 +5,7 @@ import { isObject } from './store.ts';
 import type { StreamEvent } from './stream.ts';
 
 const defaultSocketPath = () => join(process.env.CODEX_HOME ?? homedir() + '/.codex', 'app-server-control/app-server-control.sock');
-export type CodexObserver = (() => void) & { canInterrupt(turnId: string): boolean; interrupt(turnId: string): Promise<void> };
+export type CodexObserver = (() => void) & { canInterrupt(turnId: string): boolean; interrupt(turnId: string): Promise<void>; steer(turnId: string, event: Record<string, unknown>, clientMessageId: string): Promise<'accepted' | 'not-active'> };
 
 export async function observeCodex(threadId: string, onEvent: (event: StreamEvent) => void, onFailure: (message: string) => void, socketPath = defaultSocketPath(), prefixes?: readonly string[], onTurnEnd?: (turnId: string, status: string, answer?: string) => void): Promise<CodexObserver> {
   const socket = new WebSocket(`ws+unix://${socketPath}:/`, { maxPayload: 2 * 1024 * 1024, handshakeTimeout: 5000 });
@@ -29,7 +29,7 @@ export async function observeCodex(threadId: string, onEvent: (event: StreamEven
       const p = value.params;
       if (!isObject(p) || p.threadId !== threadId) return;
       if (value.method === 'turn/completed' && isObject(p.turn) && typeof p.turn.id === 'string') {
-        if (replyTurnId === p.turn.id) {
+        if (onTurnEnd || replyTurnId === p.turn.id) {
           replyTurnId = undefined;
           const last = Array.isArray(p.turn.items) ? p.turn.items.filter(item => isObject(item) && item.type === 'agentMessage').at(-1) : undefined;
           if (onTurnEnd) onTurnEnd(p.turn.id, String(p.turn.status), isObject(last) && typeof last.text === 'string' ? last.text : undefined);
@@ -80,19 +80,37 @@ export async function observeCodex(threadId: string, onEvent: (event: StreamEven
     return Object.assign(stop, { canInterrupt, async interrupt(turnId: string) {
       if (!canInterrupt(turnId)) throw new Error('The Sidecar turn is no longer active');
       await request('turn/interrupt', { threadId, turnId });
+    }, async steer(turnId: string, event: Record<string, unknown>, clientMessageId: string) {
+      const read = await request('thread/read', { threadId, includeTurns: false });
+      if (!isObject(read) || !isObject(read.thread) || read.thread.id !== threadId || !isObject(read.thread.status)) throw new Error('Could not verify the original Codex session');
+      if (read.thread.status.type === 'idle') return 'not-active';
+      if (read.thread.status.type !== 'active') throw new Error('The original Codex session is not available');
+      const page = await request('thread/turns/list', { threadId, limit: 1, sortDirection: 'desc', itemsView: 'full' });
+      if (!isObject(page) || !Array.isArray(page.data)) throw new Error('Could not identify the active Codex turn');
+      const turn = page.data[0];
+      if (!isObject(turn) || turn.id !== turnId || turn.status !== 'inProgress') return 'not-active';
+      // Any error after this write is uncertain. Never retry a possibly accepted edit.
+      const result = await request('turn/steer', { threadId, expectedTurnId: turnId, clientUserMessageId: clientMessageId, input: [{ type: 'text', text: JSON.stringify(event) }] });
+      if (!isObject(result) || result.turnId !== turnId) throw new Error('Could not confirm the steered Codex input');
+      return 'accepted';
     } });
   } catch (error) { stop(); throw error; }
 }
 
 // Read-only sampling: never subscribes, resumes, or creates an agent conversation.
+export type NativeControl = { activity: string; turnId?: string };
 export async function readCodexActivity(threadId: string, signal: AbortSignal, socketPath = defaultSocketPath()): Promise<string> {
-  if (signal.aborted) return 'unknown';
+  return (await readCodexControl(threadId, signal, socketPath, false)).activity;
+}
+export async function readCodexControl(threadId: string, signal: AbortSignal, socketPath = defaultSocketPath(), includeTurn = true): Promise<NativeControl> {
+  if (signal.aborted) return { activity: 'unknown' };
   return new Promise(resolve => {
     const socket = new WebSocket(`ws+unix://${socketPath}:/`, { maxPayload: 2 * 1024 * 1024, handshakeTimeout: 2000 });
     let finished = false;
-    const finish = (activity: string) => {
+    let activity = 'unknown';
+    const finish = (activity: string, turnId?: string) => {
       if (finished) return;
-      finished = true; clearTimeout(timer); signal.removeEventListener('abort', abort); socket.terminate(); resolve(activity);
+      finished = true; clearTimeout(timer); signal.removeEventListener('abort', abort); socket.terminate(); resolve({ activity, ...(turnId ? { turnId } : {}) });
     };
     const abort = () => finish('unknown');
     const timer = setTimeout(abort, 2000);
@@ -102,7 +120,7 @@ export async function readCodexActivity(threadId: string, signal: AbortSignal, s
     socket.on('message', bytes => {
       try {
         const message: unknown = JSON.parse(bytes.toString());
-        if (!isObject(message) || ![1, 2].includes(Number(message.id))) return;
+        if (!isObject(message) || ![1, 2, 3].includes(Number(message.id))) return;
         if (message.error) { finish('unknown'); return; }
         if (message.id === 1) {
           socket.send(JSON.stringify({ method: 'initialized', params: {} }));
@@ -110,11 +128,17 @@ export async function readCodexActivity(threadId: string, signal: AbortSignal, s
           return;
         }
         const result = message.result;
+        if (message.id === 3) {
+          const turn = isObject(result) && Array.isArray(result.data) ? result.data[0] : undefined;
+          finish(activity, isObject(turn) && turn.status === 'inProgress' && typeof turn.id === 'string' ? turn.id : undefined); return;
+        }
         if (!isObject(result) || !isObject(result.thread) || result.thread.id !== threadId || !isObject(result.thread.status)) { finish('unknown'); return; }
         const status = result.thread.status;
         if (status.type === 'active') {
           const waiting = Array.isArray(status.activeFlags) && status.activeFlags.some(flag => flag === 'waitingOnApproval' || flag === 'waitingOnUserInput');
-          finish(waiting ? 'waiting' : 'busy');
+          activity = waiting ? 'waiting' : 'busy';
+          if (includeTurn) socket.send(JSON.stringify({ id: 3, method: 'thread/turns/list', params: { threadId, limit: 1, sortDirection: 'desc', itemsView: 'full' } }));
+          else finish(activity);
         } else finish(status.type === 'idle' ? 'idle' : status.type === 'notLoaded' ? 'disconnected' : 'unknown');
       } catch { finish('unknown'); }
     });
@@ -125,7 +149,7 @@ export type NativeResetResult = { turnId?: string; answer?: string };
 
 // Explicit user Reset may interrupt any work, but never loads a replacement
 // session or follows a changing turn ID. A native end event is the acknowledgement.
-export async function resetCodexSession(threadId: string, signal: AbortSignal, socketPath = defaultSocketPath()): Promise<NativeResetResult> {
+export async function resetCodexSession(threadId: string, signal: AbortSignal, socketPath = defaultSocketPath(), expectedTurnId?: string): Promise<NativeResetResult> {
   const socket = new WebSocket(`ws+unix://${socketPath}:/`, { maxPayload: 2 * 1024 * 1024, handshakeTimeout: 5000 });
   let nextId = 0;
   const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
@@ -182,6 +206,7 @@ export async function resetCodexSession(threadId: string, signal: AbortSignal, s
     const page = await request('thread/turns/list', { threadId, limit: 1, sortDirection: 'desc', itemsView: 'full' });
     if (!isObject(page) || !Array.isArray(page.data)) throw new Error('Could not verify the latest Codex turn.');
     const turn = page.data[0];
+    if (expectedTurnId && (!isObject(turn) || turn.id !== expectedTurnId)) throw new Error('The active Codex turn changed. Stop was not sent.');
     if (status === 'idle' || !isObject(turn) || turn.status !== 'inProgress') {
       if (await readStatus() !== 'idle') throw new Error('Codex started another turn. Try Reset again.');
       return isObject(turn) ? resultFor(turn) : {};

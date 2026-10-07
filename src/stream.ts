@@ -9,8 +9,7 @@ export function isStreamEvent(value: unknown): value is StreamEvent {
   return isObject(value) && typeof value.messageId === 'string' && value.messageId.length > 0 && value.messageId.length < 256 && typeof value.turnId === 'string' && value.turnId.length > 0 && value.turnId.length < 256 && Number.isSafeInteger(value.index) && Number(value.index) >= 0 && typeof value.delta === 'string' && typeof value.final === 'boolean';
 }
 
-// One claimed request per owner already serializes replies. Drafts are transient;
-// the existing reply transaction is the only durable completion boundary.
+// Drafts are transient; the reply transaction is the durable completion boundary.
 export class ReplyStream {
   readonly prefix: string;
   readonly suffix: string;
@@ -26,11 +25,12 @@ export class ReplyStream {
   private started = false;
   private completedProgress = new Set<string>();
   private received = 0;
-  constructor(readonly route: ReplyRoute) {
-    const nonce = randomUUID();
-    this.prefix = `[[sidecar:${nonce}]]\n`;
+  constructor(readonly route: ReplyRoute, stableThreadTag = false) {
+    const nonce = stableThreadTag ? route.threadId : randomUUID();
+    const receipt = stableThreadTag ? `[[sidecar-reply:${route.requestId}]]\n` : '';
+    this.prefix = `[[sidecar:${nonce}]]\n${receipt}`;
     this.suffix = `\n[[/sidecar:${nonce}]]`;
-    this.progress = { prefix: `[[sidecar-progress:${nonce}]]\n`, suffix: `\n[[/sidecar-progress:${nonce}]]` };
+    this.progress = { prefix: `[[sidecar-progress:${nonce}]]\n${receipt}`, suffix: `\n[[/sidecar-progress:${nonce}]]` };
   }
   get hasStarted() { return this.started; }
   get isTurnActive() { return !!this.turnId && !this.endedTurns.has(this.turnId); }
@@ -109,4 +109,46 @@ export class ReplyStream {
     return this.text;
   }
   snapshot() { return { ...this.route, text: this.text, progressMessageId: this.progressMessageId, done: this.done, error: this.error }; }
+}
+
+// One native message can contain replies to several Sidecar threads. Reassemble
+// it once, then feed each receipt's existing parser only its own marked block.
+export class ThreadReplyRouter {
+  private messages = new Map<string, { next: number; raw: string; pending: Map<number, StreamEvent>; blocks: Map<number, { index: number; sent: number; final: boolean }> }>();
+  private completed = new Set<string>();
+  accept(event: StreamEvent, streams: ReadonlyMap<string, ReplyStream>): Array<{ stream: ReplyStream; event: StreamEvent }> {
+    const key = `${event.turnId}/${event.messageId}`, output: Array<{ stream: ReplyStream; event: StreamEvent }> = [];
+    if (this.completed.has(key)) return output;
+    let message = this.messages.get(key);
+    if (!message) {
+      if (this.messages.size >= 64) throw new DomainError('Too many unfinished native messages');
+      message = { next: 0, raw: '', pending: new Map(), blocks: new Map() }; this.messages.set(key, message);
+    }
+    if (event.index < message.next || message.pending.has(event.index)) return output;
+    if (message.pending.size >= 4096 || message.raw.length + event.delta.length + [...message.pending.values()].reduce((n, e) => n + e.delta.length, 0) > 256 * 1024) throw new DomainError('Native message exceeds the streaming limit');
+    message.pending.set(event.index, event);
+    while (message.pending.has(message.next)) {
+      const part = message.pending.get(message.next)!; message.pending.delete(message.next++); message.raw += part.delta;
+      const pattern = /(?:^|\n)(\[\[(sidecar(?:-progress)?):([0-9a-f-]{36})\]\]\n\[\[sidecar-reply:([0-9a-f-]{36})\]\]\n)/g;
+      for (const match of message.raw.matchAll(pattern)) {
+        const stream = streams.get(match[4]);
+        if (!stream || stream.route.threadId !== match[3]) continue;
+        const start = match.index + match[0].length - match[1].length;
+        const suffix = match[2] === 'sidecar-progress' ? stream.progress.suffix : stream.suffix;
+        const end = message.raw.indexOf(suffix, start + match[1].length);
+        const raw = message.raw.slice(start, end < 0 ? undefined : end + suffix.length);
+        let block = message.blocks.get(start);
+        if (!block) { block = { index: 0, sent: 0, final: false }; message.blocks.set(start, block); }
+        if (block.final || raw.length === block.sent && !part.final) continue;
+        output.push({ stream, event: { ...event, messageId: `${event.messageId}:${start}`, index: block.index++, delta: raw.slice(block.sent), final: part.final } });
+        block.sent = raw.length; block.final = part.final;
+      }
+      if (part.final) {
+        this.messages.delete(key); this.completed.add(key);
+        if (this.completed.size > 64) this.completed.delete(this.completed.values().next().value!);
+        break;
+      }
+    }
+    return output;
+  }
 }

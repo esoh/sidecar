@@ -5,7 +5,7 @@ import { isObject } from './store.ts';
 
 // A successful `codex queue` only enqueues. Idle sessions need an explicit start,
 // and Reset must withdraw cancelled submissions before releasing the next one.
-export async function reconcileCodexQueue(threadId: string, options: { cancelRequestIds?: string[]; startRequestId?: string; canStart?: () => boolean }, signal: AbortSignal, socketPath = join(process.env.CODEX_HOME ?? homedir() + '/.codex', 'app-server-control/app-server-control.sock')): Promise<void> {
+export async function reconcileCodexQueue(threadId: string, options: { cancelRequestIds?: string[]; startRequestId?: string; canStart?: () => boolean }, signal: AbortSignal, socketPath = join(process.env.CODEX_HOME ?? homedir() + '/.codex', 'app-server-control/app-server-control.sock')): Promise<string | undefined> {
   const abort = AbortSignal.any([signal, AbortSignal.timeout(5000)]);
   abort.throwIfAborted();
   const socket = new WebSocket(`ws+unix://${socketPath}:/`, { maxPayload: 4 * 1024 * 1024, handshakeTimeout: 2000 });
@@ -76,6 +76,7 @@ export async function reconcileCodexQueue(threadId: string, options: { cancelReq
       if (options.canStart && !options.canStart()) return;
       const result = await request('thread/queue/start', { threadId, queuedSubmissionId: first.id });
       if (!isObject(result) || !isObject(result.turn) || typeof result.turn.id !== 'string') throw new Error('Could not confirm Codex started the queued request.');
+      return result.turn.id;
     }
   } finally {
     abort.removeEventListener('abort', fail); socket.removeListener('error', fail); socket.removeListener('close', fail);
