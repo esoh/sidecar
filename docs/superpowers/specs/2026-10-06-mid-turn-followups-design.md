@@ -39,3 +39,7 @@ Native observation, handoff and control remain host-local. Reuse the viewer's li
 - Disposable live Codex and Claude sessions demonstrate busy delivery and pre-output Stop. No AMC documents or user sessions are test fixtures.
 
 Finish with focused regressions, typecheck, backend/browser checks, measured bandwidth and whole-branch review. This approval does not include installation, PR or merge.
+
+## As built — 2026-10-06
+
+The approved behavior is implemented. Claude native queued attachments restore prepared notifications after Monitor truncation and bind the receipt before model output. Runtime updates retain outstanding reply text per thread. Native completion retires partial capture buffers and also reconciles delivered ID-only inputs that have not yet been fetched. [Acceptance evidence](../../2026-10-06-mid-turn-acceptance.md) records verification and remaining native-client requirements.

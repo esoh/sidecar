@@ -25,34 +25,38 @@ Files: `src/store.ts`, store/batching/proposals/library tests.
 - [x] Settle only persisted coverage; preserve independent prior answers; late superseded finals have no effects. Validate routing and cycles through backward-only coverage.
 - [x] Migrate to state v5 using existing backup and validation paths.
 - [x] Focused 50 tests and typecheck pass.
-- [ ] Commit `feat: persist reply coverage across concurrent thread inputs`.
+- [x] Commit `feat: persist reply coverage across concurrent thread inputs`.
 
 ### Task 2: Native input/control and reply routing primitives
 
 Files: `src/codex-stream.ts`, `src/codex-queue.ts`, `src/stream.ts` and their tests.
 
-- [ ] Red regressions for exact-turn steering, lost acknowledgment, pre-output Stop and stale clicks.
-- [ ] Extend existing observer/control with native steer and independent exact-turn interruption. Preserve idle queue/start behavior and retain started turn identity.
-- [ ] Stable thread tag plus generated request receipt in prefix; preserve legacy parser callers. Route multiple marked blocks in one native message with existing limits/order validation.
-- [ ] Focused native/parser tests and typecheck; commit `feat: steer native input and retain tagged reply boundaries`.
+- [x] Red regressions for exact-turn steering, lost acknowledgment, pre-output Stop and stale clicks.
+- [x] Extend existing observer/control with native steer and independent exact-turn interruption. Preserve idle queue/start behavior and retain started turn identity.
+- [x] Stable thread tag plus generated request receipt in prefix; preserve legacy parser callers. Route multiple marked blocks in one native message with existing limits/order validation.
+- [x] Focused native/parser tests and typecheck; commit `feat: steer native input and retain tagged reply boundaries`.
 
 ### Task 3: Both transports, capture, UI and recovery
 
 Files: `src/server.ts`, `src/agent.ts`, `hooks/control.js`, `web/api.ts`, `web/conversations.tsx` and relevant integration/browser tests.
 
-- [ ] Red tests for busy delivery across threads/CLI work; every batch keeps its own receipt and capture. New preparation cannot erase streaming output.
-- [ ] Replace owner-wide single-request guard with outstanding deliveries and one continuous observer. Preserve compact events/oversized fallback, serialized handoff/capture and bounded reply-only recovery.
-- [ ] Publish independent agent control state and authenticated exact-turn Stop. Empty composer shows Stop agent from any thread before output; typed input keeps Send.
-- [ ] Interrupted/completed native turns settle only matching deliveries. Completed answers win; uncertain handoffs are not replayed. Keep Reset and restart safe.
-- [ ] Add measured interleaved-output bandwidth regression using lightweight SSE; no full history/document with chunks.
-- [ ] Focused tests, typecheck, backend and browser checks; commit `feat: deliver cross-thread inputs during active agent work`.
+- [x] Red tests for busy delivery across threads/CLI work; every batch keeps its own receipt and capture. New preparation cannot erase streaming output.
+- [x] Replace owner-wide single-request guard with outstanding deliveries and one continuous observer. Preserve compact events/oversized fallback, serialized handoff/capture and bounded reply-only recovery.
+- [x] Publish independent agent control state and authenticated exact-turn Stop. Empty composer shows Stop agent from any thread before output; typed input keeps Send.
+- [x] Interrupted/completed native turns settle only matching deliveries. Completed answers win; uncertain handoffs are not replayed. Keep Reset and restart safe.
+- [x] Add measured interleaved-output bandwidth regression using lightweight SSE; no full history/document with chunks.
+- [x] Focused tests, typecheck, backend and browser checks; commit `feat: deliver cross-thread inputs during active agent work`.
 
 ### Task 4: Shared guidance and live verification
 
 Files: `.agents/skills/sidecar/SKILL.md`, README, relevant tests and dated acceptance evidence.
 
-- [ ] Shared Codex/Claude guidance: receipt-tagged replies, same-thread coverage, separate cross-thread replies, progress/recovery/Stop. No extra tool calls for normal prepared events.
-- [ ] Disposable real Codex and Claude: hold tool busy, send correction and different-thread question; verify native receipt and final routing. Stop before output and from another thread, preserving partial/completed work and queued input.
-- [ ] Record client versions, timing and bandwidth evidence. No live user/AMC documents touched.
-- [ ] Final focused checks and whole-branch fresh reviewer; resolve reproduced findings and verify.
-- [ ] Update spec as built; commit `docs: document mid-turn delivery and agent-wide stop`; report result and concrete limitations. PR/merge/install remain outside this approval.
+- [x] Shared Codex/Claude guidance: receipt-tagged replies, same-thread coverage, separate cross-thread replies, progress/recovery/Stop. No extra tool calls for normal prepared events.
+- [x] Disposable real Codex and Claude: hold tool busy, send correction and different-thread question; verify native receipt and final routing. Stop before output and from another thread, preserving partial/completed work and queued input.
+- [x] Record client versions, timing and bandwidth evidence. No live user/AMC documents touched.
+- [x] Final focused checks and whole-branch fresh reviewer; resolve reproduced findings and verify.
+- [x] Update spec as built; commit `docs: document mid-turn delivery and agent-wide stop`; report result and concrete limitations. PR/merge/install remain outside this approval.
+
+## As built
+
+Implemented and verified on 2026-10-06. [Acceptance evidence](../../2026-10-06-mid-turn-acceptance.md) records both native clients, browser/backend gates, traffic measurement and review fixes. Claude uses a native queued-attachment hook to restore Monitor-truncated events locally; its `$` helpers are top-level for 2.1.292. Installation, PR and merge were not performed.
