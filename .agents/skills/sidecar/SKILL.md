@@ -52,16 +52,6 @@ hooks:
         - type: command
           command: 'sidecar hook --agent claude'
           timeout: 2
-  PreCompact:
-    - hooks:
-        - type: command
-          command: 'sidecar hook --agent claude'
-          timeout: 2
-  PostCompact:
-    - hooks:
-        - type: command
-          command: 'sidecar hook --agent claude'
-          timeout: 2
   Notification:
     - matcher: "idle_prompt|agent_completed|permission_prompt|agent_needs_input"
       hooks:
@@ -165,7 +155,7 @@ Codex receives native mid-turn input through `turn/steer` while working, includi
 
 `stop --owner KEY` ends that app and watcher, preserving documents and threads. Browser close alone does not stop it. Never stop the agent conversation.
 
-Codex activity is sampled read-only from its existing local daemon while a viewer is connected. Claude's native skill hooks report main-session activity, including ordinary terminal work, after this skill is invoked; subagent events are ignored. Unknown means no reliable activity signal is available. Claude user interrupts do not fire Stop; status corrects on the next native activity/idle notification. The repository's hook examples support explicit project configuration and Codex compaction; do not change user settings automatically. `hook --agent codex|claude` reads native JSON on stdin and forwards only to an already-running matching owner. Missing completion signals cannot prove cancellation. See README for scoped configuration.
+Codex activity is sampled read-only from its existing local daemon while a viewer is connected. Claude's native skill hooks report main-session activity, including ordinary terminal work, after this skill is invoked; subagent events are ignored. Its native plugin module reports foreground compaction directly and clears that status when compaction finishes, fails, or is interrupted; background precomputation does not replace Working. Reload the plugin with `/reload-plugins` (or restart Claude) after updating the module; merely reading or re-invoking the skill does not update it. Unknown means no reliable activity signal is available. Claude user interrupts do not fire Stop; status corrects on the next native activity/idle notification. The repository's hook examples support explicit project configuration and Codex compaction; do not change user settings automatically. `hook --agent codex|claude` reads native JSON on stdin and forwards only to an already-running matching owner. Missing completion signals cannot prove cancellation. See README for scoped configuration.
 
 ### Message selections
 

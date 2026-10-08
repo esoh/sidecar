@@ -11,7 +11,8 @@ async function connect($) {
     const token = (await $.fs.read(`${directory}/agent-token`)).trim();
     if (!/^[0-9a-f]{64}$/.test(token)) return;
     const post = async (event, turnId, answer, marker, resetId, activity, requestIds, recoveryId) => {
-      const response = await $.http.fetch(`${runtime.url}/agent/${event === 'inbox' ? 'inbox' : 'control'}`, {
+      const endpoint = event === 'inbox' ? 'inbox' : event.startsWith('compaction-') ? 'lifecycle' : 'control';
+      const response = await $.http.fetch(`${runtime.url}/agent/${endpoint}`, {
         method: 'POST', headers: { 'X-Sidecar-Token': token, 'Content-Type': 'application/json', 'X-Sidecar-Protocol': 'sc1' },
         body: JSON.stringify({ ownerKey, event, turnId, protocol: 'sc1', delivery: 'tool-context-v1', ...(answer ? { answer: answer.slice(0, 128 * 1024) } : {}), ...(marker ? { marker } : {}), ...(resetId ? { resetId } : {}), ...(activity ? { activity } : {}), ...(requestIds ? { requestIds } : {}), ...(recoveryId ? { recoveryId } : {}) }),
       });
@@ -126,6 +127,18 @@ export function register(on) {
   activeTurn = undefined; timer = undefined; polling = false; hasKnownState = false; handlingReset = undefined; lastCompletion = undefined; delivering = false; deliveries.clear();
   on('session.start', async ($, e, next) => { monitor($); return next(e); });
   on('session.end', async ($, e, next) => { timer?.cancel(); timer = undefined; activeTurn = undefined; hasKnownState = false; lastCompletion = undefined; return next(e); });
+  on('session.compact', async ($, e, next) => {
+    if (e.agentId || e.trigger === 'precompute') return next(e);
+    // Claude 2.1.293's classic compaction path omits skill-registered hooks.
+    let post;
+    try { post = await connect($); await post?.('compaction-started'); }
+    catch { /* Status reporting must not prevent native compaction. */ }
+    try { return await next(e); }
+    finally {
+      try { await post?.('compaction-completed'); }
+      catch { /* Preserve native success, failure, and interruption unchanged. */ }
+    }
+  });
   on('turn.start', async ($, e, next) => {
     activeTurn = e.turnId; hasKnownState = true; monitor($);
     return next({ ...e, text: await received($, e.text, e.turnId) });

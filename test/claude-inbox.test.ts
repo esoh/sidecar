@@ -104,3 +104,61 @@ test('a refused native recovery becomes retryable even though the original reque
   assert.equal(attempts, 1);
   assert.equal((await f.f.view(`/api/requests/${req.id}/retry-reply`, { recoveryId: state.requests[req.id].replyRecovery.id })).status, 202);
 });
+
+for (const trigger of ['auto', 'manual']) {
+  test(`Claude ${trigger} compaction reports its full duration through the native module`, async t => {
+    const f = await setup(t), hook = f.handlers.get('session.compact');
+    assert.ok(hook, 'native compaction observation is registered');
+    const event = { trigger, messages: [] }, result = { messages: [], tokensBefore: 100, tokensAfter: 50 };
+    const returned = await hook(f.api, event, async (input: unknown) => {
+      assert.equal(input, event, 'compaction input is unchanged');
+      assert.equal((await f.state()).activity, 'compacting');
+      await f.f.agent('/agent/control', { ownerKey: `claude-${f.f.owner.sessionId}`, event: 'poll', turnId: 'tool-turn', activity: 'busy' });
+      assert.equal((await f.state()).activity, 'compacting', 'ordinary native heartbeats do not mask compaction');
+      return result;
+    });
+    assert.equal(returned, result, 'compaction result is unchanged');
+    assert.equal((await f.state()).activity, 'busy');
+    assert.equal((await f.state()).lastLifecycle.event, 'compaction-completed');
+  });
+}
+
+for (const outcome of ['failure', 'abort', 'skip']) {
+  test(`Claude compaction ${outcome} clears its transient status without changing the outcome`, async t => {
+    const f = await setup(t), hook = f.handlers.get('session.compact');
+    assert.ok(hook, 'native compaction observation is registered');
+    const error = outcome === 'abort' ? new DOMException('Interrupted', 'AbortError') : new Error('Compaction failed');
+    const result = { skip: 'Nothing to compact' };
+    const pending = hook(f.api, { trigger: 'auto', messages: [] }, async () => {
+      assert.equal((await f.state()).activity, 'compacting');
+      if (outcome === 'skip') return result;
+      throw error;
+    });
+    if (outcome === 'skip') assert.equal(await pending, result);
+    else await assert.rejects(pending, (caught: unknown) => caught === error);
+    assert.equal((await f.state()).activity, 'busy');
+  });
+}
+
+test('subagent and background precompute compactions do not change main-session activity', async t => {
+  const f = await setup(t), hook = f.handlers.get('session.compact');
+  assert.ok(hook, 'native compaction observation is registered');
+  for (const event of [{ trigger: 'auto', agentId: 'worker', messages: [] }, { trigger: 'precompute', messages: [] }]) {
+    const result = { skip: 'test' };
+    assert.equal(await hook(f.api, event, async (input: unknown) => {
+      assert.equal(input, event);
+      assert.equal((await f.state()).activity, 'busy');
+      return result;
+    }), result);
+    assert.equal((await f.state()).lastLifecycle, null);
+  }
+});
+
+test('an unavailable Sidecar cannot prevent compaction or replace its error', async t => {
+  const f = await setup(t), hook = f.handlers.get('session.compact');
+  assert.ok(hook, 'native compaction observation is registered');
+  f.api.fs.read = async () => { throw new Error('Sidecar is not running'); };
+  const result = { skip: 'test' }, error = new Error('Native failure');
+  assert.equal(await hook(f.api, { trigger: 'manual' }, async () => result), result);
+  await assert.rejects(hook(f.api, { trigger: 'manual' }, async () => { throw error; }), (caught: unknown) => caught === error);
+});
