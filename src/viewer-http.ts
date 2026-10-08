@@ -138,7 +138,8 @@ export async function createViewerHost({ directory, port = 0, networkPort = 0, p
         throw new DomainError('Sidecar or its protected listener changed. Recheck the tunnel target before reconnecting.', 409);
       if (enabled) await prepareNetworkAuth(passphrase);
       if (enabled && !lanServer) {
-        if (!lanAddresses().length) throw new DomainError('No local IPv4 network found. Connect to Wi-Fi or Ethernet and try again.');
+        // A persistent gateway must still start locally while the laptop changes networks.
+        if (!persistNetwork && !lanAddresses().length) throw new DomainError('No local IPv4 network found. Connect to Wi-Fi or Ethernet and try again.');
         const listener = createListener(true);
         await new Promise<void>((resolve, reject) => {
           listener.once('error', reject);

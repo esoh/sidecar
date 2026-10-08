@@ -133,15 +133,13 @@ test('simultaneous stream startup shares one observer and closes it with the app
   const native = createServer(), ws = new WebSocketServer({ server: native });
   await new Promise<void>(resolve => native.listen(join(root, 'app-server-control/app-server-control.sock'), resolve));
   const owner = { agent: 'codex' as const, sessionId: randomUUID() };
-  let ordinal = 0;
   const resumes: (() => void)[] = [];
   ws.on('connection', socket => {
-    const id = ordinal++;
     socket.on('message', data => {
       const m = JSON.parse(data.toString());
       if (m.method === 'initialize') socket.send(JSON.stringify({ id: m.id, result: {} }));
       if (m.method === 'thread/read') socket.send(JSON.stringify({ id: m.id, result: { thread: { id: owner.sessionId, status: { type: 'active' } } } }));
-      if (m.method === 'thread/resume') resumes[id] = () => socket.send(JSON.stringify({ id: m.id, result: { thread: { id: owner.sessionId } } }));
+      if (m.method === 'thread/resume') resumes.push(() => socket.send(JSON.stringify({ id: m.id, result: { thread: { id: owner.sessionId } } })));
       if (m.method === 'thread/turns/list') socket.send(JSON.stringify({ id: m.id, result: { data: [] } }));
       if (m.method === 'thread/queue/list') socket.send(JSON.stringify({ id: m.id, result: { data: [], nextCursor: null } }));
     });
@@ -155,8 +153,9 @@ test('simultaneous stream startup shares one observer and closes it with the app
     const file = join(root, 'a.md'); await writeFile(file, '# Test\n' + 'x'.repeat(60000));
     const doc = await (await post('/agent/documents', { path: file })).json();
     const routes: ReplyRoute[] = [];
+    // Force ID-only delivery so this test, not automatic preparation, controls observer startup.
     for (let i = 0; i < 2; i++) {
-      const req = await (await post('/api/questions', { documentId: doc.id, text: 'Hello', clientMessageId: 'q' + i })).json();
+      const req = await (await post('/api/questions', { documentId: doc.id, text: 'Hello '.repeat(10000), clientMessageId: 'q' + i })).json();
       routes.push({ requestId: req.id, documentId: doc.id, threadId: req.threadId });
     }
     await post(`/agent/requests/${routes[0].requestId}/claim`, {});

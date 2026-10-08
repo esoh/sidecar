@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import os, { tmpdir } from 'node:os';
+import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { createServer, request } from 'node:http';
 import { createViewerHost, json } from '../src/viewer-http.ts';
@@ -48,4 +49,26 @@ test('persistent viewer login survives restart and network changes, but rotation
   assert.equal((await tunnel(target, '/api/test', undefined, cookie)).status, 401);
   await host.setNetworkAccess(false); await host.close(); host = await createViewerHost(options);
   assert.equal(host.networkStatus(true).enabled, false);
+});
+
+
+test('persisted gateway sharing keeps local browsing available offline and resumes LAN URLs', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'sidecar-offline-'));
+  const options = { directory, port: await unusedPort(), networkPort: await unusedPort(), persistNetwork: true, instanceId: 'offline', cookieName: 'gateway', capability: 'secret',
+    handle: async (_req: unknown, res: import('node:http').ServerResponse) => { json(res, { ok: true }); } };
+  let host = await createViewerHost(options);
+  t.after(async () => { await host.close(); await rm(directory, { recursive: true, force: true }); });
+  await host.setNetworkAccess(true, 'persistent offline phrase', 'https://sidecar.example.com');
+  const before = host.networkStatus(true); await host.close();
+  const mock = t.mock.method(os, 'networkInterfaces', () => ({})); syncBuiltinESMExports();
+  try {
+    host = await createViewerHost(options);
+    assert.equal((await fetch(host.url)).status, 200);
+    const offline = host.networkStatus(true);
+    assert.equal(offline.enabled, true); assert.deepEqual(offline.urls, []);
+    assert.equal(offline.passphrase, before.passphrase); assert.equal(offline.tunnelTarget, before.tunnelTarget);
+  } finally { mock.mock.restore(); syncBuiltinESMExports(); }
+  assert.deepEqual(host.networkStatus(true).urls, before.urls);
+  const login = await tunnel(before.tunnelTarget!, '/', 'passphrase=persistent+offline+phrase');
+  assert.equal(login.status, 303);
 });

@@ -101,6 +101,13 @@ test('protected gateway authenticates once, confines native APIs, and revokes a 
     assert.equal(status.passphrase, undefined); assert.equal(status.tunnelTarget, undefined);
     assert.equal((await call(prefix + '/api/network', '{"enabled":false}', { ...headers, 'Content-Type': 'application/json', 'X-Forwarded-For': '127.0.0.1', 'X-Forwarded-Host': new URL(f.gateway.url).host })).status, 403);
   }
+  for (const path of ['/api/network%3f', '/api/network%23', '/api/tunnel-config%3f', '/api/tunnel-config%23', '/api/net%09work', '/api/net%0awork', '/api/net%0dwork', '/api/network%20']) {
+    const get = await call(base + path, undefined, headers);
+    assert.ok(get.status >= 400, `encoded management read ${path}: ${get.status}`);
+    const post = await call(base + path, '{"enabled":true,"passphrase":"remote chosen phrase"}', { ...headers, 'Content-Type': 'application/json' });
+    assert.ok(post.status >= 400, `encoded management write ${path}: ${post.status}`);
+  }
+  assert.equal((await (await owner.agentCall('/agent/network')).json()).enabled, false);
   assert.equal((await call(base + '/api/questions', '{}', { ...headers, Origin: f.gateway.url })).status, 403);
   let closed!: () => void;
   const streamClosed = new Promise<void>(resolve => { closed = resolve; });

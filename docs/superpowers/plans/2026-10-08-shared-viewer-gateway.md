@@ -106,13 +106,16 @@
 - [x] Run `pnpm test`, `pnpm typecheck`, `pnpm exec playwright test` and `git diff --check`, capturing full logs. Expected green; record pre-existing failures explicitly and reproduce on base if encountered.
 - [x] Inspect scratch browser UI and gateway network traffic using disposable owners; no real viewers or tunnels.
 - [x] Commit verification/docs, prepare whole-branch review from `10424ad` through HEAD. Run one independent review under requesting-code-review, prioritizing Review Focus above. Fix confirmed important issues with red/green tests and rerun affected checks; leave review-driven changes uncommitted if reviewer is Claude until user approval.
-- [ ] Report what is implemented, checks and unverified live rollout. Keep branch local for user review; no merge/install/tunnel mutation in this plan.
+- [x] Report what is implemented, checks and unverified live rollout. Keep branch local for user review; no merge/install/tunnel mutation in this plan.
 
 ### Local execution evidence — 2026-10-08
 
-Tasks 1–6 are saved as local commits. Task 7 added remote/native boundary, old
-backend, stream revocation, Stop/Reset isolation and draft/idle-traffic checks.
-Backend/script suite: 274 passing with four workers; types and whitespace clean.
-Browser: 122 passing in the full run, plus the corrected pre-existing settings
-fixture passing independently. A final whole-browser rerun and independent review
-are recorded with the final handoff. Live rollout remains outside this plan.
+All seven tasks are implemented and verified locally. Final backend/script suite:
+275 passing with four workers; type and whitespace checks pass. Full browser suite:
+123 passing; six affected browser scenarios reran successfully after review fixes.
+One independent review identified encoded-path privilege escalation and offline
+startup failure; both have RED-to-GREEN regression coverage. The spec's As built
+section records the fixes and two baseline-proven fixture corrections.
+
+The branch remains local. Installation, real viewer/plugin reload, phone testing
+and live tunnel ingress changes remain separate authorized rollout work.

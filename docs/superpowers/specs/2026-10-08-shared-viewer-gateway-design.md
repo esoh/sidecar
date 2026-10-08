@@ -193,15 +193,24 @@ module fix: native `session.compact` middleware reports start and clears status 
 completion, failure or interruption, while ignoring background/subagent work.
 
 Local verification used disposable Codex/Claude owner services and native-control
-fixtures, not real agent sessions. Backend/script checks passed all 274 tests with
-four workers; an initial unbounded run stalled in a Reset test under concurrent
-browser load, while isolated Reset passed all 10 tests. The browser run passed
-122 scenarios; its remaining settings fixture also failed on the unchanged base
-because it read the machine's Cloudflare preference instead of ngrok defaults.
-Isolating that fixture passed its rerun. Gateway checks cover prefixed rendering,
-files/images/history/proposals, draft storage, idle traffic, library sorting and
-stopped previews; HTTP checks cover native-route denial, owner identity, Stop/Reset
-routing, credential persistence and revocation of an open stream. Type checks pass.
+fixtures, not real agent sessions. The final backend/script suite passed all 275
+tests with four workers; type and whitespace checks passed. All 123 browser
+scenarios passed, followed by six affected gateway/LAN/browser scenarios after
+the review fixes. Gateway checks cover rendering, files/images/history/proposals,
+draft storage, idle traffic, sorting, stopped previews, owner identity and Stop/Reset.
+
+One independent review found two issues, both reproduced by failing tests before
+fixing: decoded URL delimiters could bypass gateway management checks, and saved
+sharing could prevent local startup without a LAN address. Upstream paths now
+retain literal character encoding; a persistent gateway can bind its configured
+listener offline and publish LAN URLs when an interface returns. Regression tests
+cover encoded query/fragment/control characters and live-stream revocation.
+
+Two pre-existing fixtures were corrected after reproducing failures on `10424ad`:
+ngrok settings now use scratch config instead of machine preferences, and the
+Codex observer fixture explicitly forces ID-only delivery and waits for an actual
+resume request rather than assuming socket order. An initial unbounded suite
+stalled under concurrent load; the complete final suite uses four workers.
 
 No installation, native plugin reload, real viewer restart, live tunnel change,
 phone test or live Claude compaction was performed. Those remain rollout checks,

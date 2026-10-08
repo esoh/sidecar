@@ -138,7 +138,10 @@ export async function startGateway({ stateRoot, port = 43120, networkPort = 4312
       const document = await libraryDocument(stateRoot, owner, target.searchParams.get('document') ?? '');
       await serveDocumentImage(document.path, target, response); return;
     }
-    if (key && path.startsWith('/api/')) { await proxy(key, path + target.search, request, response); return; }
+    if (key && path.startsWith('/api/')) {
+      // Preserve literal path characters across the second URL parse; encoded delimiters cannot become management routes.
+      await proxy(key, path.split('/').map(encodeURIComponent).join('/') + target.search, request, response); return;
+    }
     throw new DomainError('Not found', 404);
   }
   return { ...host, close, done, instanceId };
