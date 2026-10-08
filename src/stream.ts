@@ -1,3 +1,4 @@
+import { isAgentAlias } from './agent-ids.ts';
 import { randomUUID } from 'node:crypto';
 import { DomainError, isObject } from './store.ts';
 import { parseReply, type ReplyMetadata } from './reply-metadata.ts';
@@ -7,6 +8,39 @@ export type ProgressReply = { messageId: string; text: string };
 export type ReplyRoute = { requestId: string; documentId: string; threadId: string };
 export function isStreamEvent(value: unknown): value is StreamEvent {
   return isObject(value) && typeof value.messageId === 'string' && value.messageId.length > 0 && value.messageId.length < 256 && typeof value.turnId === 'string' && value.turnId.length > 0 && value.turnId.length < 256 && Number.isSafeInteger(value.index) && Number(value.index) >= 0 && typeof value.delta === 'string' && typeof value.final === 'boolean';
+}
+
+export function compactReplyMarkers(requestAlias: string) {
+  if (!isAgentAlias(requestAlias, 'r')) throw new DomainError('Invalid reply alias');
+  return { prefix: `[[sc:${requestAlias}]]\n`, suffix: `\n[[/sc:${requestAlias}]]`,
+    progress: { prefix: `[[scp:${requestAlias}]]\n`, suffix: `\n[[/scp:${requestAlias}]]` } };
+}
+
+// Only standalone, unfenced marker lines are protocol boundaries.
+export function findReplyBlocks(text: string, streams: ReadonlyMap<string, ReplyStream>) {
+  const blocks: Array<{ stream: ReplyStream; start: number; end: number | null }> = [];
+  const openings = new Map<string, Array<{ stream: ReplyStream; prefix: string; suffix: string }>>();
+  for (const stream of streams.values()) for (const markers of [stream, stream.progress]) {
+    const line = markers.prefix.split('\n')[0];
+    openings.set(line, [...(openings.get(line) ?? []), { stream, prefix: markers.prefix, suffix: markers.suffix }]);
+  }
+  let offset = 0, fence: { char: string; length: number } | undefined;
+  let active: { stream: ReplyStream; start: number; suffix: string } | undefined;
+  for (const line of text.split('\n')) {
+    const match = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fence) {
+      if (match && match[1][0] === fence.char && match[1].length >= fence.length && !match[2].trim()) fence = undefined;
+    } else if (match) fence = { char: match[1][0], length: match[1].length };
+    else if (active) {
+      if (line === active.suffix.slice(1)) { blocks.push({ stream: active.stream, start: active.start, end: offset + line.length }); active = undefined; }
+    } else {
+      const opening = openings.get(line)?.find(candidate => text.startsWith(candidate.prefix, offset));
+      if (opening) active = { stream: opening.stream, start: offset, suffix: opening.suffix };
+    }
+    offset += line.length + 1;
+  }
+  if (active) blocks.push({ stream: active.stream, start: active.start, end: null });
+  return blocks;
 }
 
 // Drafts are transient; the reply transaction is the durable completion boundary.
@@ -19,25 +53,30 @@ export class ReplyStream {
   metadata: ReplyMetadata = {};
   error: string | null = null;
   done = false;
+  hasFinalStarted = false;
   turnId: string | undefined;
   private endedTurns = new Set<string>();
   private messages = new Map<string, { next: number; raw: string; pending: Map<number, StreamEvent>; ignored: boolean }>();
   private started = false;
   private completedProgress = new Set<string>();
   private received = 0;
-  constructor(readonly route: ReplyRoute, stableThreadTag = false) {
+  constructor(readonly route: ReplyRoute, stableThreadTag = false, readonly requestAlias?: string) {
     const nonce = stableThreadTag ? route.threadId : randomUUID();
     const receipt = stableThreadTag ? `[[sidecar-reply:${route.requestId}]]\n` : '';
     this.prefix = `[[sidecar:${nonce}]]\n${receipt}`;
     this.suffix = `\n[[/sidecar:${nonce}]]`;
     this.progress = { prefix: `[[sidecar-progress:${nonce}]]\n${receipt}`, suffix: `\n[[/sidecar-progress:${nonce}]]` };
+    if (requestAlias) { const markers = compactReplyMarkers(requestAlias); this.prefix = markers.prefix; this.suffix = markers.suffix; this.progress = markers.progress; }
   }
   get hasStarted() { return this.started; }
   get isTurnActive() { return !!this.turnId && !this.endedTurns.has(this.turnId); }
   endTurn(turnId: string) { this.endedTurns.add(turnId); }
   recoverPartial(raw: string) {
     const prefix = raw.startsWith(this.prefix) ? this.prefix : raw.startsWith(this.progress.prefix) ? this.progress.prefix : undefined;
-    if (prefix) this.render(raw, false, prefix, prefix === this.prefix ? this.suffix : this.progress.suffix);
+    if (prefix) {
+      if (prefix === this.prefix) this.hasFinalStarted = true;
+      this.render(raw, false, prefix, prefix === this.prefix ? this.suffix : this.progress.suffix);
+    }
   }
   fail(message: string) { if (!this.done) this.error = message; }
   accept(event: StreamEvent): ProgressReply | undefined {
@@ -68,6 +107,7 @@ export class ReplyStream {
       }
       this.progressMessageId = isProgress ? `progress:${this.route.requestId}:${key}` : undefined;
       this.started = true;
+      if (!isProgress) this.hasFinalStarted = true;
       this.turnId = event.turnId;
       const suffix = isProgress ? this.progress.suffix : this.suffix;
       const isComplete = this.render(candidate.raw, next.final, prefix, suffix);
@@ -88,7 +128,8 @@ export class ReplyStream {
   }
   private render(raw: string, final: boolean, prefix: string, suffix: string) {
     const body = raw.slice(prefix.length);
-    const end = body.indexOf(suffix);
+    const block = findReplyBlocks(raw, new Map([[this.route.requestId, this]]))[0];
+    const end = block?.end == null ? -1 : block.end - suffix.length - prefix.length;
     if (end !== -1) this.text = body.slice(0, end);
     else {
       let held = Math.min(body.length, suffix.length - 1);
@@ -136,14 +177,8 @@ export class ThreadReplyRouter {
     message.pending.set(event.index, event);
     while (message.pending.has(message.next)) {
       const part = message.pending.get(message.next)!; message.pending.delete(message.next++); message.raw += part.delta;
-      const pattern = /(?:^|\n)(\[\[(sidecar(?:-progress)?):([0-9a-f-]{36})\]\]\n\[\[sidecar-reply:([0-9a-f-]{36})\]\]\n)/g;
-      for (const match of message.raw.matchAll(pattern)) {
-        const stream = streams.get(match[4]);
-        if (!stream || stream.route.threadId !== match[3]) continue;
-        const start = match.index + match[0].length - match[1].length;
-        const suffix = match[2] === 'sidecar-progress' ? stream.progress.suffix : stream.suffix;
-        const end = message.raw.indexOf(suffix, start + match[1].length);
-        const raw = message.raw.slice(start, end < 0 ? undefined : end + suffix.length);
+      for (const { stream, start, end } of findReplyBlocks(message.raw, streams)) {
+        const raw = message.raw.slice(start, end ?? undefined);
         let block = message.blocks.get(start);
         if (!block) { block = { index: 0, sent: 0, final: false }; message.blocks.set(start, block); }
         if (block.final || raw.length === block.sent && !part.final) continue;
