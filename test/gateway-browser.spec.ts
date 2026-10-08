@@ -60,3 +60,40 @@ test('prefixed images, file windows, proposals and original versions remain on t
   await expect.poll(() => readFile(path, 'utf8')).toContain('Revised document.');
   expect(await readFile(join(f.owners[0].directory, 'review.md'), 'utf8')).toContain('Own document.');
 });
+
+test('global agents and owner documents have independent remembered sort settings', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.goto(f.gateway.url);
+  await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible();
+  const rows = page.locator('.library-agent-row'); await expect(rows).toHaveCount(2);
+  await expect(rows.filter({ hasText: f.owners[0].owner.sessionId })).toContainText('1 document');
+  await rows.filter({ hasText: f.owners[0].owner.sessionId }).getByRole('button', { name: 'Copy session ID' }).click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(f.owners[0].owner.sessionId);
+  await page.getByRole('button', { name: 'Sort agents' }).click();
+  await page.getByRole('menuitemradio', { name: 'Recent conversation activity' }).click();
+  await page.getByRole('link', { name: new RegExp(f.owners[1].owner.sessionId) }).click();
+  await expect(page.getByRole('heading', { name: 'Documents', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Sort documents' })).toContainText('Last opened');
+  await page.getByRole('button', { name: 'Sort documents' }).click();
+  await page.getByRole('menuitemradio', { name: 'Recent conversation activity' }).click();
+  await page.reload(); await expect(page.getByRole('button', { name: 'Sort documents' })).toContainText('Recent conversation activity');
+  await page.getByRole('link', { name: 'All agents', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Sort agents' })).toContainText('Recent conversation activity');
+  await page.screenshot({ path: '/private/tmp/sidecar-gateway-agents.png' });
+});
+
+test('stopped agent retains preview and close confirmation, including its empty document list', async ({ page }) => {
+  const owner = f.owners[1]; await owner.stop();
+  await page.goto(f.gateway.url);
+  await expect(page.locator('.library-agent-row').filter({ hasText: owner.owner.sessionId })).toContainText('Stopped');
+  await page.getByRole('link', { name: new RegExp(owner.owner.sessionId) }).click();
+  await page.getByRole('link', { name: /^claude/ }).click();
+  await expect(page.getByRole('article', { name: 'Document' })).toContainText('Own document.');
+  await page.getByRole('link', { name: 'All documents', exact: true }).click();
+  page.once('dialog', dialog => dialog.dismiss()); await page.getByRole('button', { name: 'Close “claude”' }).click();
+  await expect(page.getByRole('link', { name: /^claude/ })).toBeVisible();
+  page.once('dialog', dialog => dialog.accept()); await page.getByRole('button', { name: 'Close “claude”' }).click();
+  await expect(page.getByText('No saved documents.', { exact: true })).toBeVisible();
+  await page.getByRole('link', { name: 'All agents', exact: true }).click();
+  await expect(page.locator('.library-agent-row').filter({ hasText: owner.owner.sessionId })).toContainText('0 documents');
+});

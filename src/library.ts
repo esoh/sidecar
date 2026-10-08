@@ -1,3 +1,4 @@
+import { sortDocuments, sortSessions } from './library-sort.ts';
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { agentFetch, appStatus, parseOwner, readRuntime } from './agent.ts';
@@ -72,8 +73,8 @@ export async function listLibrary(root: string, includeEmpty = false): Promise<L
         const lastOpenedAt = await stat(join(directory, 'opened', document.id)).then(stat => stat.mtimeMs).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
         return { id: document.id, title, lastOpenedAt, path: document.path, threadCount: threads.length, updatedAt: Math.max(0, ...threads.map(thread => thread.messages.at(-1)?.createdAt ?? thread.createdAt ?? 0)) };
       }));
-      return { owner: state.owner, ownerKey: entry.name, url, documents: documents.sort((a, b) => (b.lastOpenedAt ?? 0) - (a.lastOpenedAt ?? 0) || b.updatedAt - a.updatedAt) };
+      return { owner: state.owner, ownerKey: entry.name, url, documents: sortDocuments(documents, 'opened') };
     } catch { unavailable++; return null; }
   }));
-  return { sessions: sessions.filter((session): session is LibrarySession => session !== null).sort((a, b) => (b.documents[0]?.lastOpenedAt ?? 0) - (a.documents[0]?.lastOpenedAt ?? 0) || (b.documents[0]?.updatedAt ?? 0) - (a.documents[0]?.updatedAt ?? 0)), unavailable };
+  return { sessions: sortSessions(sessions.filter((session): session is LibrarySession => session !== null), 'opened'), unavailable };
 }
