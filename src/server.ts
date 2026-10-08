@@ -1,13 +1,11 @@
+import { createViewerHost, bodyOf, json, sendBody, type ViewerContext } from './viewer-http.ts';
+import { viewerHtml, serveViewerAsset } from './viewer-assets.ts';
 import { openAgentIds, isAgentAlias, type IdKind } from './agent-ids.ts';
 import { compactNotification, compactContext } from './agent-protocol.ts';
-import { build } from 'esbuild';
-import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { randomBytes, randomUUID, timingSafeEqual, createHash } from 'node:crypto';
-import { gzip } from 'node:zlib';
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { networkInterfaces } from 'node:os';
-import { readFile, writeFile, realpath, mkdir, rm, stat, rename } from 'node:fs/promises';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { type IncomingMessage, type ServerResponse } from 'node:http';
+import { readFile, writeFile, realpath, rm, stat } from 'node:fs/promises';
 import { basename, join, dirname, relative, isAbsolute, extname } from 'node:path';
 import { notifyCodex } from './agent.ts';
 import { reconcileCodexQueue } from './codex-queue.ts';
@@ -26,13 +24,6 @@ import { claim, createThread, closeDocument, discardEmptyThread, nameThread, pin
 import { isPinStyle } from './pin-style.ts';
 import { stopRequest, prepareBatch, requestBatch, setMessageSelectionVisibility, type State } from './store.ts';
 import { isMessageQuote, isFileQuote } from './quote.ts';
-
-const rendererRequire = createRequire(import.meta.resolve('@plannotator/ui/components/BlockRenderer'));
-const rendererFonts = {
-  katex: rendererRequire.resolve('katex/dist/katex.min.css'),
-  inter: rendererRequire.resolve('@fontsource-variable/inter/index.css'),
-  geist: rendererRequire.resolve('@fontsource-variable/geist-mono/index.css'),
-};
 
 type DocumentData = Awaited<ReturnType<typeof readDocument>>;
 type Cached = { data: DocumentData } | { error: string; status: number };
@@ -64,60 +55,6 @@ function markAccepted(state: State, id: string, nativeTurnId?: string) {
     }
   }
 }
-async function bodyOf(request: IncomingMessage): Promise<Record<string, unknown>> {
-  let size = 0;
-  const chunks: Buffer[] = [];
-  for await (const chunk of request) {
-    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += bytes.length;
-    if (size <= 256 * 1024) chunks.push(bytes);
-  }
-  if (size > 256 * 1024) throw new DomainError('Request exceeds 256 KiB', 413);
-  let value: unknown;
-  try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
-  catch { throw new DomainError('Invalid JSON'); }
-  if (!isObject(value)) throw new DomainError('Expected a JSON object');
-  return value;
-}
-function sameSecret(value: unknown, secret: string): boolean {
-  return typeof value === 'string' && Buffer.byteLength(value) === Buffer.byteLength(secret) && timingSafeEqual(Buffer.from(value), Buffer.from(secret));
-}
-function sendBody(response: ServerResponse, body: string | Uint8Array, isAsset = false): void {
-  const bytes = Buffer.from(body);
-  response.setHeader('Vary', 'Accept-Encoding');
-  if (isAsset) {
-    const etag = `W/"${createHash('sha256').update(bytes).digest('hex')}"`;
-    // Revalidate after authentication, including after an upgrade or passphrase change.
-    response.setHeader('Cache-Control', 'private, no-cache');
-    response.setHeader('ETag', etag);
-    if (response.req.headers['if-none-match']?.split(',').map(value => value.trim()).some(value => value === etag || value === '*')) {
-      response.writeHead(304); response.end(); return;
-    }
-  }
-  const encodings = (response.req.headers['accept-encoding'] ?? '').toLowerCase().split(',').map(value => value.trim().split(/;\s*/));
-  const encoding = encodings.find(([name]) => name === 'gzip') ?? encodings.find(([name]) => name === '*');
-  const quality = encoding?.slice(1).find(value => value.startsWith('q='))?.slice(2);
-  const canCompress = !!encoding && (quality === undefined || (Number(quality) > 0 && Number(quality) <= 1));
-  const finish = (data: Buffer) => { response.setHeader('Content-Length', data.length); response.end(data); };
-  if (canCompress && bytes.length >= 1024) {
-    gzip(bytes, (error, compressed) => {
-      if (response.destroyed) return;
-      if (error) { response.destroy(error); return; }
-      response.setHeader('Content-Encoding', 'gzip'); finish(compressed);
-    });
-  } else finish(bytes);
-}
-function json(response: ServerResponse, value: unknown, status = 200): void {
-  response.statusCode = status;
-  response.setHeader('Content-Type', 'application/json; charset=utf-8');
-  sendBody(response, JSON.stringify(value));
-}
-function closeListener(server: ReturnType<typeof createServer>): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => server.closeAllConnections(), 100); timer.unref();
-    server.close(error => { clearTimeout(timer); if (error) reject(error); else resolve(); });
-  });
-}
 function requestContext(state: State, id: string) {
   const requests = requestBatch(state, id), request = get(state.requests, id), thread = get(state.threads, request.threadId);
   const questions = thread.messages.filter(message => message.role === 'user');
@@ -145,12 +82,10 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
   catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error; }
   const agentToken = (await readFile(tokenPath, 'utf8')).trim();
   if (!/^[0-9a-f]{64}$/.test(agentToken)) throw new Error('Invalid agent capability file');
-  const viewerToken = randomBytes(32).toString('hex');
   const cookieName = `sidecar_${ownerKey(owner).replaceAll('-', '_')}`;
   const cache = new Map<string, Cached>();
   const documentReads = new Set<{ documentId: string; done: Promise<void> }>();
   const viewers = new Map<ServerResponse, boolean>();
-  let appBundle: Promise<Uint8Array> | undefined;
   let stateRevision = 0, runtimeRevision = 0, sentRuntimeRevision = 0, lastRuntime = '';
   const agents = new Map<ServerResponse, Set<string>>();
   let url = '';
@@ -694,171 +629,13 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
     });
   }
 
-  function createListener(isLan = false) {
-    const listener = createServer((request, response) => { void handle(request, response, isLan); });
-    listener.requestTimeout = 10000;
-    listener.headersTimeout = 10000;
-    return listener;
-  }
-  const server = createListener();
-  let lanServer: ReturnType<typeof createServer> | undefined;
-  let lanChange: Promise<void> = Promise.resolve();
-  let lanAuth: { passphrase: string; token: string } | undefined;
-  let publicUrl: string | null = null;
-  let failedLogins = 0, loginWindow = 0;
-  const lanCookieName = `${cookieName}_lan`;
-  // No Sidecar sign-in timeout. Renew persistent browser storage on authenticated visits.
-  const networkCookie = (isSecure: boolean) => `${lanCookieName}=${lanAuth?.token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=34560000${isSecure ? '; Secure' : ''}`;
-  async function prepareNetworkAuth(passphrase?: string) {
-    const path = join(directory, 'network-auth.json');
-    if (!lanAuth) {
-      try {
-        const saved: unknown = JSON.parse(await readFile(path, 'utf8'));
-        if (!isObject(saved) || typeof saved.passphrase !== 'string' || saved.passphrase.length < 8 || saved.passphrase.length > 128 || typeof saved.token !== 'string' || !/^[a-f0-9]{64}$/.test(saved.token)) throw new Error('Saved network credentials are invalid');
-        lanAuth = { passphrase: saved.passphrase, token: saved.token };
-      } catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error; }
-    }
-    if (lanAuth && (passphrase === undefined || passphrase === lanAuth.passphrase)) return;
-    const next = { passphrase: passphrase ?? randomBytes(6).toString('hex'), token: randomBytes(32).toString('hex') };
-    const temporary = `${path}.${randomUUID()}.tmp`;
-    try {
-      await writeFile(temporary, JSON.stringify(next), { mode: 0o600, flag: 'wx' });
-      await rename(temporary, path);
-    } finally { await rm(temporary, { force: true }); }
-    lanAuth = next; failedLogins = 0;
-    // Revoke connected browsers too, so an old SSE connection cannot keep receiving updates.
-    lanServer?.closeAllConnections();
-  }
-  const lanAddresses = () => [...new Set(Object.values(networkInterfaces()).flatMap(addresses =>
-    addresses?.filter(address => address.family === 'IPv4' && !address.internal).map(address => address.address) ?? []))];
-  function networkStatus(isLocal: boolean) {
-    const address = lanServer?.address();
-    const urls = address && typeof address !== 'string' ? lanAddresses().map(ip => `http://${ip}:${address.port}`) : [];
-    return { enabled: !!lanServer, urls, publicUrl, isLocal, ...(isLocal ? {
-      passphrase: lanServer ? lanAuth?.passphrase ?? null : null,
-      tunnelTarget: address && typeof address !== 'string' ? `http://127.0.0.1:${address.port}` : null,
-    } : {}) };
-  }
-  function setNetworkAccess(enabled: boolean, passphrase?: string, nextPublicUrl?: string, expectedTunnelTarget?: string, expectedInstanceId?: string) {
-    if (nextPublicUrl) {
-      let parsed: URL;
-      try { parsed = new URL(nextPublicUrl); } catch { throw new DomainError('Enter an HTTPS address without a path, query, or fragment.'); }
-      if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash || nextPublicUrl.length > 2048)
-        throw new DomainError('Enter an HTTPS address without credentials, a path, query, or fragment.');
-      nextPublicUrl = parsed.origin;
-    }
-    if (passphrase !== undefined && (passphrase.length < 8 || passphrase.length > 128)) throw new DomainError('Use a passphrase between 8 and 128 characters.');
-    // Serialize toggles so a late enable cannot reopen access after Disable.
-    const change = lanChange.then(async () => {
-      if (closed) throw new DomainError('Sidecar is stopping', 503);
-      if ((expectedInstanceId !== undefined && expectedInstanceId !== instanceId) ||
-          (expectedTunnelTarget !== undefined && expectedTunnelTarget !== networkStatus(true).tunnelTarget))
-        throw new DomainError('Sidecar or its protected listener changed. Recheck the tunnel target before reconnecting.', 409);
-      if (enabled) await prepareNetworkAuth(passphrase);
-      if (enabled && !lanServer) {
-        if (!lanAddresses().length) throw new DomainError('No local IPv4 network found. Connect to Wi-Fi or Ethernet and try again.');
-        const listener = createListener(true);
-        await new Promise<void>((resolve, reject) => {
-          listener.once('error', reject);
-          listener.listen(0, '0.0.0.0', () => { listener.off('error', reject); resolve(); });
-        });
-        lanServer = listener;
-      } else if (!enabled && lanServer) {
-        const listener = lanServer; lanServer = undefined;
-        await closeListener(listener);
-      }
-      const next = enabled ? nextPublicUrl === undefined ? publicUrl : nextPublicUrl || null : null;
-      if (next !== publicUrl) { publicUrl = next; lanServer?.closeAllConnections(); }
-    });
-    lanChange = change.catch(() => {});
-    return change;
-  }
-  async function handle(request: IncomingMessage, response: ServerResponse, isLan: boolean) {
-    response.setHeader('Cache-Control', 'no-store');
-    response.setHeader('X-Content-Type-Options', 'nosniff');
-    response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
+  async function handle(request: IncomingMessage, response: ServerResponse, context: ViewerContext) {
+    const { target, method, origin, isAgent } = context, isLan = !context.isLocal;
+    let { path } = context;
     try {
       if (closed) throw new DomainError('Sidecar is stopping. Reopen it from your agent.', 503);
-      const isTunnel = !!(isLan && publicUrl && request.headers.host === new URL(publicUrl).host);
-      // Only a loopback proxy for the explicitly allowed HTTPS origin can use this route.
-      // Forwarded headers never select an origin or grant localhost/agent privileges.
-      if (isTunnel && (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(request.socket.remoteAddress ?? '') || request.headers['x-forwarded-proto'] !== 'https'))
-        throw new DomainError('Use an HTTPS tunnel forwarded through localhost', 403);
-      const origin = isTunnel && publicUrl ? publicUrl : isLan ? `http://${request.headers.host}` : url;
-      if (isLan ? !isTunnel && !networkStatus(false).urls.includes(origin) : request.headers.host !== new URL(url).host) throw new DomainError('Invalid host', 403);
-      if (request.headers.origin !== undefined && request.headers.origin !== origin) throw new DomainError('Foreign origin', 403);
-      const target = new URL(request.url ?? '/', origin);
-      if (target.origin !== origin) throw new DomainError('Foreign request target', 403);
-      let path = decodeURIComponent(target.pathname);
-      const method = request.method ?? 'GET';
-      const name = isLan ? lanCookieName : cookieName;
-      const cookie = request.headers.cookie?.split(';').map(part => part.trim()).find(part => part.startsWith(`${name}=`))?.slice(name.length + 1);
-      const hasViewer = isLan ? !!lanAuth && sameSecret(cookie, lanAuth.token) : sameSecret(cookie, viewerToken);
-      if (isLan && hasViewer) response.setHeader('Set-Cookie', networkCookie(isTunnel));
-      async function unlockPage(error = '', status = 200) {
-        response.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
-        response.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' });
-        response.end((await readFile(new URL('../web/unlock.html', import.meta.url), 'utf8')).replace('<!-- error -->', error ? `<p role="alert">${error}</p>` : ''));
-      }
-      if (isLan && path === '/' && method === 'POST') {
-        if (request.headers.origin !== origin) throw new DomainError('Origin required', 403);
-        if (request.headers['content-type']?.split(';')[0] !== 'application/x-www-form-urlencoded') throw new DomainError('Expected a login form', 415);
-        const chunks: Buffer[] = []; let size = 0;
-        for await (const chunk of request) { size += chunk.length; if (size > 2048) throw new DomainError('Login form is too large', 413); chunks.push(chunk); }
-        const form = new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
-        // One budget per viewer also limits distributed guesses at the shared passphrase.
-        if (Date.now() - loginWindow >= 60000) { failedLogins = 0; loginWindow = Date.now(); }
-        if (failedLogins >= 10) { response.setHeader('Retry-After', '60'); await unlockPage('Too many attempts. Try again in a minute.', 429); return; }
-        if (!lanAuth || !sameSecret(form.get('passphrase'), lanAuth.passphrase)) {
-          failedLogins++; await unlockPage('Incorrect passphrase.', 401); return;
-        }
-        failedLogins = 0;
-        response.setHeader('Set-Cookie', networkCookie(isTunnel));
-        response.writeHead(303, { Location: '/' + target.search }); response.end(); return;
-      }
-      if (method === 'GET' && path === '/') {
-        if (!isLan && ['cross-site', 'same-site'].includes(String(request.headers['sec-fetch-site']))) throw new DomainError('Open Sidecar from the agent', 403);
-        if (isLan && !hasViewer) { await unlockPage(); return; }
-        if (!isLan) response.setHeader('Set-Cookie', `${cookieName}=${viewerToken}; HttpOnly; SameSite=Strict; Path=/`);
-        response.setHeader('Content-Type', 'text/html; charset=utf-8');
-        let html = '<!doctype html><html lang="en"><title>Sidecar</title><body><p>Sidecar document server is running.</p></body></html>';
-        try { html = await readFile(new URL('../web/index.html', import.meta.url), 'utf8'); }
-        catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error; }
-        response.end(html);
-        return;
-      }
-      const isAgent = path.startsWith('/agent/');
-      if (isAgent) {
-        if (isLan) throw new DomainError('Agent endpoints are local only', 403);
-        if (!sameSecret(request.headers['x-sidecar-token'], agentToken)) throw new DomainError('Agent capability required', 403);
-      } else {
-        if (!hasViewer) throw new DomainError(isLan ? 'Reload this page to enter the network passphrase.' : 'Open Sidecar from the agent', isLan ? 401 : 403);
-        if (method !== 'GET' && method !== 'HEAD' && request.headers.origin !== origin) throw new DomainError('Origin required', 403);
-      }
-      if (method === 'GET' && path === '/app.js') {
-        response.setHeader('Content-Type', 'text/javascript; charset=utf-8');
-        // One build per server; the browser revalidates the content hash on later loads.
-        appBundle ??= build({ entryPoints: [fileURLToPath(new URL('../web/app.tsx', import.meta.url))], bundle: true, write: false, minify: true, format: 'esm', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' } })
-          .then(bundle => bundle.outputFiles[0].contents).catch(error => { appBundle = undefined; throw error; });
-        sendBody(response, await appBundle, true);
-        return;
-      }
-      if (method === 'GET' && path === '/renderer.css') {
-        response.setHeader('Content-Type', 'text/css; charset=utf-8');
-        const styles = await readFile(new URL(import.meta.resolve('@plannotator/ui/styles.css')), 'utf8');
-        const fonts = await Promise.all(Object.entries(rendererFonts).map(async ([family, cssPath]) =>
-          (await readFile(cssPath, 'utf8')).replaceAll(/url\((?:\.\/files|fonts)\//g, `url(/renderer-fonts/${family}/`)));
-        sendBody(response, [styles, ...fonts].join('\n'), true);
-        return;
-      }
-      const font = path.match(/^\/renderer-fonts\/(katex|inter|geist)\/([A-Za-z0-9_-]+\.(?:woff2?|ttf))$/);
-      if (method === 'GET' && font) {
-        const family = font[1], name = font[2];
-        if (family !== 'katex' && family !== 'inter' && family !== 'geist') throw new DomainError('Unknown font', 404);
-        response.setHeader('Content-Type', name.endsWith('.woff2') ? 'font/woff2' : name.endsWith('.woff') ? 'font/woff' : 'font/ttf');
-        sendBody(response, await readFile(join(dirname(rendererFonts[family]), family === 'katex' ? 'fonts' : 'files', name)), true);
-        return;
-      }
+      if (method === 'GET' && path === '/') { response.setHeader('Content-Type', 'text/html; charset=utf-8'); response.end(await viewerHtml()); return; }
+      if (await serveViewerAsset(path, method, response)) return;
       if (method === 'GET' && path === '/api/image') {
         const key = target.searchParams.get('owner');
         const document = key
@@ -879,17 +656,8 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
         response.end(await readFile(imagePath));
         return;
       }
-      if (method === 'GET' && path === '/favicon.svg') {
-        response.setHeader('Content-Type', 'image/svg+xml');
-        sendBody(response, await readFile(new URL('../web/favicon.svg', import.meta.url), 'utf8'), true); return;
-      }
-      if (method === 'GET' && path === '/app.css') {
-        response.setHeader('Content-Type', 'text/css; charset=utf-8');
-        sendBody(response, await readFile(new URL('../web/app.css', import.meta.url), 'utf8'), true);
-        return;
-      }
       if (method === 'GET' && path === '/api/state') { json(response, snapshot()); return; }
-      if (method === 'GET' && (path === '/api/network' || path === '/agent/network')) { json(response, networkStatus(!isLan)); return; }
+      if (method === 'GET' && (path === '/api/network' || path === '/agent/network')) { json(response, host.networkStatus(!isLan)); return; }
       if (method === 'GET' && path === '/api/library') {
         const library = await listLibrary(dirname(directory));
         // Other owners have their own opt-in listener; never send a phone to its own localhost.
@@ -1010,8 +778,8 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
 
       if (method === 'POST' && (path === '/api/network' || path === '/agent/network')) {
         if (isLan) throw new DomainError('Manage network access from the local viewer', 403);
-        await setNetworkAccess(boolean(body, 'enabled'), optionalText(body, 'passphrase'), optionalText(body, 'publicUrl'), optionalText(body, 'expectedTunnelTarget'), optionalText(body, 'expectedInstanceId'));
-        json(response, networkStatus(true)); return;
+        await host.setNetworkAccess(boolean(body, 'enabled'), optionalText(body, 'passphrase'), optionalText(body, 'publicUrl'), optionalText(body, 'expectedTunnelTarget'), optionalText(body, 'expectedInstanceId'));
+        json(response, host.networkStatus(true)); return;
       }
       const agentClose = path.match(/^\/agent\/documents\/([^/]+)\/close$/);
       if (method === 'POST' && agentClose) {
@@ -1331,10 +1099,8 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
     }
   }
   await proposalService.recover();
-  await new Promise<void>((resolveListen, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolveListen(); }); });
-  const address = server.address();
-  if (!address || typeof address === 'string') throw new Error('No listening address');
-  url = `http://127.0.0.1:${address.port}`;
+  const host = await createViewerHost({ directory, port, cookieName, capability: agentToken, instanceId, handle });
+  url = host.url;
   await Promise.all(Object.values(store.read().documents).map(refresh));
   const polling = setInterval(() => {
     if (claudeControl?.seenAt && Date.now() - claudeControl.seenAt >= 2500) { claudeControl.seenAt = 0; runtimeChanged(); }
@@ -1363,9 +1129,7 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
     if (closePromise) return closePromise;
     closed = true; stopObserver?.(); clearStop(); clearTimeout(streamTimer); transportAbort.abort(); clearInterval(polling); clearInterval(heartbeat); clearInterval(activityPolling);
     for (const response of [...viewers.keys(), ...agents.keys()]) response.end();
-    closePromise = Promise.all([closeListener(server), lanChange.then(async () => {
-      if (lanServer) { const listener = lanServer; lanServer = undefined; await closeListener(listener); }
-    })]).then(() => {});
+    closePromise = host.close();
     await closePromise; await dispatchWork; await nativeQueueWork; await resetWork; await captureWork; await finalizing; await proposalService.drain(); finish();
   }
   changed();
