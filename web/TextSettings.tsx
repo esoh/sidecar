@@ -1,3 +1,4 @@
+import { libraryPath } from './viewer-path.ts';
 import { createContext, useContext, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { storage } from '@plannotator/ui/utils/storage';
 import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
@@ -88,7 +89,7 @@ export function TextSettings({ version }: { version?: string }) {
       <dialog ref={dialog} className="text-settings" aria-label="Reading settings" onClick={event => { if (event.target === event.currentTarget) dialog.current?.close(); }}>
         <div className="settings-content">
         <div className="settings-title"><h2>Settings</h2><button aria-label="Close settings" onClick={() => dialog.current?.close()}><Icon name="close" /></button></div>
-        {!new URLSearchParams(location.search).has('library') && <a className="library-menu-link" href="/?library=1" target="_blank" rel="noopener noreferrer">View all documents</a>}
+        {!new URLSearchParams(location.search).has('library') && <a className="library-menu-link" href={libraryPath()} target="_blank" rel="noopener noreferrer">View all documents</a>}
         <fieldset className="message-settings network-settings"><legend>Open on phone</legend>
           {network && <>
             <label><input type="checkbox" checked={network.enabled} disabled={isUpdatingNetwork || !network.isLocal} onChange={event => { void updateNetwork(event.target.checked); }} />Allow access on local network</label>
@@ -112,7 +113,7 @@ export function TextSettings({ version }: { version?: string }) {
               <button type="button" disabled={isUpdatingNetwork || publicUrl === (network.publicUrl ?? '')} onClick={() => { void updateNetwork(true, { publicUrl }); }}>Save URL</button>
             </div>}
             {[...network.urls, ...(network.publicUrl ? [network.publicUrl] : [])].map(base => {
-              const url = base + '/' + location.search + location.hash;
+              const url = base + location.pathname + location.search + location.hash;
               return <div className="network-link" key={base}><a href={url} target="_blank" rel="noopener noreferrer">{url}</a><button type="button" onClick={async () => {
                 if (await copyTextToClipboard(url)) { setCopiedUrl(url); setNetworkError(''); }
                 else setNetworkError('Could not copy. Select the address to copy it.');

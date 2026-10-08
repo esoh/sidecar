@@ -1,3 +1,4 @@
+import { viewerPath } from './viewer-path.ts';
 import type { DocumentRecord, State } from '../src/store.ts';
 
 export type { ClosedDocument } from '../src/library.ts';
@@ -35,7 +36,7 @@ export function mergeRuntime(state: ViewerState, runtime: ViewerRuntime): Viewer
 }
 export const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 export async function api<T>(path: string, body?: unknown, method = body === undefined ? 'GET' : 'POST'): Promise<T> {
-  const response = await fetch(path, {
+  const response = await fetch(viewerPath(path), {
     method,
     headers: { 'Content-Type': 'application/json' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),

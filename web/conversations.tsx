@@ -1,3 +1,4 @@
+import { viewerPath } from './viewer-path.ts';
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { ProposalCard, ReplyProposalActions, useProposalContext } from './ProposalReview.tsx';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuRadioGroup, DropdownMenuRadioItem } from '@plannotator/ui/components/ui/dropdown-menu';
@@ -965,7 +966,7 @@ function MessageSelection({ documentId, threadId, messageId, selection, isActive
   const [available, setAvailable] = useState<string | null>(null);
   useEffect(() => {
     let stopped = false; setAvailable(null);
-    if (path) void fetch(path, { method: 'HEAD' }).then(response => { if (!stopped && response.ok) setAvailable(path); }).catch(() => {});
+    if (path) void fetch(viewerPath(path), { method: 'HEAD' }).then(response => { if (!stopped && response.ok) setAvailable(path); }).catch(() => {});
     return () => { stopped = true; };
   }, [path]);
   return <div className="message-selection quote" data-selection-message={messageId} data-selection-id={selection.id} data-active={isActive || undefined}>

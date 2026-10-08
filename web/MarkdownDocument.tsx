@@ -1,3 +1,4 @@
+import { viewerPath } from './viewer-path.ts';
 import { Fragment, createContext, memo, useContext, useMemo, useState, useEffect, useRef, type ReactNode } from 'react';
 import { BlockRenderer } from '@plannotator/ui/components/BlockRenderer';
 import { isCodeFilePath } from '@plannotator/core/code-file';
@@ -52,7 +53,7 @@ function groupSections(groups: BlockGroup[]): DocumentGroup[] {
 setImageSrcResolver((path, documentId) =>
   /^(https:|data:image\/)/i.test(path)
     ? path
-    : `/api/image?${documentId?.includes('/') ? `owner=${encodeURIComponent(documentId.split('/')[0])}&document=${encodeURIComponent(documentId.split('/')[1])}` : `document=${encodeURIComponent(documentId ?? '')}`}&path=${encodeURIComponent(path)}`,
+    : viewerPath(`/api/image?${documentId?.includes('/') ? `owner=${encodeURIComponent(documentId.split('/')[0])}&document=${encodeURIComponent(documentId.split('/')[1])}` : `document=${encodeURIComponent(documentId ?? '')}`}&path=${encodeURIComponent(path)}`),
 );
 
 // Plannotator's renderer reports local document and code links through these callbacks.

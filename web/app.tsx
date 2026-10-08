@@ -1,3 +1,4 @@
+import { viewerPath, isGateway, libraryPath } from './viewer-path.ts';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
@@ -275,7 +276,7 @@ function App() {
       const [file, line] = splitLineSuffix(candidate);
       const resolved = resolveLink('code', file);
       if (!resolved || 'outside' in resolved) return null;
-      const response = await fetch(`/api/files/code?document=${encodeURIComponent(documentId)}&path=${encodeURIComponent(resolved.path + line)}`);
+      const response = await fetch(viewerPath(`/api/files/code?document=${encodeURIComponent(documentId)}&path=${encodeURIComponent(resolved.path + line)}`));
       if (!response.ok) return null;
       const data = await response.json() as { contents: string; filepath: string };
       return { contents: data.contents, filepath: data.filepath };
@@ -361,7 +362,7 @@ function App() {
         refreshing = false;
       }
     }
-    const events = new EventSource('/api/events?updates=1');
+    const events = new EventSource(viewerPath('/api/events?updates=1'));
     events.onopen = () => {
       // Revisions belong to one server lifetime; a reconnect may follow an upgrade.
       connectionGeneration++; latestRuntime = undefined;
@@ -763,7 +764,7 @@ function App() {
           <h1>Document closed</h1>
           <p>Your Markdown file is unchanged.</p>
           {closedDocument.cleanupError && <p role="alert">{closedDocument.cleanupError}</p>}
-          <a href="/?library=1">Browse all documents</a>
+          <a href={libraryPath()}>Browse all documents</a>
         </div>
       </main>
     </>
@@ -785,7 +786,7 @@ function App() {
             aria-label="Documents"
             value={documentId}
             onChange={(event) => {
-              location.href = `/?document=${event.target.value}`;
+              location.href = viewerPath(`/?document=${event.target.value}`);
             }}
           >
             {Object.values(state?.documents ?? {}).map((doc) => (
@@ -1006,4 +1007,4 @@ function App() {
   );
 }
 const root = document.getElementById('root');
-if (root) createRoot(root).render(<SettingsProvider>{new URLSearchParams(location.search).has('library') ? <DocumentLibrary /> : <App />}</SettingsProvider>);
+if (root) createRoot(root).render(<SettingsProvider>{(new URLSearchParams(location.search).has('library') || isGateway && !new URLSearchParams(location.search).has('document')) ? <DocumentLibrary /> : <App />}</SettingsProvider>);

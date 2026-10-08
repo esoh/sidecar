@@ -1,3 +1,4 @@
+import { viewerPath } from './viewer-path.ts';
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { parseDiffFromFile } from '@pierre/diffs';
@@ -181,7 +182,7 @@ function ProposalWindow({ dialog, anchor, bounds, title, children, footer, onClo
 
 function OriginalLink({ documentId, version, onOpen }: { documentId: string; version: string; onOpen: () => void }) {
   const [available, setAvailable] = useState(false);
-  useEffect(() => { let stopped = false; setAvailable(false); void fetch(`/api/documents/${documentId}/versions/${encodeURIComponent(version)}`, { method: 'HEAD' }).then(r => { if (!stopped) setAvailable(r.ok); }).catch(() => {}); return () => { stopped = true; }; }, [documentId, version]);
+  useEffect(() => { let stopped = false; setAvailable(false); void fetch(viewerPath(`/api/documents/${documentId}/versions/${encodeURIComponent(version)}`), { method: 'HEAD' }).then(r => { if (!stopped) setAvailable(r.ok); }).catch(() => {}); return () => { stopped = true; }; }, [documentId, version]);
   return available ? <button className="proposal-original" onClick={onOpen}>View original document</button> : null;
 }
 
