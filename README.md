@@ -65,7 +65,7 @@ Invoke the Sidecar skill in the existing agent, then ask it to open a file. The 
 sidecar open --agent codex --session NATIVE_UUID --file /absolute/review.md
 ```
 
-Use `--agent claude` for Claude. Explicit IDs must match the selected agent's native environment when present. Generated Markdown can be piped to `open ... --stdin`. The launch result contains the owner key, document ID, and browser URL. Opening additional documents reuses this conversation's app. `--no-browser` suppresses the opener for headless use.
+Use `--agent claude` for Claude. Explicit IDs must match the selected agent's native environment when present. Generated Markdown can be piped to `open ... --stdin`. The launch result contains the owner key, document ID, and shared browser URL, such as `http://127.0.0.1:43120/a/o4/?document=DOCUMENT_UUID`. Each owner keeps its private service; all viewers share one browser gateway. Opening additional documents reuses this conversation's app. `--no-browser` suppresses the opener for headless use.
 
 `--workspace /absolute/worktree` records the checkout the agent is working in; it defaults to the Git top-level of the command's working directory. It roots the document's Files panel and repository/branch badge. Reopening the same file with a different `--workspace` updates it.
 
@@ -78,7 +78,7 @@ sidecar status --owner KEY
 sidecar stop --owner KEY
 ```
 
-Stop closes only Sidecar; the coding conversation remains alive. Closing a browser tab does not stop the app. A fresh open restores documents, titles, threads, and pending requests. A claimed request interrupted by a crash becomes uncertain: the agent must inspect the file before explicitly resuming. Identical replies and submission retries are deduplicated.
+`stop --owner KEY` closes only that owner's private Sidecar service; the coding conversation and shared browser gateway remain alive. `sidecar gateway status` inspects the gateway; `sidecar gateway stop` stops only the gateway for local maintenance. Closing a browser tab does not stop the app. A fresh open restores documents, titles, threads, and pending requests. A claimed request interrupted by a crash becomes uncertain: the agent must inspect the file before explicitly resuming. Identical replies and submission retries are deduplicated.
 
 State defaults to `~/.local/state/sidecar/AGENT-UUID`; tests use `SIDECAR_STATE_DIR`. It includes a private agent credential, state, runtime record, and server log. Credentials never appear in the URL or command arguments. A localhost viewer cookie is separate from the agent credential. Treat other processes running as your OS user as trusted.
 
@@ -90,13 +90,13 @@ Standalone HTML input, independent model sessions, and compaction cancellation a
 
 In the Mac's viewer, open **Settings → Open on phone → Allow access on local network**. Open the displayed address on another device connected to the same network and enter the generated passphrase. It uses the same documents, threads, and attached Codex or Claude conversation. Change the passphrase in the same settings (8–128 characters); saving it signs out network browsers, including connected streams, without affecting localhost access or the agent.
 
-Network access is off by default and turns off when Sidecar stops or restarts. The setting opens a separate IPv4 listener; turning it off disconnects network viewers without restarting the local app or interrupting the agent. Keep the Mac awake and allow Node through the firewall if macOS asks. Guest Wi-Fi isolation can prevent devices from connecting.
+Network access is initially off and is never inherited from old owner settings. Enabling it shares all Sidecar agents on this computer, and persists across gateway restarts until explicitly turned off. The setting opens a separate IPv4 listener; turning it off disconnects network viewers without restarting the local app or interrupting the agent. Keep the Mac awake and allow Node through the firewall if macOS asks. Guest Wi-Fi isolation can prevent devices from connecting.
 
-Trusted browsers stay signed in with no Sidecar time limit, including after app restarts. Sidecar renews its persistent cookie on visits; browsers may still expire or clear their own storage. Changing the passphrase revokes all remembered browsers. Credentials are saved privately per owner in `network-auth.json`; localhost access does not require the passphrase.
+Trusted browsers stay signed in with no Sidecar time limit, including after app restarts. Sidecar renews its persistent cookie on visits; browsers may still expire or clear their own storage. Changing the passphrase revokes all remembered browsers. Gateway credentials are saved privately in `~/.local/state/sidecar/gateway/network-auth.json`; localhost access does not require the passphrase. Trust follows the browser and hostname, not the client IP, so switching networks with the same public hostname keeps you signed in. A different hostname/browser or cleared cookies requires login.
 
 Anyone with the passphrase can use the viewer, including sending requests to the agent, editing documents through proposals, browsing files, and closing saved documents. Use it on a trusted network. The agent credential and agent-only endpoints remain local; viewer cookies and same-origin checks also apply over the LAN. HTTP traffic, including the passphrase, is not encrypted.
 
-The phone's document library opens this agent's documents normally. Other agents' documents use read-only previews; enable access from their own viewer to interact with those agents. Unsent drafts and reading preferences stay in each browser. Rich-text copying falls back to plain text when the browser requires HTTPS.
+The phone's root page lists all saved agents; their running viewers share this origin and passphrase. Stopped owners offer read-only previews. Unsent drafts and reading preferences stay in each browser. Rich-text copying falls back to plain text when the browser requires HTTPS.
 
 ### Over the internet with ngrok or Cloudflare
 
@@ -106,6 +106,7 @@ ngrok is the default. To use a locally managed named Cloudflare Tunnel, create `
 
 ```json
 {
+  "gateway": { "port": 43120, "networkPort": 43121 },
   "tunnel": {
     "provider": "cloudflare",
     "publicUrl": "https://sidecar.example.com",
@@ -116,40 +117,44 @@ ngrok is the default. To use a locally managed named Cloudflare Tunnel, create `
 
 `configPath` points to your existing Cloudflare YAML, which holds its tunnel ID, credentials-file path, and ingress rules. It must be absolute or start with `~/` and live outside Git checkouts so worktree cleanup cannot claim a shared connector. Sidecar does not copy credentials into this config. Follow the [own-domain Cloudflare setup guide](docs/cloudflare-tunnel.md) to prepare it.
 
-For ngrok, omit the file or use `{"tunnel":{"provider":"ngrok"}}`. You can add `publicUrl` for a reserved HTTPS address configured in your ngrok account. An explicit request to use another provider overrides the choice for that request without changing the file. Provider-specific settings do not carry over. For a one-off Cloudflare request, the skill uses a private temporary `SIDECAR_CONFIG` file with the supplied Cloudflare settings and leaves your saved preferences unchanged.
+For ngrok, omit the file or use `{"tunnel":{"provider":"ngrok"}}`. You can add `publicUrl` for a reserved HTTPS address configured in your ngrok account. An explicit request to use another provider overrides the choice for that request without changing the file. Provider-specific settings do not carry over. For a one-off Cloudflare request, the skill uses a private temporary `SIDECAR_CONFIG` file retaining the effective gateway settings and adding the supplied Cloudflare settings and leaves your saved preferences unchanged.
 
-`sidecar config` prints the effective preferences and source path without starting an app or tunnel. `SIDECAR_CONFIG` can select another JSON file; otherwise Sidecar respects `XDG_CONFIG_HOME` and falls back to `~/.config`. Invalid settings produce an error instead of silently choosing ngrok. The file stores preferences only; creating or editing it does not enable remote access. Reopen Settings to read changes; no app restart is needed. Keep personal values in this local file, outside Git.
+`sidecar config` prints the effective preferences and source path without starting an app or tunnel. `SIDECAR_CONFIG` can select another JSON file; otherwise Sidecar respects `XDG_CONFIG_HOME` and falls back to `~/.config`. Invalid settings produce an error instead of silently choosing ngrok. The file stores preferences only; creating or editing it does not enable remote access. Reopen Settings to read provider changes; no app restart is needed for those. Gateway ports default to 43120 (local) and 43121 (protected), must be distinct, and never fall back to random ports. Changing them requires an explicit gateway stop/start and coordinated tunnel ingress update. Keep personal values in this local file, outside Git.
 
 **Settings → Open on phone** shows the provider and configured address. The active public URL remains separate until the agent verifies and enables the tunnel. Settings does not launch connectors. For manual ngrok setup, enable local-network access, run the displayed command, and save the resulting HTTPS address. For Cloudflare, follow the linked guide and verify its ingress first.
 
-The owner-scoped commands remain:
+Network and tunnel commands target the machine gateway; an optional legacy `--owner KEY` is accepted but does not narrow sharing:
 
 ```sh
 sidecar config                               # read provider preferences
-sidecar network --owner KEY                  # inspect current network settings
-sidecar network on --owner KEY               # returns protected tunnelTarget
+sidecar network                  # inspect current network settings
+sidecar network on               # returns protected tunnelTarget
 ngrok http http://127.0.0.1:PROTECTED_PORT --inspect=false
-sidecar network on --owner KEY --public-url https://sidecar.example.com # ngrok
-sidecar cloudflare --owner KEY                # configured Cloudflare: start/reuse and allow origin
-sidecar network on --owner KEY --public-url '' # remove public access; keep LAN
-sidecar network off --owner KEY               # close remote access
+sidecar network on --public-url https://sidecar.example.com # ngrok
+sidecar cloudflare                # configured Cloudflare: start/reuse and allow origin
+sidecar network on --public-url '' # remove public access; keep LAN
+sidecar network off               # close remote access
 ```
 
 Expose only the returned **passphrase-protected `tunnelTarget`**, never the normal localhost viewer. Preserve Host/Origin and `X-Forwarded-Proto: https`; do not use header rewrites. The allowed public URL is an exact HTTPS origin. Passphrase login, same-origin checks, Secure HTTPS cookies, and local-only agent endpoints still apply. Your tunnel provider terminates public TLS and carries traffic to the Mac.
 
-Keep Sidecar, its native agent, the connector, and the Mac running. Disabling network access or restarting Sidecar clears its active public URL and may change the protected port. Ask the agent to reconnect the tunnel; it must recheck the target before reuse. Each active owner needs its own hostname/endpoint. Cloudflare can share a connector with other local services when its live route matches. The launcher uses a generic startup lock and leaves that connector running when Sidecar exits. Missing/stale routes or unknown replicas produce repair instructions; nothing rewrites shared ingress or restarts another service. Connector shutdown is a separate coordinated action.
+Keep Sidecar, its native agent, the connector, and the Mac running. Owner restarts leave the gateway and tunnel alone. Gateway restarts preserve its enabled setting, public origin, browser trust and configured ports. Disabling network access clears the active public URL; reconnect explicitly when needed. All owners use one hostname: preserve `/a/OWNER_ALIAS/` and the document query when sharing links. Configured port changes require verification against live ingress before reuse. Cloudflare can share a connector with other local services when its live route matches. The launcher uses a generic startup lock and leaves that connector running when Sidecar exits. Missing/stale routes or unknown replicas produce repair instructions; nothing rewrites shared ingress or restarts another service. Connector shutdown is a separate coordinated action.
 
 For traffic totals, compare the same period in [ngrok Usage](https://dashboard.ngrok.com/usage) and [Billing](https://dashboard.ngrok.com/billing), or follow the [Cloudflare monitoring steps](docs/cloudflare-tunnel.md#monitor-traffic). Provider dashboards can lag. Browser DevTools' Network **Transferred** total measures the current browser session (including local access); it is not account-wide traffic or tunnel overhead. Keep ngrok inspection disabled for Sidecar; account usage does not require request-body capture. See [ngrok's plan limits](https://ngrok.com/docs/pricing-limits/free-plan-limits).
 
 ## Browse all documents
 
-Ask Codex or Claude to “open Sidecar’s document library,” or run `sidecar browse` inside an agent’s native session environment. The explicit form is `sidecar browse --agent codex|claude --session NATIVE_UUID`; `--no-browser` prints its URL. No file path is needed. **Settings → View all documents** opens the same library in a new tab, preserving the current viewer and draft.
+Ask Codex or Claude to “open Sidecar’s document library,” or run `sidecar browse`. No native session identity or file is needed; it starts only the shared gateway. `--no-browser` prints its URL. **Settings → View all documents** opens the same library in a new tab, preserving the current viewer and draft.
 
-The library groups saved documents across all local Codex and Claude sessions. Live entries open their original Sidecar viewer. Stopped sessions have a read-only Markdown preview, including local images; return to the original agent to resume questions and revisions. Browsing never creates a coding conversation, starts another agent, claims its requests, or reassigns documents. The library reads the existing state directory and does not create a second database. Use **Refresh** to update the list.
+The root `/` lists saved Codex and Claude agents with full session IDs, copy buttons, document counts and viewer availability. `/a/OWNER_ALIAS/` lists that agent's documents. Live entries open on the same origin with their original owner. Stopped sessions have a read-only Markdown preview, including local images; return to the original agent to resume questions and revisions. Browsing never creates a coding conversation, starts another agent, claims its requests, or reassigns documents. The library reads the existing state directory and does not create a second database. Use **Refresh** to update the list.
 
-The document library shows shorthand relative last-opened times (such as `5m ago` or `2d ago`), with the exact date and time on hover. Documents sort newest first, and agent groups sort by the latest open among their documents. Legacy entries show an unknown time until next opened.
+The document library shows shorthand relative last-opened times (such as `5m ago` or `2d ago`), with the exact date and time on hover. Choose **Last opened** (default) or **Recent activity** independently for the agent list and document lists; each preference persists in the browser. Agents use the latest corresponding time across all their documents, with empty agents last. Legacy entries without an opened time sort last until next opened.
 
 Click the **Claude/Codex** label in a viewer or the library to see and copy its original session ID. Session IDs identify the owning conversation; an active Sidecar viewer does not by itself prove its agent is online.
+
+### Moving from separate viewer ports
+
+Saved documents, requests, snapshots and conversations retain their IDs and state. Existing direct local links continue working; an older running backend needs an app-only upgrade before the gateway can proxy it. Unsent drafts stored at an old localhost port remain there: finish or copy them before switching, since browser storage cannot move automatically across origins. Gateway login requires one fresh sign-in when replacing an owner-specific public viewer. No installer silently changes existing tunnel routes or enables remote sharing.
 
 ## Workspace files
 

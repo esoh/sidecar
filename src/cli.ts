@@ -1,4 +1,4 @@
-import { ensureGateway, serveGateway, gatewayStatus, stopGateway } from './gateway-client.ts';
+import { ensureGateway, serveGateway, gatewayStatus, stopGateway, gatewayCall } from './gateway-client.ts';
 import { openAgentIds, isAgentAlias, type IdKind } from './agent-ids.ts';
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -117,7 +117,7 @@ async function main() {
     return;
   }
   if (values.help || !positionals.length) {
-    process.stdout.write('Sidecar — document conversations with your existing agent.\n\nUsage: sidecar COMMAND [options]\nCommands: open, browse, status, config, network, cloudflare, request, name-thread, stream, reply, watch, stop, hook\n\nOpen: sidecar open --agent codex|claude --session UUID --file /absolute/document.md [--workspace /absolute/worktree]\nConfig: sidecar config (read machine-local tunnel preferences)\nNetwork: sidecar network [on|off] --owner KEY [--public-url https://sidecar.example.com]\nCloudflare: sidecar cloudflare --owner KEY (start/reuse configured protected tunnel)\nUse the Sidecar skill in the original agent to establish live delivery.\n');
+    process.stdout.write('Sidecar — document conversations with your existing agent.\n\nUsage: sidecar COMMAND [options]\nCommands: open, browse, status, gateway, config, network, cloudflare, request, name-thread, stream, reply, watch, stop, hook\n\nOpen: sidecar open --agent codex|claude --session UUID --file /absolute/document.md [--workspace /absolute/worktree]\nConfig: sidecar config (read machine-local tunnel preferences)\nGateway: sidecar gateway status|stop\nNetwork: sidecar network [on|off] [--public-url https://sidecar.example.com]\nCloudflare: sidecar cloudflare (start/reuse configured protected tunnel)\nUse the Sidecar skill in the original agent to establish live delivery.\n');
     return;
   }
   const [command, inputId] = positionals;
@@ -158,6 +158,30 @@ async function main() {
     if (!values['no-browser']) await openBrowser(url);
     return;
   }
+  if (command === 'network') {
+    if (requestId !== undefined && requestId !== 'on' && requestId !== 'off') throw new Error('Use network [on|off]');
+    if (values['public-url'] !== undefined && requestId !== 'on') throw new Error('--public-url requires network on');
+    await ensureGateway();
+    output(await gatewayCall('/gateway/network', requestId === undefined ? undefined : { enabled: requestId === 'on', ...(values['public-url'] === undefined ? {} : { publicUrl: values['public-url'] }) }));
+    return;
+  }
+  if (command === 'cloudflare') {
+    const { tunnel } = await readTunnelConfig();
+    if (tunnel.provider !== 'cloudflare') throw new Error('This command requires tunnel.provider to be cloudflare in Sidecar config');
+    const runtime = await ensureGateway(), network = await gatewayCall('/gateway/network');
+    if (!network.enabled || !/^http:\/\/127\.0\.0\.1:\d+$/.test(network.tunnelTarget ?? ''))
+      throw new Error('Enable the protected listener with sidecar network on first');
+    const configPath = await realpath(tunnel.configPath);
+    const isInCheckout = await promisify(execFile)('git', ['-C', dirname(configPath), 'rev-parse', '--show-toplevel'], { timeout: 2000 }).then(() => true, () => false);
+    if (isInCheckout) throw new Error('Keep the shared Cloudflare config outside Git checkouts (for example ~/.cloudflared/shared.yml) so worktree cleanup cannot stop its connector');
+    const helper = fileURLToPath(new URL('../scripts/cloudflare-tunnel.mjs', import.meta.url));
+    const result = await promisify(execFile)(process.execPath, [helper, '--config', configPath, '--public-url', tunnel.publicUrl, '--target', network.tunnelTarget], { maxBuffer: 65536 });
+    const current = await gatewayCall('/gateway/network');
+    if ((await gatewayStatus()).instanceId !== runtime.instanceId || current.tunnelTarget !== network.tunnelTarget)
+      throw new Error('Sidecar restarted or network access changed. Recheck the protected target before reconnecting the tunnel. The shared connector was left running.');
+    await gatewayCall('/gateway/network', { enabled: true, publicUrl: tunnel.publicUrl, expectedTunnelTarget: network.tunnelTarget, expectedInstanceId: runtime.instanceId });
+    output({ ...JSON.parse(result.stdout), publicUrl: tunnel.publicUrl }); return;
+  }
   if (!values.owner) throw new Error('Provide --owner KEY');
   const ownerIsAlias = isAgentAlias(values.owner, 'o');
   const root = stateDirectory();
@@ -169,29 +193,6 @@ async function main() {
   const call = (path: string, body?: unknown) => agentCall(key, path, body, true);
   if (command === 'serve') { await serve(key); return; }
   if (command === 'status') { const status = await appStatus(key); if (ownerIsAlias) { status.ownerKey = values.owner; delete status.instanceId; } output(status); return; }
-  if (command === 'network') {
-    if (requestId !== undefined && requestId !== 'on' && requestId !== 'off') throw new Error('Use network [on|off] --owner KEY');
-    if (values['public-url'] !== undefined && requestId !== 'on') throw new Error('--public-url requires network on');
-    output(await agentCall(key, '/agent/network', requestId === undefined ? undefined : { enabled: requestId === 'on', ...(values['public-url'] === undefined ? {} : { publicUrl: values['public-url'] }) }));
-    return;
-  }
-  if (command === 'cloudflare') {
-    const { tunnel } = await readTunnelConfig();
-    if (tunnel.provider !== 'cloudflare') throw new Error('This command requires tunnel.provider to be cloudflare in Sidecar config');
-    const runtime = await readRuntime(key), network = await agentCall(key, '/agent/network');
-    if (!network.enabled || !/^http:\/\/127\.0\.0\.1:\d+$/.test(network.tunnelTarget ?? ''))
-      throw new Error('Enable the protected listener with sidecar network on --owner KEY first');
-    const configPath = await realpath(tunnel.configPath);
-    const isInCheckout = await promisify(execFile)('git', ['-C', dirname(configPath), 'rev-parse', '--show-toplevel'], { timeout: 2000 }).then(() => true, () => false);
-    if (isInCheckout) throw new Error('Keep the shared Cloudflare config outside Git checkouts (for example ~/.cloudflared/shared.yml) so worktree cleanup cannot stop its connector');
-    const helper = fileURLToPath(new URL('../scripts/cloudflare-tunnel.mjs', import.meta.url));
-    const result = await promisify(execFile)(process.execPath, [helper, '--config', configPath, '--public-url', tunnel.publicUrl, '--target', network.tunnelTarget], { maxBuffer: 65536 });
-    const current = await agentCall(key, '/agent/network');
-    if ((await readRuntime(key)).instanceId !== runtime.instanceId || current.tunnelTarget !== network.tunnelTarget)
-      throw new Error('Sidecar restarted or network access changed. Recheck the protected target before reconnecting the tunnel. The shared connector was left running.');
-    await agentCall(key, '/agent/network', { enabled: true, publicUrl: tunnel.publicUrl, expectedTunnelTarget: network.tunnelTarget, expectedInstanceId: runtime.instanceId });
-    output({ ...JSON.parse(result.stdout), ownerKey: key, publicUrl: tunnel.publicUrl }); return;
-  }
   if (command === 'stop') {
     if ((await appStatus(key)).state === 'running') {
       await agentCall(key, '/agent/stop', {});
@@ -223,7 +224,7 @@ async function main() {
   if (command === 'reply' && requestId) {
     output(await call('/agent/replies', { requestId, documentId: values.document, threadId: values.thread, ...(values.stream ? { stream: true } : { text: await stdin() }), isError: Boolean(values.error) })); return;
   }
-  throw new Error('Commands: open, browse, status, config, network, cloudflare, request, name-thread, stream, reply, watch, stop, hook');
+  throw new Error('Commands: open, browse, status, gateway, config, network, cloudflare, request, name-thread, stream, reply, watch, stop, hook');
 }
 if (process.argv[1] && resolve(process.argv[1]) === cliPath) {
   main().catch(error => { process.stderr.write((error instanceof Error ? error.message : String(error)) + '\n'); process.exitCode = 1; });

@@ -58,3 +58,17 @@ test('gateway config defaults are fixed and invalid or equal ports fail', async 
     await writeFile(path, JSON.stringify({ gateway })); await assert.rejects(run(), /gateway/);
   }
 });
+
+test('network command targets the shared gateway regardless of optional owner argument', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'sidecar-network-gateway-'));
+  const path = join(root, 'config.json'), port = await freePort(), networkPort = await freePort();
+  await writeFile(path, JSON.stringify({ gateway: { port, networkPort } }));
+  const cli = async (...args: string[]) => JSON.parse((await promisify(execFile)(process.execPath, ['--import', import.meta.resolve('tsx'), new URL('../src/cli.ts', import.meta.url).pathname, ...args], { env: { ...process.env, SIDECAR_STATE_DIR: root, SIDECAR_CONFIG: path } })).stdout);
+  t.after(async () => { await cli('gateway', 'stop').catch(() => {}); await rm(root, { recursive: true, force: true }); });
+  assert.equal((await cli('network')).enabled, false);
+  const result = await cli('network', 'on', '--owner', 'o4');
+  assert.equal(result.tunnelTarget, `http://127.0.0.1:${networkPort}`);
+  assert.deepEqual((await cli('network')).urls, result.urls);
+  assert.equal((await readdir(root)).some(name => /^(claude|codex)-/.test(name)), false);
+  await cli('network', 'off'); assert.equal((await cli('network')).enabled, false);
+});

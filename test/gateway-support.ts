@@ -3,7 +3,9 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { request as httpRequest } from 'node:http';
+import { createServer } from 'node:http';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { startServer } from '../src/server.ts';
 import { startGateway } from '../src/gateway.ts';
 import { ownerKey, type Owner } from '../src/store.ts';
@@ -28,3 +30,18 @@ export async function setupGateway(t: { after: (callback: () => Promise<void>) =
   return { root, owners, gateway, cookie, view };
 }
 
+
+export async function gatewayCli(t: { after: (callback: () => Promise<void>) => void }, root: string) {
+  async function port() {
+    const server = createServer(); await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address(); assert.ok(address && typeof address !== 'string');
+    await new Promise<void>(resolve => server.close(() => resolve())); return address.port;
+  }
+  const gateway = { port: await port(), networkPort: await port() }, configPath = join(root, 'config.json');
+  await writeFile(configPath, JSON.stringify({ gateway }));
+  const run = async (...args: string[]) => JSON.parse((await promisify(execFile)(process.execPath,
+    ['--import', import.meta.resolve('tsx'), new URL('../src/cli.ts', import.meta.url).pathname, ...args],
+    { env: { ...process.env, SIDECAR_STATE_DIR: root, SIDECAR_CONFIG: configPath } })).stdout);
+  t.after(async () => { await run('gateway', 'stop').catch(() => {}); await rm(root, { recursive: true, force: true }); });
+  return { gateway, configPath, run };
+}

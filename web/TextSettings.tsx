@@ -1,4 +1,4 @@
-import { libraryPath } from './viewer-path.ts';
+import { libraryPath, isGateway } from './viewer-path.ts';
 import { createContext, useContext, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { storage } from '@plannotator/ui/utils/storage';
 import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
@@ -93,7 +93,7 @@ export function TextSettings({ version }: { version?: string }) {
         <fieldset className="message-settings network-settings"><legend>Open on phone</legend>
           {network && <>
             <label><input type="checkbox" checked={network.enabled} disabled={isUpdatingNetwork || !network.isLocal} onChange={event => { void updateNetwork(event.target.checked); }} />Allow access on local network</label>
-            <p>{network.isLocal ? 'Requires the passphrase below. Network access turns off when Sidecar restarts.' : 'Manage network access from Sidecar on your Mac.'}</p>
+            <p>{network.isLocal ? (isGateway ? 'Shares all Sidecar agents on this computer. Requires a passphrase; stays enabled until turned off.' : 'Requires the passphrase below. Network access turns off when Sidecar restarts.') : 'Manage network access from Sidecar on your Mac.'}</p>
             {network.enabled && network.isLocal && <div className="network-passphrase">
               <label>Passphrase<input aria-label="Network passphrase" disabled={isUpdatingNetwork} value={passphrase} minLength={8} maxLength={128} spellCheck={false} autoComplete="off" onChange={event => setPassphrase(event.target.value)} /></label>
               <button type="button" disabled={isUpdatingNetwork || passphrase === network.passphrase || passphrase.length < 8} onClick={() => { void updateNetwork(true, { passphrase }); }}>Save passphrase</button>
