@@ -1573,3 +1573,10 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
 .network-tunnel h3 { font-size: 12px; margin: 0; }
 .network-tunnel .network-link { margin-bottom: 8px; }
 .network-tunnel label { align-items: start; flex-direction: column; }
+
+.library-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 20px 0; }
+.library-heading h1 { margin: 0; }
+.library-agent-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.library-agent-row code { display: block; margin-top: 6px; overflow-wrap: anywhere; }
+.library-agent-row .icon-button { flex-shrink: 0; }
+@media (max-width: 600px) { .library-heading { align-items: start; flex-wrap: wrap; } }

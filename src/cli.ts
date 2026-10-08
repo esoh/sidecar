@@ -1,3 +1,5 @@
+import { ensureGateway, serveGateway, gatewayStatus, stopGateway, gatewayCall } from './gateway-client.ts';
+import { openAgentIds, isAgentAlias, type IdKind } from './agent-ids.ts';
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, rm, open, rename, realpath } from 'node:fs/promises';
@@ -5,7 +7,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
-import { agentCall, appStatus, ownerDirectory, parseOwner, readRuntime, selectOwner, watchClaude } from './agent.ts';
+import { agentCall, appStatus, ownerDirectory, parseOwner, readRuntime, selectOwner, watchClaude, stateDirectory } from './agent.ts';
 import { isObject, isOwner, ownerKey } from './store.ts';
 import { acquireLock, isAlive } from './owner-lock.ts';
 import { startServer } from './server.ts';
@@ -48,12 +50,12 @@ async function serve(key: string) {
   try {
     const previous = await readRuntime(key).catch(() => undefined);
     const port = previous ? Number(new URL(previous.url).port) : 0;
-    try { server = await startServer({ owner: parseOwner(key), directory, port }); }
+    try { server = await startServer({ owner: parseOwner(key), directory, stateRoot: dirname(directory), port }); }
     catch (error) {
       if (!(error instanceof Error && 'code' in error && error.code === 'EADDRINUSE')) throw error;
-      server = await startServer({ owner: parseOwner(key), directory });
+      server = await startServer({ owner: parseOwner(key), directory, stateRoot: dirname(directory) });
     }
-    const runtime = { url: server.url, instanceId: server.instanceId, ownerKey: key };
+    const runtime = { url: server.url, instanceId: server.instanceId, ownerKey: key, ownerAlias: server.ownerAlias };
     const temporary = join(directory, `runtime-${randomUUID()}.tmp`);
     await writeFile(temporary, JSON.stringify(runtime), { mode: 0o600 });
     await rename(temporary, join(directory, 'runtime.json'));
@@ -115,10 +117,11 @@ async function main() {
     return;
   }
   if (values.help || !positionals.length) {
-    process.stdout.write('Sidecar — document conversations with your existing agent.\n\nUsage: sidecar COMMAND [options]\nCommands: open, browse, status, config, network, cloudflare, request, name-thread, stream, reply, watch, stop, hook\n\nOpen: sidecar open --agent codex|claude --session UUID --file /absolute/document.md [--workspace /absolute/worktree]\nConfig: sidecar config (read machine-local tunnel preferences)\nNetwork: sidecar network [on|off] --owner KEY [--public-url https://sidecar.example.com]\nCloudflare: sidecar cloudflare --owner KEY (start/reuse configured protected tunnel)\nUse the Sidecar skill in the original agent to establish live delivery.\n');
+    process.stdout.write('Sidecar — document conversations with your existing agent.\n\nUsage: sidecar COMMAND [options]\nCommands: open, browse, status, gateway, config, network, cloudflare, request, name-thread, stream, reply, watch, stop, hook\n\nOpen: sidecar open --agent codex|claude --session UUID --file /absolute/document.md [--workspace /absolute/worktree]\nConfig: sidecar config (read machine-local tunnel preferences)\nGateway: sidecar gateway status|stop\nNetwork: sidecar network [on|off] [--public-url https://sidecar.example.com]\nCloudflare: sidecar cloudflare (start/reuse configured protected tunnel)\nUse the Sidecar skill in the original agent to establish live delivery.\n');
     return;
   }
-  const [command, requestId] = positionals;
+  const [command, inputId] = positionals;
+  let requestId: string | undefined = inputId;
   const output = (value: unknown) => process.stdout.write(JSON.stringify(value) + '\n');
   if (command === 'config') { output(await readTunnelConfig()); return; }
   if (command === 'hook') {
@@ -127,13 +130,16 @@ async function main() {
     if (values.agent === 'codex' && payload.hook_event_name === 'Stop') output({});
     return;
   }
+  if (command === 'gateway-serve') { await serveGateway(); return; }
+  if (command === 'gateway') {
+    if (inputId === 'stop') output(await stopGateway());
+    else if (inputId === undefined || inputId === 'status') output(await gatewayStatus());
+    else throw new Error('Use gateway status|stop');
+    return;
+  }
   if (command === 'browse') {
-    const nativeKinds = [process.env.CODEX_THREAD_ID && 'codex', (process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID) && 'claude'].filter(Boolean);
-    const owner = selectOwner(values.agent ?? (nativeKinds.length === 1 ? nativeKinds[0] : undefined), values.session);
-    const key = ownerKey(owner);
-    await ensureApp(key);
-    const runtime = await readRuntime(key), url = `${runtime.url}/?library=1`;
-    output({ ownerKey: key, url });
+    const gateway = await ensureGateway(), url = `${gateway.url}/`;
+    output({ url });
     if (!values['no-browser']) await openBrowser(url);
     return;
   }
@@ -144,38 +150,49 @@ async function main() {
     let path = values.file ? resolve(values.file) : '';
     if (values.stdin) { path = join(ownerDirectory(key), `generated-${randomUUID()}.md`); await writeFile(path, await stdin(), { mode: 0o600, flag: 'wx' }); }
     const document = await agentCall(key, '/agent/documents', { path, title: values.title, generated: Boolean(values.stdin), ...(await workspaceMetadata(values.workspace)) });
-    const runtime = await readRuntime(key), url = `${runtime.url}/?document=${document.id}`;
-    output({ ownerKey: key, documentId: document.id, url });
+    const gateway = await ensureGateway();
+    const ids = await openAgentIds(dirname(ownerDirectory(key)));
+    await ids.allocate(key, [{ kind: 'd', id: document.id }]);
+    const url = `${gateway.url}/a/${ids.encode(key, 'o', key)}/?document=${document.id}`;
+    output({ ownerKey: ids.encode(key, 'o', key), nativeOwnerKey: key, documentId: ids.encode(key, 'd', document.id), url });
     if (!values['no-browser']) await openBrowser(url);
     return;
   }
-  if (!values.owner) throw new Error('Provide --owner KEY');
-  const key = ownerKey(parseOwner(values.owner));
-  if (command === 'serve') { await serve(key); return; }
-  if (command === 'status') { output(await appStatus(key)); return; }
   if (command === 'network') {
-    if (requestId !== undefined && requestId !== 'on' && requestId !== 'off') throw new Error('Use network [on|off] --owner KEY');
+    if (requestId !== undefined && requestId !== 'on' && requestId !== 'off') throw new Error('Use network [on|off]');
     if (values['public-url'] !== undefined && requestId !== 'on') throw new Error('--public-url requires network on');
-    output(await agentCall(key, '/agent/network', requestId === undefined ? undefined : { enabled: requestId === 'on', ...(values['public-url'] === undefined ? {} : { publicUrl: values['public-url'] }) }));
+    await ensureGateway();
+    output(await gatewayCall('/gateway/network', requestId === undefined ? undefined : { enabled: requestId === 'on', ...(values['public-url'] === undefined ? {} : { publicUrl: values['public-url'] }) }));
     return;
   }
   if (command === 'cloudflare') {
     const { tunnel } = await readTunnelConfig();
     if (tunnel.provider !== 'cloudflare') throw new Error('This command requires tunnel.provider to be cloudflare in Sidecar config');
-    const runtime = await readRuntime(key), network = await agentCall(key, '/agent/network');
+    const runtime = await ensureGateway(), network = await gatewayCall('/gateway/network');
     if (!network.enabled || !/^http:\/\/127\.0\.0\.1:\d+$/.test(network.tunnelTarget ?? ''))
-      throw new Error('Enable the protected listener with sidecar network on --owner KEY first');
+      throw new Error('Enable the protected listener with sidecar network on first');
     const configPath = await realpath(tunnel.configPath);
     const isInCheckout = await promisify(execFile)('git', ['-C', dirname(configPath), 'rev-parse', '--show-toplevel'], { timeout: 2000 }).then(() => true, () => false);
     if (isInCheckout) throw new Error('Keep the shared Cloudflare config outside Git checkouts (for example ~/.cloudflared/shared.yml) so worktree cleanup cannot stop its connector');
     const helper = fileURLToPath(new URL('../scripts/cloudflare-tunnel.mjs', import.meta.url));
     const result = await promisify(execFile)(process.execPath, [helper, '--config', configPath, '--public-url', tunnel.publicUrl, '--target', network.tunnelTarget], { maxBuffer: 65536 });
-    const current = await agentCall(key, '/agent/network');
-    if ((await readRuntime(key)).instanceId !== runtime.instanceId || current.tunnelTarget !== network.tunnelTarget)
+    const current = await gatewayCall('/gateway/network');
+    if ((await gatewayStatus()).instanceId !== runtime.instanceId || current.tunnelTarget !== network.tunnelTarget)
       throw new Error('Sidecar restarted or network access changed. Recheck the protected target before reconnecting the tunnel. The shared connector was left running.');
-    await agentCall(key, '/agent/network', { enabled: true, publicUrl: tunnel.publicUrl, expectedTunnelTarget: network.tunnelTarget, expectedInstanceId: runtime.instanceId });
-    output({ ...JSON.parse(result.stdout), ownerKey: key, publicUrl: tunnel.publicUrl }); return;
+    await gatewayCall('/gateway/network', { enabled: true, publicUrl: tunnel.publicUrl, expectedTunnelTarget: network.tunnelTarget, expectedInstanceId: runtime.instanceId });
+    output({ ...JSON.parse(result.stdout), publicUrl: tunnel.publicUrl }); return;
   }
+  if (!values.owner) throw new Error('Provide --owner KEY');
+  const ownerIsAlias = isAgentAlias(values.owner, 'o');
+  const root = stateDirectory();
+  const aliases = ownerIsAlias || [requestId, values.document, values.thread].some(value => value && /^[rdt][1-9A-Z][0-9A-Z]*$/.test(value)) ? await openAgentIds(root) : undefined;
+  const key = ownerKey(parseOwner(ownerIsAlias && aliases ? await aliases.resolveOwner(values.owner) : values.owner));
+  const resolveId = async (kind: IdKind, value?: string) => value && aliases && isAgentAlias(value, kind) ? aliases.resolve(key, kind, value) : value;
+  if (command && ['request', 'name-thread', 'stream', 'reply'].includes(command)) requestId = await resolveId(command === 'name-thread' ? 't' : 'r', requestId);
+  values.document = await resolveId('d', values.document); values.thread = await resolveId('t', values.thread);
+  const call = (path: string, body?: unknown) => agentCall(key, path, body, true);
+  if (command === 'serve') { await serve(key); return; }
+  if (command === 'status') { const status = await appStatus(key); if (ownerIsAlias) { status.ownerKey = values.owner; delete status.instanceId; } output(status); return; }
   if (command === 'stop') {
     if ((await appStatus(key)).state === 'running') {
       await agentCall(key, '/agent/stop', {});
@@ -193,21 +210,21 @@ async function main() {
     await watchClaude(key, abort.signal); return;
   }
   if (command === 'request' && requestId) {
-    const result = await agentCall(key, `/agent/requests/${encodeURIComponent(requestId)}/claim`, { resume: Boolean(values.resume) });
+    const result = await call(`/agent/requests/${encodeURIComponent(requestId)}/claim`, { resume: Boolean(values.resume) });
     if (values.stream && result.claimStatus === 'claimed') {
       const { documentId, threadId } = result.request;
-      try { result.stream = await agentCall(key, '/agent/streams', { requestId, documentId, threadId }); }
+      try { result.stream = await call('/agent/streams', { requestId, documentId, threadId }); }
       // The claim succeeded; retain its context so the agent can send a complete reply.
       catch (error) { result.stream = { error: error instanceof Error ? error.message : 'Streaming unavailable' }; }
     }
     output(result); return;
   }
-  if (command === 'name-thread' && requestId) { output(await agentCall(key, `/agent/threads/${encodeURIComponent(requestId)}/title`, { title: values.title })); return; }
-  if (command === 'stream' && requestId) { output(await agentCall(key, '/agent/streams', { requestId, documentId: values.document, threadId: values.thread })); return; }
+  if (command === 'name-thread' && requestId) { output(await call(`/agent/threads/${encodeURIComponent(requestId)}/title`, { title: values.title })); return; }
+  if (command === 'stream' && requestId) { output(await call('/agent/streams', { requestId, documentId: values.document, threadId: values.thread })); return; }
   if (command === 'reply' && requestId) {
-    output(await agentCall(key, '/agent/replies', { requestId, documentId: values.document, threadId: values.thread, ...(values.stream ? { stream: true } : { text: await stdin() }), isError: Boolean(values.error) })); return;
+    output(await call('/agent/replies', { requestId, documentId: values.document, threadId: values.thread, ...(values.stream ? { stream: true } : { text: await stdin() }), isError: Boolean(values.error) })); return;
   }
-  throw new Error('Commands: open, browse, status, config, network, cloudflare, request, name-thread, stream, reply, watch, stop, hook');
+  throw new Error('Commands: open, browse, status, gateway, config, network, cloudflare, request, name-thread, stream, reply, watch, stop, hook');
 }
 if (process.argv[1] && resolve(process.argv[1]) === cliPath) {
   main().catch(error => { process.stderr.write((error instanceof Error ? error.message : String(error)) + '\n'); process.exitCode = 1; });

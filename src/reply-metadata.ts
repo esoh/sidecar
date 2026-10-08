@@ -3,7 +3,7 @@ import { isProposalInput, type ProposalInput } from './proposals.ts';
 export type HighlightInput = { exact: string; prefix?: string; suffix?: string; label?: string; proposal?: ProposalInput; proposalError?: string };
 export type ReplyMetadata = { threadTitle?: string; highlights?: HighlightInput[]; isError?: boolean };
 
-const prefix = '[[sidecar-meta ';
+const prefixes = ['[[sidecar-meta ', '[[sc-meta '];
 const object = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const shortLabel = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0 && value.trim().length <= 80 && !/[\x00-\x1f]/.test(value);
 function highlight(value: unknown): value is HighlightInput {
@@ -14,8 +14,9 @@ function highlight(value: unknown): value is HighlightInput {
 
 // One optional JSON line at the start of a marked reply. Partial headers never flash in the viewer.
 export function parseReply(text: string): { text: string; metadata: ReplyMetadata } {
-  if (prefix.startsWith(text)) return { text: '', metadata: {} };
-  if (!text.startsWith(prefix)) return { text, metadata: {} };
+  if (prefixes.some(prefix => prefix.startsWith(text))) return { text: '', metadata: {} };
+  const prefix = prefixes.find(prefix => text.startsWith(prefix));
+  if (!prefix) return { text, metadata: {} };
   const newline = text.indexOf('\n');
   if (newline < 0) return { text: '', metadata: {} };
   const line = text.slice(0, newline).trimEnd(), metadata: ReplyMetadata = {};

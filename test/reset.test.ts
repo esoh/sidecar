@@ -111,13 +111,12 @@ test('an idle heartbeat cannot erase the native binding before an interruption h
 for (const mode of ['idle', 'busy', 'unknown', 'idle-final'] as const) test(`Claude's native module answers Reset from ${mode} state`, async t => {
   const root = await mkdtemp(join(tmpdir(), 'sidecar-reset-hooks-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const { f, request, prepared, state, finished } = await setup(t, root);
-  const handlers = new Map<string, any>(), aborted: string[] = [];
-  let tick = () => {};
   let release = () => {};
   const completedGate = new Promise<void>(resolve => { release = resolve; });
   let ended: Promise<unknown> | undefined;
-  t.after(async () => { release(); await ended; });
+  const { f, request, prepared, state, finished } = await setup(t, root);
+  const handlers = new Map<string, any>(), aborted: string[] = [];
+  let tick = () => {};
   const { register } = await import(new URL('../hooks/control.js', import.meta.url).href);
   register((name: string, handler: unknown) => handlers.set(name, handler));
   const api = {
@@ -134,17 +133,19 @@ for (const mode of ['idle', 'busy', 'unknown', 'idle-final'] as const) test(`Cla
       await handlers.get('turn.complete')(api, { turnId, isAborted: true, answer: 'Unrelated terminal output.' }, (e: unknown) => e);
     } },
   };
-  await handlers.get('session.start')(api, {}, (e: unknown) => e);
-  if (mode !== 'unknown') await handlers.get('turn.start')(api, { turnId: 'unrelated-terminal-turn' }, (e: unknown) => e);
-  if (mode === 'idle') await handlers.get('turn.complete')(api, { turnId: 'unrelated-terminal-turn', isAborted: false, answer: '' }, (e: unknown) => e);
-  if (mode === 'idle-final') ended = handlers.get('turn.complete')(api, { turnId: 'unrelated-terminal-turn', isAborted: false, answer: prepared.stream.prefix + 'Complete native answer.' + prepared.stream.suffix }, (e: unknown) => e);
-  assert.equal((await f.view('/api/agent/reset', {})).status, 202);
-  for (let i = 0; i < 100; i++) {
-    tick(); await delay(10);
-    if (['done', 'failed'].includes((await state()).reset.status)) break;
-  }
-  const saved = await finished();
-  assert.equal(saved.reset.status, mode === 'unknown' ? 'failed' : 'done');
-  assert.equal(saved.requests[request.id].status, mode === 'unknown' ? 'claimed' : mode === 'idle-final' ? 'completed' : 'stopped');
-  assert.deepEqual(aborted, mode === 'busy' ? ['unrelated-terminal-turn'] : []);
+  try {
+    await handlers.get('session.start')(api, {}, (e: unknown) => e);
+    if (mode !== 'unknown') await handlers.get('turn.start')(api, { turnId: 'unrelated-terminal-turn' }, (e: unknown) => e);
+    if (mode === 'idle') await handlers.get('turn.complete')(api, { turnId: 'unrelated-terminal-turn', isAborted: false, answer: '' }, (e: unknown) => e);
+    if (mode === 'idle-final') ended = handlers.get('turn.complete')(api, { turnId: 'unrelated-terminal-turn', isAborted: false, answer: prepared.stream.prefix + 'Complete native answer.' + prepared.stream.suffix }, (e: unknown) => e);
+    assert.equal((await f.view('/api/agent/reset', {})).status, 202);
+    for (let i = 0; i < 100; i++) {
+      tick(); await delay(10);
+      if (['done', 'failed'].includes((await state()).reset.status)) break;
+    }
+    const saved = await finished();
+    assert.equal(saved.reset.status, mode === 'unknown' ? 'failed' : 'done');
+    assert.equal(saved.requests[request.id].status, mode === 'unknown' ? 'claimed' : mode === 'idle-final' ? 'completed' : 'stopped');
+    assert.deepEqual(aborted, mode === 'busy' ? ['unrelated-terminal-turn'] : []);
+  } finally { release(); await ended; }
 });

@@ -21,22 +21,21 @@ export function selectOwner(agent: string | undefined, sessionId?: string, env: 
   if (!isOwner(owner)) throw new DomainError('A native session UUID is required');
   return { ...owner, sessionId: owner.sessionId.toLowerCase() };
 }
-export function ownerDirectory(key: string): string {
-  return join(process.env.SIDECAR_STATE_DIR ?? join(homedir(), '.local/state/sidecar'), ownerKey(parseOwner(key)));
-}
+export function stateDirectory(): string { return process.env.SIDECAR_STATE_DIR ?? join(homedir(), '.local/state/sidecar'); }
+export function ownerDirectory(key: string): string { return join(stateDirectory(), ownerKey(parseOwner(key))); }
 export type Runtime = { url: string; instanceId: string; ownerKey: string };
 export async function readRuntime(key: string, directory = ownerDirectory(key)): Promise<Runtime> {
   const value: unknown = JSON.parse(await readFile(join(directory, 'runtime.json'), 'utf8'));
   if (!isObject(value) || value.ownerKey !== ownerKey(parseOwner(key)) || typeof value.url !== 'string' || typeof value.instanceId !== 'string' || !/^http:\/\/127\.0\.0\.1:\d+$/.test(value.url)) throw new Error('Invalid Sidecar runtime record');
   return { url: value.url, instanceId: value.instanceId, ownerKey: value.ownerKey };
 }
-export async function agentFetch(key: string, path: string, body?: unknown, signal?: AbortSignal, directory = ownerDirectory(key)): Promise<Response> {
+export async function agentFetch(key: string, path: string, body?: unknown, signal?: AbortSignal, directory = ownerDirectory(key), compact = false): Promise<Response> {
   const runtime = await readRuntime(key, directory);
   const token = (await readFile(join(directory, 'agent-token'), 'utf8')).trim();
-  return fetch(runtime.url + path, { method: body === undefined ? 'GET' : 'POST', headers: { 'X-Sidecar-Token': token, 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: signal ?? AbortSignal.timeout(5000), redirect: 'error' });
+  return fetch(runtime.url + path, { method: body === undefined ? 'GET' : 'POST', headers: { 'X-Sidecar-Token': token, 'Content-Type': 'application/json', ...(compact ? { 'X-Sidecar-Protocol': 'sc1' } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: signal ?? AbortSignal.timeout(5000), redirect: 'error' });
 }
-export async function agentCall(key: string, path: string, body?: unknown): Promise<any> {
-  const response = await agentFetch(key, path, body);
+export async function agentCall(key: string, path: string, body?: unknown, compact = false): Promise<any> {
+  const response = await agentFetch(key, path, body, undefined, undefined, compact);
   const result = await response.json();
   if (!response.ok) throw new Error(result.error ?? `Sidecar HTTP ${response.status}`);
   return result;
@@ -78,7 +77,7 @@ export async function watchClaude(key: string, signal: AbortSignal): Promise<voi
             const isRecovery = event.type === 'sidecar.recovery';
             const path = `/agent/requests/${encodeURIComponent(event.requestId)}`;
             try {
-              const prepared = await agentCall(key, `${path}/${isRecovery ? 'recover' : 'prepare'}`, isRecovery ? { recoveryId: event.recoveryId } : {});
+              const prepared = await agentCall(key, `${path}/${isRecovery ? 'recover' : 'prepare'}`, isRecovery ? { recoveryId: event.recoveryId } : {}, true);
               if (!prepared.claimStatus || prepared.claimStatus === 'claimed') {
                 await new Promise<void>((resolve, reject) => process.stdout.write(JSON.stringify(prepared) + '\n', error => error ? reject(error) : resolve()));
                 await agentCall(key, `${path}/accepted`, {});

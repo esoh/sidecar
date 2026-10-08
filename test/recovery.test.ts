@@ -10,7 +10,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { setTimeout as delay } from 'node:timers/promises';
 import { watchClaude } from '../src/agent.ts';
 
-async function setup(t: Parameters<typeof fixture>[0], isBatch = false) {
+async function setup(t: Parameters<typeof fixture>[0], isBatch = false, progressOnly = false) {
   const f = await fixture(t), doc = await f.register();
   const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'Change it', clientMessageId: 'first' })).json();
   const member = isBatch ? await (await f.view('/api/questions', { documentId: doc.id, threadId: request.threadId, text: 'Make it cobalt', clientMessageId: 'second' })).json() : undefined;
@@ -21,6 +21,7 @@ async function setup(t: Parameters<typeof fixture>[0], isBatch = false) {
   const control = (event: string, turnId = 'native-1', fields = {}) => f.agent('/agent/control', { ownerKey: key, event, turnId, ...fields });
   await control('started', 'native-1', { marker: prepared.stream.progress.prefix });
   await emit(prepared.stream.progress.prefix + 'I will change it.' + prepared.stream.progress.suffix);
+  if (!progressOnly) await emit(prepared.stream.prefix + 'An unfinished final answer', 'partial-final');
   const recovery = async () => (await state()).requests[request.id].replyRecovery;
   const prepare = (id: string) => f.agent(`/agent/requests/${request.id}/recover`, { recoveryId: id });
   return { f, request, member, prepared, state, control, emit, recovery, prepare };
@@ -239,4 +240,26 @@ test('Claude watcher reports an ambiguous failed stdout handoff without retransm
     abort.abort(); await watcher; output.mock.restore();
     if (previous === undefined) delete process.env.SIDECAR_STATE_DIR; else process.env.SIDECAR_STATE_DIR = previous;
   }
+});
+
+
+test('progress-only turns stay pending across repeated completion and a later delegated result', async t => {
+  const { request, prepared, control, emit, state, recovery } = await setup(t, false, true);
+  for (const turnId of ['native-1', 'native-2', 'native-3']) {
+    await control('started', turnId, { marker: prepared.stream.progress.prefix });
+    await emit(prepared.stream.progress.prefix + `Still waiting in ${turnId}.` + prepared.stream.progress.suffix, turnId);
+    await control('completed', turnId);
+    await control('completed', turnId);
+    const saved = await state();
+    assert.equal(saved.requests[request.id].status, 'claimed');
+    assert.equal(await recovery(), undefined);
+    assert.equal(saved.stream.error, null);
+  }
+  await control('started', 'result-turn', { marker: prepared.stream.prefix });
+  const answer = prepared.stream.prefix + 'The delegated result.' + prepared.stream.suffix;
+  await control('completed', 'result-turn', { answer });
+  const saved = await state();
+  assert.equal(saved.requests[request.id].answer.text, 'The delegated result.');
+  assert.equal(saved.requests[request.id].status, 'completed');
+  assert.equal(saved.threads[request.threadId].messages.filter((m: any) => m.role === 'agent').length, 5);
 });

@@ -1,3 +1,4 @@
+import { decodedDelivery } from './support.ts';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from 'node:http';
@@ -35,7 +36,7 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
       if (m.method === 'turn/steer') { await appendFile(deliveries, m.params.input[0].text + '\n'); socket.send(JSON.stringify({ id: m.id, result: { turnId: 'reply' } })); }
     });
   });
-  const server = await startServer({ owner, directory });
+  const server = await startServer({ owner, directory, stateRoot: directory });
   await writeFile(join(directory, 'runtime.json'), JSON.stringify({ url: server.url, instanceId: server.instanceId, ownerKey: key }));
   const token = (await readFile(join(directory, 'agent-token'), 'utf8')).trim();
   const cookie = (await fetch(server.url)).headers.get('set-cookie')!.split(';')[0]!;
@@ -59,7 +60,7 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   async function eventCount(count: number) {
     for (let i = 0; i < 200; i++) {
       const lines = (agent === 'codex' ? await readFile(deliveries, 'utf8') : watched).trim().split('\n').filter(Boolean);
-      if (lines.length >= count) return JSON.parse(lines[count - 1]);
+      if (lines.length >= count) return decodedDelivery(owner, directory, JSON.parse(lines[count - 1]));
       await delay(10);
     }
     assert.fail('No delivery');
@@ -211,9 +212,9 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   assert.deepEqual(savedQuote.requests[quoted.id].messageQuote, messageQuote);
   assert.deepEqual(savedQuote.threads[quoted.threadId].messages.at(-1).messageQuote, messageQuote);
 
-  // Reproduce the live failure: correct progress, stale final markers, then idle.
+  // A genuine unfinished final gets reply-only recovery; progress-only turns are covered separately.
   const progress = quotedEvent.stream.progress.prefix + 'Looking at it.' + quotedEvent.stream.progress.suffix;
-  const stale = event.stream.prefix + 'Wrong markers.' + event.stream.suffix;
+  const stale = quotedEvent.stream.prefix + 'Unfinished final.';
   const nativeMessage = async (turnId: string, messageId: string, text: string) => {
     if (agent === 'codex') for (const socket of sockets) {
       socket.send(JSON.stringify({ method: 'item/agentMessage/delta', params: { threadId: owner.sessionId, turnId, itemId: messageId, delta: text } }));

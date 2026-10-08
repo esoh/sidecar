@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { gatewayCli } from './gateway-support.ts';
 import { test } from 'node:test';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
@@ -179,11 +180,11 @@ test('an explicit HTTPS tunnel keeps passphrase, origin and agent boundaries', {
   assert.equal((await f.view('/api/network')).status, 200);
 });
 
-test('the owner CLI configures a tunnel without viewer cookies and rejects unsafe URLs', { skip: !hasLan }, async t => {
+test('the gateway CLI configures a tunnel without viewer cookies and rejects unsafe URLs', { skip: !hasLan }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'sidecar-tunnel-cli-'));
-  t.after(async () => { await rm(root, { recursive: true, force: true }); });
   const f = await fixture(t, 20, root), key = `claude-${f.owner.sessionId}`;
-  const cli = async (...args: string[]) => JSON.parse((await promisify(execFile)(process.execPath, ['--import', import.meta.resolve('tsx'), new URL('../src/cli.ts', import.meta.url).pathname, 'network', ...args, '--owner', key], { env: { ...process.env, SIDECAR_STATE_DIR: root } })).stdout);
+  const { run } = await gatewayCli(t, root);
+  const cli = (...args: string[]) => run('network', ...args, '--owner', key);
   assert.equal((await cli()).enabled, false);
   const enabled = await cli('on');
   assert.match(enabled.tunnelTarget, /^http:\/\/127\.0\.0\.1:\d+$/);

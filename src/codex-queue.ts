@@ -1,3 +1,4 @@
+import type { AgentIds } from './agent-ids.ts';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
@@ -5,7 +6,7 @@ import { isObject } from './store.ts';
 
 // A successful `codex queue` only enqueues. Idle sessions need an explicit start,
 // and Reset must withdraw cancelled submissions before releasing the next one.
-export async function reconcileCodexQueue(threadId: string, options: { cancelRequestIds?: string[]; startRequestId?: string; canStart?: () => boolean }, signal: AbortSignal, socketPath = join(process.env.CODEX_HOME ?? homedir() + '/.codex', 'app-server-control/app-server-control.sock')): Promise<string | undefined> {
+export async function reconcileCodexQueue(threadId: string, options: { cancelRequestIds?: string[]; startRequestId?: string; canStart?: () => boolean; agentIds?: AgentIds }, signal: AbortSignal, socketPath = join(process.env.CODEX_HOME ?? homedir() + '/.codex', 'app-server-control/app-server-control.sock')): Promise<string | undefined> {
   const abort = AbortSignal.any([signal, AbortSignal.timeout(5000)]);
   abort.throwIfAborted();
   const socket = new WebSocket(`ws+unix://${socketPath}:/`, { maxPayload: 4 * 1024 * 1024, handshakeTimeout: 2000 });
@@ -50,6 +51,7 @@ export async function reconcileCodexQueue(threadId: string, options: { cancelReq
           try {
             const event: unknown = JSON.parse(input.text);
             if (isObject(event) && ['sidecar.request', 'sidecar.recovery'].includes(String(event.type)) && event.ownerKey === `codex-${threadId}` && typeof event.requestId === 'string') requestId = event.requestId;
+            if (isObject(event) && ['sc.request', 'sc.recovery'].includes(String(event.type)) && typeof event.ownerKey === 'string' && typeof event.requestId === 'string' && options.agentIds && await options.agentIds.resolveOwner(event.ownerKey) === `codex-${threadId}`) requestId = await options.agentIds.resolve(`codex-${threadId}`, 'r', event.requestId);
           } catch { /* Ordinary terminal messages are never Sidecar queue entries. */ }
         }
         entries.push({ id: entry.id, ...(requestId ? { requestId } : {}) });

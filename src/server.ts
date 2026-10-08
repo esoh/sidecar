@@ -1,16 +1,16 @@
-import { build } from 'esbuild';
-import { createRequire } from 'node:module';
+import { createViewerHost, bodyOf, json, sendBody, type ViewerContext } from './viewer-http.ts';
+import { viewerHtml, serveViewerAsset, serveDocumentImage } from './viewer-assets.ts';
+import { openAgentIds, isAgentAlias, type IdKind } from './agent-ids.ts';
+import { compactNotification, compactContext } from './agent-protocol.ts';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { randomBytes, randomUUID, timingSafeEqual, createHash } from 'node:crypto';
-import { gzip } from 'node:zlib';
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { networkInterfaces } from 'node:os';
-import { readFile, writeFile, realpath, mkdir, rm, stat, rename } from 'node:fs/promises';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { type IncomingMessage, type ServerResponse } from 'node:http';
+import { readFile, writeFile, realpath, rm, stat } from 'node:fs/promises';
 import { basename, join, dirname, relative, isAbsolute, extname } from 'node:path';
 import { notifyCodex } from './agent.ts';
 import { reconcileCodexQueue } from './codex-queue.ts';
 import { observeCodex, readCodexControl, resetCodexSession, type CodexObserver, type NativeResetResult, type NativeControl } from './codex-stream.ts';
-import { ReplyStream, ThreadReplyRouter, isStreamEvent } from './stream.ts';
+import { ReplyStream, ThreadReplyRouter, isStreamEvent, findReplyBlocks } from './stream.ts';
 import { parseReply } from './reply-metadata.ts';
 import { readDocument } from './documents.ts';
 import { prepareProposal } from './proposals.ts';
@@ -25,16 +25,9 @@ import { isPinStyle } from './pin-style.ts';
 import { stopRequest, prepareBatch, requestBatch, setMessageSelectionVisibility, type State } from './store.ts';
 import { isMessageQuote, isFileQuote } from './quote.ts';
 
-const rendererRequire = createRequire(import.meta.resolve('@plannotator/ui/components/BlockRenderer'));
-const rendererFonts = {
-  katex: rendererRequire.resolve('katex/dist/katex.min.css'),
-  inter: rendererRequire.resolve('@fontsource-variable/inter/index.css'),
-  geist: rendererRequire.resolve('@fontsource-variable/geist-mono/index.css'),
-};
-
 type DocumentData = Awaited<ReturnType<typeof readDocument>>;
 type Cached = { data: DocumentData } | { error: string; status: number };
-export type ServerOptions = { owner: Owner; directory: string; port?: number; pollMs?: number };
+export type ServerOptions = { owner: Owner; directory: string; stateRoot: string; port?: number; pollMs?: number };
 function errorInfo(error: unknown): { error: string; status: number } {
   if (error instanceof DomainError) return { error: error.message, status: error.status };
   if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return { error: 'The registered file is unavailable', status: 404 };
@@ -62,60 +55,6 @@ function markAccepted(state: State, id: string, nativeTurnId?: string) {
     }
   }
 }
-async function bodyOf(request: IncomingMessage): Promise<Record<string, unknown>> {
-  let size = 0;
-  const chunks: Buffer[] = [];
-  for await (const chunk of request) {
-    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += bytes.length;
-    if (size <= 256 * 1024) chunks.push(bytes);
-  }
-  if (size > 256 * 1024) throw new DomainError('Request exceeds 256 KiB', 413);
-  let value: unknown;
-  try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
-  catch { throw new DomainError('Invalid JSON'); }
-  if (!isObject(value)) throw new DomainError('Expected a JSON object');
-  return value;
-}
-function sameSecret(value: unknown, secret: string): boolean {
-  return typeof value === 'string' && Buffer.byteLength(value) === Buffer.byteLength(secret) && timingSafeEqual(Buffer.from(value), Buffer.from(secret));
-}
-function sendBody(response: ServerResponse, body: string | Uint8Array, isAsset = false): void {
-  const bytes = Buffer.from(body);
-  response.setHeader('Vary', 'Accept-Encoding');
-  if (isAsset) {
-    const etag = `W/"${createHash('sha256').update(bytes).digest('hex')}"`;
-    // Revalidate after authentication, including after an upgrade or passphrase change.
-    response.setHeader('Cache-Control', 'private, no-cache');
-    response.setHeader('ETag', etag);
-    if (response.req.headers['if-none-match']?.split(',').map(value => value.trim()).some(value => value === etag || value === '*')) {
-      response.writeHead(304); response.end(); return;
-    }
-  }
-  const encodings = (response.req.headers['accept-encoding'] ?? '').toLowerCase().split(',').map(value => value.trim().split(/;\s*/));
-  const encoding = encodings.find(([name]) => name === 'gzip') ?? encodings.find(([name]) => name === '*');
-  const quality = encoding?.slice(1).find(value => value.startsWith('q='))?.slice(2);
-  const canCompress = !!encoding && (quality === undefined || (Number(quality) > 0 && Number(quality) <= 1));
-  const finish = (data: Buffer) => { response.setHeader('Content-Length', data.length); response.end(data); };
-  if (canCompress && bytes.length >= 1024) {
-    gzip(bytes, (error, compressed) => {
-      if (response.destroyed) return;
-      if (error) { response.destroy(error); return; }
-      response.setHeader('Content-Encoding', 'gzip'); finish(compressed);
-    });
-  } else finish(bytes);
-}
-function json(response: ServerResponse, value: unknown, status = 200): void {
-  response.statusCode = status;
-  response.setHeader('Content-Type', 'application/json; charset=utf-8');
-  sendBody(response, JSON.stringify(value));
-}
-function closeListener(server: ReturnType<typeof createServer>): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => server.closeAllConnections(), 100); timer.unref();
-    server.close(error => { clearTimeout(timer); if (error) reject(error); else resolve(); });
-  });
-}
 function requestContext(state: State, id: string) {
   const requests = requestBatch(state, id), request = get(state.requests, id), thread = get(state.threads, request.threadId);
   const questions = thread.messages.filter(message => message.role === 'user');
@@ -129,7 +68,11 @@ function requestContext(state: State, id: string) {
   const { requestId: _, ...single } = messages[0];
   return { documentId: request.documentId, thread: { id: thread.id, lastRequestId: previous?.requestId ?? null, ...(thread.title ? { title: thread.title } : {}) }, ...(request.covers?.length ? { covers: request.covers } : {}), ...(messages.length > 1 ? { messages } : single) };
 }
-export async function startServer({ owner, directory, port = 0, pollMs = 1000 }: ServerOptions) {
+export async function startServer({ owner, directory, stateRoot, port = 0, pollMs = 1000 }: ServerOptions) {
+  const ids = await openAgentIds(stateRoot), key = ownerKey(owner);
+  await ids.allocate(key, []);
+  const ownerAlias = ids.encode(key, 'o', key);
+  const resolveId = async (kind: IdKind, value: string) => isAgentAlias(value, kind) ? ids.resolve(key, kind, value) : value;
   const appVersion = await readAppVersion();
   const store = await openStore(directory, owner);
   const browsingRoots = new Map<string, Set<string>>();
@@ -139,12 +82,10 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error; }
   const agentToken = (await readFile(tokenPath, 'utf8')).trim();
   if (!/^[0-9a-f]{64}$/.test(agentToken)) throw new Error('Invalid agent capability file');
-  const viewerToken = randomBytes(32).toString('hex');
   const cookieName = `sidecar_${ownerKey(owner).replaceAll('-', '_')}`;
   const cache = new Map<string, Cached>();
   const documentReads = new Set<{ documentId: string; done: Promise<void> }>();
   const viewers = new Map<ServerResponse, boolean>();
-  let appBundle: Promise<Uint8Array> | undefined;
   let stateRevision = 0, runtimeRevision = 0, sentRuntimeRevision = 0, lastRuntime = '';
   const agents = new Map<ServerResponse, Set<string>>();
   let url = '';
@@ -160,7 +101,24 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   let nativeCleanupVersion = 0, nativeCleanedVersion = 0;
   const pendingNativeCleanup = new Set<string>();
   let connectionError: string | null = null;
-  let compacting = false;
+  let compacting = false, claudeProtocolAt = 0, nativeDeliveryAt = 0;
+  const nativeDelivery = () => nativeDeliveryAt > Date.now() - 2500;
+  const compactCapable = (requested: boolean) => requested && (owner.agent === 'codex' || claudeProtocolAt > Date.now() - 2500);
+  async function deliveryFormat(id: string, requested = false) {
+    const previous = await ids.deliveryFormat(key, id);
+    if (previous) return previous;
+    const record = get(store.read().requests, id);
+    const format = compactCapable(requested) && record.status === 'queued' && !record.handoff && !record.acceptedAt ? 'compact-v1' : 'legacy';
+    await ids.allocate(key, [], { requestId: id, format });
+    return format;
+  }
+  async function wire(event: Record<string, unknown>) {
+    return typeof event.requestId === 'string' && await ids.deliveryFormat(key, event.requestId) === 'compact-v1' ? compactNotification(owner, event, ids) : event;
+  }
+  async function replyStream(route: import('./stream.ts').ReplyRoute) {
+    const compact = await ids.deliveryFormat(key, route.requestId) === 'compact-v1';
+    return new ReplyStream(route, true, compact ? ids.encode(key, 'r', route.requestId) : undefined);
+  }
   let agentActivity = 'unknown';
   let activityTurnId: string | undefined;
   let stream: ReplyStream | undefined;
@@ -223,6 +181,8 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       } catch { stopFailed(active); }
     } else {
       if (stopping?.stream === active) stopFailed(active);
+      // A native turn may yield while delegated work is still pending.
+      if (status === 'completed' && !active.hasFinalStarted && !active.error && !store.read().requests[active.route.requestId]?.replyRecovery) return;
       active.fail('Reply could not be saved.');
       await store.update(state => {
         const request = get(state.requests, active.route.requestId);
@@ -244,12 +204,14 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     for (const request of Object.values(store.read().requests)) {
       if (request.nativeTurnId !== turnId || request.batchId !== request.id || streams.has(request.id) || !['queued', 'claimed', 'uncertain'].includes(request.status)) continue;
       await store.update(state => claim(state, request.id, { resume: true }));
-      const active = new ReplyStream({ requestId: request.id, documentId: request.documentId, threadId: request.threadId }, true);
+      const active = await replyStream({ requestId: request.id, documentId: request.documentId, threadId: request.threadId });
       streams.set(request.id, active); stream ??= active;
     }
-    if (answer) for (const active of [...streams.values()]) {
-      const start = answer.indexOf(active.prefix), end = answer.indexOf(active.suffix, start + active.prefix.length);
-      if (start >= 0 && end >= 0) await acceptReply(active, { messageId: `native-final:${turnId}`, turnId, index: 0, delta: answer.slice(start, end + active.suffix.length), final: true });
+    if (answer) for (const block of findReplyBlocks(answer, streams)) {
+      if (!answer.startsWith(block.stream.prefix, block.start)) continue;
+      if (block.end !== null)
+        await acceptReply(block.stream, { messageId: `native-final:${turnId}:${block.start}`, turnId, index: 0, delta: answer.slice(block.start, block.end), final: true });
+      else if (controlTurn(block.stream) === turnId) block.stream.recoverPartial(answer.slice(block.start));
     }
     for (const active of [...streams.values()]) await turnEnded(active, turnId, status, answer);
     replyRouter.endTurn(turnId);
@@ -289,17 +251,17 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
           // Withdraw native deliveries before interrupting: otherwise an old queued
           // submission can start after Sidecar has already marked it Stopped.
           const cancelled = [...new Set([...targets, ...terminalCodexRequests()])];
-          await reconcileCodexQueue(owner.sessionId, { cancelRequestIds: cancelled }, abort.signal);
+          await reconcileCodexQueue(owner.sessionId, { cancelRequestIds: cancelled, agentIds: ids }, abort.signal);
         }
         const result = owner.agent === 'codex' ? await resetCodexSession(owner.sessionId, abort.signal) : await confirmation;
         await capture(async () => {
           if (closed || abort.signal.aborted) throw new Error('Reset could not be confirmed.');
           if (result.answer) for (const active of [...streams.values()]) {
             if (!targets.includes(active.route.requestId)) continue;
-            const start = result.answer.indexOf(active.prefix), end = result.answer.indexOf(active.suffix, start + active.prefix.length);
-            if (start >= 0 && end >= 0)
-              await acceptReply(active, { messageId: `reset-final:${attempt.id}`, turnId: result.turnId ?? attempt.id, index: 0, delta: result.answer.slice(start, end + active.suffix.length), final: true });
-            else active.recoverPartial(result.answer);
+            const block = findReplyBlocks(result.answer, new Map([[active.route.requestId, active]]))[0];
+            if (block?.end != null && result.answer.startsWith(active.prefix, block.start))
+              await acceptReply(active, { messageId: `reset-final:${attempt.id}`, turnId: result.turnId ?? attempt.id, index: 0, delta: result.answer.slice(block.start, block.end), final: true });
+            else if (block) active.recoverPartial(result.answer.slice(block.start));
           }
           if ([...streams.values()].some(active => active.done)) throw new Error('The completed reply could not be saved. Retry saving it before Reset.');
           await store.update(state => {
@@ -425,7 +387,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     changed();
   }
   function notifyAgent(response: ServerResponse, sent: Set<string>) {
-    if (isResetting() || stopping) return;
+    if (isResetting() || stopping || nativeDelivery()) return;
     const recovering = pendingRecovery();
     if (recovering?.replyRecovery && !sent.has(recovering.replyRecovery.id) && !response.destroyed) {
       response.write(JSON.stringify({ type: 'sidecar.recovery', ownerKey: ownerKey(owner), requestId: recovering.id, recoveryId: recovering.replyRecovery.id }) + '\n');
@@ -458,7 +420,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     if (!request || announced.has(request.id)) return;
     dispatching = true; announced.add(request.id);
     try {
-      const notification = await prepareNotification(request.id);
+      const notification = await prepareNotification(request.id, true);
       if ('claimStatus' in notification && notification.claimStatus !== 'claimed') return;
       if (closed) return;
       await deliverCodex(request.id, notification);
@@ -513,7 +475,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     if (!startRequestId && !cancelRequestIds.length) return;
     nativeQueueWork = (async () => {
       try {
-        const turnId = await reconcileCodexQueue(owner.sessionId, { startRequestId, cancelRequestIds, canStart }, transportAbort.signal);
+        const turnId = await reconcileCodexQueue(owner.sessionId, { startRequestId, cancelRequestIds, canStart, agentIds: ids }, transportAbort.signal);
         if (turnId && startRequestId) await store.update(state => { if (state.requests[startRequestId]) markAccepted(state, startRequestId, turnId); });
         nativeCleanedVersion = cleanupVersion;
         for (const requestId of cancelRequestIds) pendingNativeCleanup.delete(requestId);
@@ -532,7 +494,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       stream: stream ? { ...stream.snapshot(), turnId: controlTurn(), canStop: canStop(), stopping: stopping?.stream === stream, stopError } : null,
       streams: [...streams.values()].filter(active => active.hasStarted).map(active => active.snapshot()),
       lastLifecycle, activity: compacting ? 'compacting' : agentActivity,
-      connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError };
+      connection: connectionError ? 'error' : agents.size || nativeDelivery() ? 'connected' : 'waiting', connectionError };
     const encoded = JSON.stringify(runtime);
     if (encoded !== lastRuntime) { lastRuntime = encoded; runtimeRevision++; }
     return { ...runtime, runtimeRevision };
@@ -574,7 +536,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     const current = get(state.requests, route.requestId);
     if (current.status !== 'claimed' || current.documentId !== route.documentId || current.threadId !== route.threadId) throw new DomainError('Claim the matching request before streaming', 409);
     let active = streams.get(current.id);
-    if (!active) { active = new ReplyStream(route, true); streams.set(current.id, active); stream ??= active; }
+    if (!active) { active = await replyStream(route); streams.set(current.id, active); stream ??= active; }
     try { await ensureObserver(); }
     catch (error) { active.fail('Streaming unavailable. Use a complete reply.'); changed(); throw error; }
     if (closed) throw new Error('Sidecar stopped');
@@ -594,7 +556,9 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     }
     await streamReady;
   }
-  async function prepareNotification(id: string) {
+  function prepareNotification(id: string, compact = false) { return capture(() => reserveNotification(id, compact)); }
+  async function reserveNotification(id: string, compact = false) {
+    await deliveryFormat(id, compact);
     if (isResetting()) throw new DomainError('Agent Reset is in progress', 409);
     const notification = { type: 'sidecar.request', ownerKey: ownerKey(owner), requestId: id };
     const prepared = await store.update(state => {
@@ -610,7 +574,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       request.handoff = 'prepared';
       return { claimStatus: result.claimStatus, context: requestContext(state, id) };
     });
-    if (!prepared.context) return { ...notification, ...(prepared.claimStatus ? { claimStatus: prepared.claimStatus } : {}) };
+    if (!prepared.context) return wire({ ...notification, ...(prepared.claimStatus ? { claimStatus: prepared.claimStatus } : {}) });
     const request = get(store.read().requests, id);
     directRequestId = id;
     const route = { requestId: id, documentId: request.documentId, threadId: request.threadId };
@@ -619,8 +583,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     catch { markers = { error: 'Streaming unavailable. Use the complete-reply command.' }; }
     if (get(store.read().requests, id).status !== 'claimed') return { ...notification, claimStatus: 'completed' };
     changed();
-    return { ...notification, stream: markers, ...prepared.context,
-      instruction: 'Follow the Sidecar skill.' };
+    return wire({ ...notification, ...prepared.context, stream: markers, instruction: 'Follow the Sidecar skill.' });
   }
   function prepareRecovery(id: string, recoveryId: string): Promise<Record<string, unknown>> {
     // Do not hand off a recovery while an earlier final answer is still saving.
@@ -648,9 +611,9 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     catch { markers = { error: 'Use the complete-reply command.' }; }
     if (closed || get(store.read().requests, id).status !== 'claimed') return { claimStatus: 'completed' };
     changed();
-    return { type: 'sidecar.recovery', ownerKey: ownerKey(owner), requestId: id, recoveryId,
+    return wire({ type: 'sidecar.recovery', ownerKey: ownerKey(owner), requestId: id, recoveryId,
       documentId: request.documentId, thread: { id: request.threadId }, stream: markers,
-      instruction: 'Follow the Sidecar skill. Reply recovery only: resend the existing answer using these exact markers. Do not repeat the original task, tools, or edits. If you cannot recover the answer, send an isError reply explaining that. Leave later queued messages for their own delivery.' };
+      instruction: 'Follow the Sidecar skill. Reply recovery only: resend the existing answer using these exact markers. Do not repeat the original task, tools, or edits. If you cannot recover the answer, send an isError reply explaining that. Leave later queued messages for their own delivery.' });
   }
   async function closeRegisteredDocument(id: string) {
     return proposalService.withDocument(id, async () => {
@@ -666,202 +629,24 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     });
   }
 
-  function createListener(isLan = false) {
-    const listener = createServer((request, response) => { void handle(request, response, isLan); });
-    listener.requestTimeout = 10000;
-    listener.headersTimeout = 10000;
-    return listener;
-  }
-  const server = createListener();
-  let lanServer: ReturnType<typeof createServer> | undefined;
-  let lanChange: Promise<void> = Promise.resolve();
-  let lanAuth: { passphrase: string; token: string } | undefined;
-  let publicUrl: string | null = null;
-  let failedLogins = 0, loginWindow = 0;
-  const lanCookieName = `${cookieName}_lan`;
-  // No Sidecar sign-in timeout. Renew persistent browser storage on authenticated visits.
-  const networkCookie = (isSecure: boolean) => `${lanCookieName}=${lanAuth?.token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=34560000${isSecure ? '; Secure' : ''}`;
-  async function prepareNetworkAuth(passphrase?: string) {
-    const path = join(directory, 'network-auth.json');
-    if (!lanAuth) {
-      try {
-        const saved: unknown = JSON.parse(await readFile(path, 'utf8'));
-        if (!isObject(saved) || typeof saved.passphrase !== 'string' || saved.passphrase.length < 8 || saved.passphrase.length > 128 || typeof saved.token !== 'string' || !/^[a-f0-9]{64}$/.test(saved.token)) throw new Error('Saved network credentials are invalid');
-        lanAuth = { passphrase: saved.passphrase, token: saved.token };
-      } catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error; }
-    }
-    if (lanAuth && (passphrase === undefined || passphrase === lanAuth.passphrase)) return;
-    const next = { passphrase: passphrase ?? randomBytes(6).toString('hex'), token: randomBytes(32).toString('hex') };
-    const temporary = `${path}.${randomUUID()}.tmp`;
-    try {
-      await writeFile(temporary, JSON.stringify(next), { mode: 0o600, flag: 'wx' });
-      await rename(temporary, path);
-    } finally { await rm(temporary, { force: true }); }
-    lanAuth = next; failedLogins = 0;
-    // Revoke connected browsers too, so an old SSE connection cannot keep receiving updates.
-    lanServer?.closeAllConnections();
-  }
-  const lanAddresses = () => [...new Set(Object.values(networkInterfaces()).flatMap(addresses =>
-    addresses?.filter(address => address.family === 'IPv4' && !address.internal).map(address => address.address) ?? []))];
-  function networkStatus(isLocal: boolean) {
-    const address = lanServer?.address();
-    const urls = address && typeof address !== 'string' ? lanAddresses().map(ip => `http://${ip}:${address.port}`) : [];
-    return { enabled: !!lanServer, urls, publicUrl, isLocal, ...(isLocal ? {
-      passphrase: lanServer ? lanAuth?.passphrase ?? null : null,
-      tunnelTarget: address && typeof address !== 'string' ? `http://127.0.0.1:${address.port}` : null,
-    } : {}) };
-  }
-  function setNetworkAccess(enabled: boolean, passphrase?: string, nextPublicUrl?: string, expectedTunnelTarget?: string, expectedInstanceId?: string) {
-    if (nextPublicUrl) {
-      let parsed: URL;
-      try { parsed = new URL(nextPublicUrl); } catch { throw new DomainError('Enter an HTTPS address without a path, query, or fragment.'); }
-      if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash || nextPublicUrl.length > 2048)
-        throw new DomainError('Enter an HTTPS address without credentials, a path, query, or fragment.');
-      nextPublicUrl = parsed.origin;
-    }
-    if (passphrase !== undefined && (passphrase.length < 8 || passphrase.length > 128)) throw new DomainError('Use a passphrase between 8 and 128 characters.');
-    // Serialize toggles so a late enable cannot reopen access after Disable.
-    const change = lanChange.then(async () => {
-      if (closed) throw new DomainError('Sidecar is stopping', 503);
-      if ((expectedInstanceId !== undefined && expectedInstanceId !== instanceId) ||
-          (expectedTunnelTarget !== undefined && expectedTunnelTarget !== networkStatus(true).tunnelTarget))
-        throw new DomainError('Sidecar or its protected listener changed. Recheck the tunnel target before reconnecting.', 409);
-      if (enabled) await prepareNetworkAuth(passphrase);
-      if (enabled && !lanServer) {
-        if (!lanAddresses().length) throw new DomainError('No local IPv4 network found. Connect to Wi-Fi or Ethernet and try again.');
-        const listener = createListener(true);
-        await new Promise<void>((resolve, reject) => {
-          listener.once('error', reject);
-          listener.listen(0, '0.0.0.0', () => { listener.off('error', reject); resolve(); });
-        });
-        lanServer = listener;
-      } else if (!enabled && lanServer) {
-        const listener = lanServer; lanServer = undefined;
-        await closeListener(listener);
-      }
-      const next = enabled ? nextPublicUrl === undefined ? publicUrl : nextPublicUrl || null : null;
-      if (next !== publicUrl) { publicUrl = next; lanServer?.closeAllConnections(); }
-    });
-    lanChange = change.catch(() => {});
-    return change;
-  }
-  async function handle(request: IncomingMessage, response: ServerResponse, isLan: boolean) {
-    response.setHeader('Cache-Control', 'no-store');
-    response.setHeader('X-Content-Type-Options', 'nosniff');
-    response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
+  async function handle(request: IncomingMessage, response: ServerResponse, context: ViewerContext) {
+    const { target, method, origin, isAgent } = context, isLan = !context.isLocal;
+    let { path } = context;
     try {
       if (closed) throw new DomainError('Sidecar is stopping. Reopen it from your agent.', 503);
-      const isTunnel = !!(isLan && publicUrl && request.headers.host === new URL(publicUrl).host);
-      // Only a loopback proxy for the explicitly allowed HTTPS origin can use this route.
-      // Forwarded headers never select an origin or grant localhost/agent privileges.
-      if (isTunnel && (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(request.socket.remoteAddress ?? '') || request.headers['x-forwarded-proto'] !== 'https'))
-        throw new DomainError('Use an HTTPS tunnel forwarded through localhost', 403);
-      const origin = isTunnel && publicUrl ? publicUrl : isLan ? `http://${request.headers.host}` : url;
-      if (isLan ? !isTunnel && !networkStatus(false).urls.includes(origin) : request.headers.host !== new URL(url).host) throw new DomainError('Invalid host', 403);
-      if (request.headers.origin !== undefined && request.headers.origin !== origin) throw new DomainError('Foreign origin', 403);
-      const target = new URL(request.url ?? '/', origin);
-      if (target.origin !== origin) throw new DomainError('Foreign request target', 403);
-      const path = decodeURIComponent(target.pathname);
-      const method = request.method ?? 'GET';
-      const name = isLan ? lanCookieName : cookieName;
-      const cookie = request.headers.cookie?.split(';').map(part => part.trim()).find(part => part.startsWith(`${name}=`))?.slice(name.length + 1);
-      const hasViewer = isLan ? !!lanAuth && sameSecret(cookie, lanAuth.token) : sameSecret(cookie, viewerToken);
-      if (isLan && hasViewer) response.setHeader('Set-Cookie', networkCookie(isTunnel));
-      async function unlockPage(error = '', status = 200) {
-        response.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
-        response.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' });
-        response.end((await readFile(new URL('../web/unlock.html', import.meta.url), 'utf8')).replace('<!-- error -->', error ? `<p role="alert">${error}</p>` : ''));
-      }
-      if (isLan && path === '/' && method === 'POST') {
-        if (request.headers.origin !== origin) throw new DomainError('Origin required', 403);
-        if (request.headers['content-type']?.split(';')[0] !== 'application/x-www-form-urlencoded') throw new DomainError('Expected a login form', 415);
-        const chunks: Buffer[] = []; let size = 0;
-        for await (const chunk of request) { size += chunk.length; if (size > 2048) throw new DomainError('Login form is too large', 413); chunks.push(chunk); }
-        const form = new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
-        // One budget per viewer also limits distributed guesses at the shared passphrase.
-        if (Date.now() - loginWindow >= 60000) { failedLogins = 0; loginWindow = Date.now(); }
-        if (failedLogins >= 10) { response.setHeader('Retry-After', '60'); await unlockPage('Too many attempts. Try again in a minute.', 429); return; }
-        if (!lanAuth || !sameSecret(form.get('passphrase'), lanAuth.passphrase)) {
-          failedLogins++; await unlockPage('Incorrect passphrase.', 401); return;
-        }
-        failedLogins = 0;
-        response.setHeader('Set-Cookie', networkCookie(isTunnel));
-        response.writeHead(303, { Location: '/' + target.search }); response.end(); return;
-      }
-      if (method === 'GET' && path === '/') {
-        if (!isLan && ['cross-site', 'same-site'].includes(String(request.headers['sec-fetch-site']))) throw new DomainError('Open Sidecar from the agent', 403);
-        if (isLan && !hasViewer) { await unlockPage(); return; }
-        if (!isLan) response.setHeader('Set-Cookie', `${cookieName}=${viewerToken}; HttpOnly; SameSite=Strict; Path=/`);
-        response.setHeader('Content-Type', 'text/html; charset=utf-8');
-        let html = '<!doctype html><html lang="en"><title>Sidecar</title><body><p>Sidecar document server is running.</p></body></html>';
-        try { html = await readFile(new URL('../web/index.html', import.meta.url), 'utf8'); }
-        catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error; }
-        response.end(html);
-        return;
-      }
-      const isAgent = path.startsWith('/agent/');
-      if (isAgent) {
-        if (isLan) throw new DomainError('Agent endpoints are local only', 403);
-        if (!sameSecret(request.headers['x-sidecar-token'], agentToken)) throw new DomainError('Agent capability required', 403);
-      } else {
-        if (!hasViewer) throw new DomainError(isLan ? 'Reload this page to enter the network passphrase.' : 'Open Sidecar from the agent', isLan ? 401 : 403);
-        if (method !== 'GET' && method !== 'HEAD' && request.headers.origin !== origin) throw new DomainError('Origin required', 403);
-      }
-      if (method === 'GET' && path === '/app.js') {
-        response.setHeader('Content-Type', 'text/javascript; charset=utf-8');
-        // One build per server; the browser revalidates the content hash on later loads.
-        appBundle ??= build({ entryPoints: [fileURLToPath(new URL('../web/app.tsx', import.meta.url))], bundle: true, write: false, minify: true, format: 'esm', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' } })
-          .then(bundle => bundle.outputFiles[0].contents).catch(error => { appBundle = undefined; throw error; });
-        sendBody(response, await appBundle, true);
-        return;
-      }
-      if (method === 'GET' && path === '/renderer.css') {
-        response.setHeader('Content-Type', 'text/css; charset=utf-8');
-        const styles = await readFile(new URL(import.meta.resolve('@plannotator/ui/styles.css')), 'utf8');
-        const fonts = await Promise.all(Object.entries(rendererFonts).map(async ([family, cssPath]) =>
-          (await readFile(cssPath, 'utf8')).replaceAll(/url\((?:\.\/files|fonts)\//g, `url(/renderer-fonts/${family}/`)));
-        sendBody(response, [styles, ...fonts].join('\n'), true);
-        return;
-      }
-      const font = path.match(/^\/renderer-fonts\/(katex|inter|geist)\/([A-Za-z0-9_-]+\.(?:woff2?|ttf))$/);
-      if (method === 'GET' && font) {
-        const family = font[1], name = font[2];
-        if (family !== 'katex' && family !== 'inter' && family !== 'geist') throw new DomainError('Unknown font', 404);
-        response.setHeader('Content-Type', name.endsWith('.woff2') ? 'font/woff2' : name.endsWith('.woff') ? 'font/woff' : 'font/ttf');
-        sendBody(response, await readFile(join(dirname(rendererFonts[family]), family === 'katex' ? 'fonts' : 'files', name)), true);
-        return;
-      }
+      if (request.headers['x-sidecar-instance'] && request.headers['x-sidecar-instance'] !== instanceId) throw new DomainError('The original viewer changed. Retry from its current page.', 409);
+      if (method === 'GET' && path === '/') { response.setHeader('Content-Type', 'text/html; charset=utf-8'); response.end(await viewerHtml()); return; }
+      if (await serveViewerAsset(path, method, response)) return;
       if (method === 'GET' && path === '/api/image') {
         const key = target.searchParams.get('owner');
         const document = key
           ? await libraryDocument(dirname(directory), key, target.searchParams.get('document') ?? '')
           : get(store.read().documents, target.searchParams.get('document') ?? '');
-        const base = dirname(document.path);
-        const imageUrl = new URL(target.searchParams.get('path') ?? '', pathToFileURL(document.path));
-        if (imageUrl.protocol !== 'file:') throw new DomainError('Expected a local image', 400);
-        const imagePath = await realpath(fileURLToPath(imageUrl));
-        const fromBase = relative(base, imagePath);
-        if (fromBase.startsWith('..') || isAbsolute(fromBase)) throw new DomainError('Image must be inside the document directory', 403);
-        const types: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.avif': 'image/avif', '.svg': 'image/svg+xml' };
-        const mime = types[extname(imagePath).toLowerCase()];
-        if (!mime) throw new DomainError('Unsupported image type', 415);
-        // SVG remains an image even if opened directly; it cannot execute or fetch resources.
-        response.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; style-src 'unsafe-inline'");
-        response.setHeader('Content-Type', mime);
-        response.end(await readFile(imagePath));
-        return;
-      }
-      if (method === 'GET' && path === '/favicon.svg') {
-        response.setHeader('Content-Type', 'image/svg+xml');
-        sendBody(response, await readFile(new URL('../web/favicon.svg', import.meta.url), 'utf8'), true); return;
-      }
-      if (method === 'GET' && path === '/app.css') {
-        response.setHeader('Content-Type', 'text/css; charset=utf-8');
-        sendBody(response, await readFile(new URL('../web/app.css', import.meta.url), 'utf8'), true);
+        await serveDocumentImage(document.path, target, response);
         return;
       }
       if (method === 'GET' && path === '/api/state') { json(response, snapshot()); return; }
-      if (method === 'GET' && (path === '/api/network' || path === '/agent/network')) { json(response, networkStatus(!isLan)); return; }
+      if (method === 'GET' && (path === '/api/network' || path === '/agent/network')) { json(response, host.networkStatus(!isLan)); return; }
       if (method === 'GET' && path === '/api/library') {
         const library = await listLibrary(dirname(directory));
         // Other owners have their own opt-in listener; never send a phone to its own localhost.
@@ -954,13 +739,36 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         if (isLan) throw new DomainError('Manage tunnel settings from the local viewer', 403);
         json(response, await readTunnelConfig()); return;
       }
-      if (method === 'GET' && path === '/agent/status') { json(response, { ownerKey: ownerKey(owner), instanceId, state: 'running', connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError }); return; }
+      if (method === 'GET' && path === '/agent/status') { json(response, { ownerKey: ownerKey(owner), ownerAlias, agentProtocol: 'sc1', gatewayProtocol: 1, nativeDelivery: nativeDelivery(), instanceId, state: 'running', connection: connectionError ? 'error' : agents.size || nativeDelivery() ? 'connected' : 'waiting', connectionError }); return; }
       if (method === 'POST' && path === '/agent/stop') { json(response, { ok: true }); setImmediate(() => { void close(); }); return; }
       const body = ['POST', 'PATCH'].includes(method) ? await bodyOf(request) : {};
+      const compact = request.headers['x-sidecar-protocol'] === 'sc1';
+      if (isAgent) {
+        const match = /^\/agent\/(requests|threads|documents)\/([^/]+)(.*)$/.exec(path);
+        if (match) path = `/agent/${match[1]}/${await resolveId(match[1] === 'requests' ? 'r' : match[1] === 'threads' ? 't' : 'd', match[2])}${match[3]}`;
+        for (const [field, kind] of Object.entries({ requestId: 'r', documentId: 'd', threadId: 't', recoveryId: 'e' } as const)) if (typeof body[field] === 'string') body[field] = await resolveId(kind, body[field]);
+        if (Array.isArray(body.requestIds)) body.requestIds = await Promise.all(body.requestIds.map(id => typeof id === 'string' ? resolveId('r', id) : id));
+        if (typeof body.ownerKey === 'string' && isAgentAlias(body.ownerKey, 'o')) body.ownerKey = await ids.resolveOwner(body.ownerKey);
+      }
+      if (method === 'POST' && path === '/agent/inbox') {
+        if (owner.agent !== 'claude' || body.ownerKey !== key || !nativeDelivery()) throw new DomainError('Native delivery is unavailable', 409);
+        const notification = await capture(async () => {
+          if (isResetting() || stopping || (body.turnId === 'idle' ? agentActivity !== 'idle' : body.turnId !== nativeTurn())) return;
+          const recovering = pendingRecovery();
+          if (recovering?.replyRecovery) return reserveRecovery(recovering.id, recovering.replyRecovery.id);
+          const next = pending();
+          if (!next) return;
+          const notification = await reserveNotification(next.id, compact);
+          if (body.turnId !== 'idle') await store.update(state => { for (const member of requestBatch(state, next.id)) member.nativeTurnId = text(body, 'turnId'); });
+          return notification;
+        }).catch(error => { connectionError = 'Claude delivery could not be prepared. The question is retained; check the app and use Reset if needed.'; changed(); throw error; });
+        json(response, { ownerKey: key, instanceId, ...(notification ? { notification } : {}) }); return;
+      }
+
       if (method === 'POST' && (path === '/api/network' || path === '/agent/network')) {
         if (isLan) throw new DomainError('Manage network access from the local viewer', 403);
-        await setNetworkAccess(boolean(body, 'enabled'), optionalText(body, 'passphrase'), optionalText(body, 'publicUrl'), optionalText(body, 'expectedTunnelTarget'), optionalText(body, 'expectedInstanceId'));
-        json(response, networkStatus(true)); return;
+        await host.setNetworkAccess(boolean(body, 'enabled'), optionalText(body, 'passphrase'), optionalText(body, 'publicUrl'), optionalText(body, 'expectedTunnelTarget'), optionalText(body, 'expectedInstanceId'));
+        json(response, host.networkStatus(true)); return;
       }
       const agentClose = path.match(/^\/agent\/documents\/([^/]+)\/close$/);
       if (method === 'POST' && agentClose) {
@@ -1003,8 +811,25 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       }
       if (method === 'POST' && path === '/agent/control') {
         if (owner.agent !== 'claude' || text(body, 'ownerKey') !== ownerKey(owner)) throw new DomainError('Control belongs to another owner', 409);
+        if (body.protocol === 'sc1') claudeProtocolAt = Date.now();
+        if (body.delivery === 'tool-context-v1') nativeDeliveryAt = Date.now();
         const event = text(body, 'event'), turnId = text(body, 'turnId');
-        if (!turnId || turnId.length > 256 || !['poll', 'received', 'started', 'completed', 'interrupted', 'stop-failed', 'reset-idle', 'reset-started', 'reset-failed'].includes(event)) throw new DomainError('Invalid native control event');
+        if (!turnId || turnId.length > 256 || !['poll', 'received', 'delivery-failed', 'started', 'completed', 'interrupted', 'stop-failed', 'reset-idle', 'reset-started', 'reset-failed'].includes(event)) throw new DomainError('Invalid native control event');
+        if (event === 'delivery-failed') {
+          if (!Array.isArray(body.requestIds) || body.requestIds.length !== 1 || typeof body.requestIds[0] !== 'string') throw new DomainError('Invalid failed delivery');
+          const id = body.requestIds[0];
+          if (typeof body.recoveryId === 'string') {
+            await recoveryFailed(id, body.recoveryId);
+            json(response, { ok: true }); return;
+          }
+          await store.update(state => {
+            const request = get(state.requests, id);
+            if (request.acceptedAt || !['claimed', 'queued'].includes(request.status)) return;
+            for (const member of requestBatch(state, id)) { member.status = 'uncertain'; member.handoff = 'uncertain'; }
+            connectionError = 'Claude delivery could not be confirmed. The question is retained; use Reset before retrying.';
+          });
+          changed(); json(response, { ok: true }); return;
+        }
         if (event === 'received') {
           const ids = body.requestIds;
           if (!Array.isArray(ids) || ids.length > 64 || !ids.every(id => typeof id === 'string')) throw new DomainError('Invalid native receipt');
@@ -1017,16 +842,16 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
           });
           claudeControl = { turnId, seenAt: Date.now() }; agentActivity = 'busy';
           const state = store.read();
-          const notifications = ids.flatMap(id => {
+          const notifications = await Promise.all(ids.flatMap(id => {
             const request = state.requests[id], active = streams.get(id);
             if (!request || request.status !== 'claimed' || !active) return [];
             const stream = { prefix: active.prefix, suffix: active.suffix, progress: active.progress };
-            return [request.replyRecovery ? {
+            return [wire(request.replyRecovery ? {
               type: 'sidecar.recovery', ownerKey: ownerKey(owner), requestId: id, recoveryId: request.replyRecovery.id,
               documentId: request.documentId, thread: { id: request.threadId }, stream,
               instruction: 'Follow the Sidecar skill. Reply recovery only: resend the existing answer. Do not repeat the original task, tools, or edits.',
-            } : { type: 'sidecar.request', ownerKey: ownerKey(owner), requestId: id, stream, ...requestContext(state, id), instruction: 'Follow the Sidecar skill.' }];
-          });
+            } : { type: 'sidecar.request', ownerKey: ownerKey(owner), requestId: id, stream, ...requestContext(state, id), instruction: 'Follow the Sidecar skill.' })];
+          }));
           changed(); json(response, { ok: true, notifications }); return;
         }
         if (event.startsWith('reset-')) {
@@ -1054,6 +879,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
           const marker = text(body, 'marker');
           const matching = [...streams.values()].filter(active => !active.done && [active.prefix, active.progress.prefix].some(prefix => prefix.startsWith(marker)));
           if (matching.length) {
+            for (const active of matching) if (active.prefix.startsWith(marker)) active.hasFinalStarted = true;
             await store.update(state => { for (const active of matching) markAccepted(state, active.route.requestId, turnId); });
             claudeControl = { turnId, seenAt: Date.now(), requestId: matching[0].route.requestId };
             agentActivity = 'busy';
@@ -1188,7 +1014,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         changed(); json(response, { ok: true }); return;
       }
       const preparePath = path.match(/^\/agent\/requests\/([^/]+)\/prepare$/);
-      if (method === 'POST' && preparePath?.[1]) { json(response, await prepareNotification(preparePath[1])); return; }
+      if (method === 'POST' && preparePath?.[1]) { json(response, await prepareNotification(preparePath[1], compact)); return; }
       const recoverPath = path.match(/^\/agent\/requests\/([^/]+)\/recover$/);
       if (method === 'POST' && recoverPath) { json(response, await prepareRecovery(recoverPath[1], text(body, 'recoveryId'))); return; }
       const recoveryFailedPath = path.match(/^\/agent\/requests\/([^/]+)\/recovery-failed$/);
@@ -1226,7 +1052,8 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         const markers = result.claimStatus === 'already-claimed' && active
           ? active.error ? { error: active.error } : { prefix: active.prefix, suffix: active.suffix, progress: active.progress }
           : undefined;
-        changed(); json(response, { ...result, ...requestContext(state, id), ...(markers ? { stream: markers } : {}), document, thread: get(state.threads, result.request.threadId), proposals: Object.values(state.proposals).filter(p => p.threadId === result.request.threadId) }); return;
+        const context = { ...result, ...requestContext(state, id), ...(markers ? { stream: markers } : {}), document, thread: get(state.threads, result.request.threadId), proposals: Object.values(state.proposals).filter(p => p.threadId === result.request.threadId) };
+        changed(); json(response, compact ? await compactContext(owner, context, ids) : context); return;
       }
       if (method === 'POST' && path === '/agent/streams') {
         const route = { requestId: text(body, 'requestId'), documentId: text(body, 'documentId'), threadId: text(body, 'threadId') };
@@ -1261,10 +1088,8 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     }
   }
   await proposalService.recover();
-  await new Promise<void>((resolveListen, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolveListen(); }); });
-  const address = server.address();
-  if (!address || typeof address === 'string') throw new Error('No listening address');
-  url = `http://127.0.0.1:${address.port}`;
+  const host = await createViewerHost({ directory, port, cookieName, capability: agentToken, instanceId, handle });
+  url = host.url;
   await Promise.all(Object.values(store.read().documents).map(refresh));
   const polling = setInterval(() => {
     if (claudeControl?.seenAt && Date.now() - claudeControl.seenAt >= 2500) { claudeControl.seenAt = 0; runtimeChanged(); }
@@ -1293,11 +1118,9 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     if (closePromise) return closePromise;
     closed = true; stopObserver?.(); clearStop(); clearTimeout(streamTimer); transportAbort.abort(); clearInterval(polling); clearInterval(heartbeat); clearInterval(activityPolling);
     for (const response of [...viewers.keys(), ...agents.keys()]) response.end();
-    closePromise = Promise.all([closeListener(server), lanChange.then(async () => {
-      if (lanServer) { const listener = lanServer; lanServer = undefined; await closeListener(listener); }
-    })]).then(() => {});
+    closePromise = host.close();
     await closePromise; await dispatchWork; await nativeQueueWork; await resetWork; await captureWork; await finalizing; await proposalService.drain(); finish();
   }
   changed();
-  return { url, close, instanceId, done };
+  return { url, close, instanceId, ownerAlias, done };
 }

@@ -1,3 +1,4 @@
+import { viewerPath } from './viewer-path.ts';
 import { memo, useEffect, useRef, useState } from 'react';
 import { FileBrowser } from '@plannotator/ui/components/sidebar/FileBrowser';
 import { setFileTreeBackend, useFileBrowser } from '@plannotator/ui/hooks/useFileBrowser';
@@ -17,7 +18,7 @@ export const FilesPanel = memo(function FilesPanel({ documentId, root, workspace
   useEffect(() => {
     setFileTreeBackend({
       loadTree: async () => {
-        const response = await fetch(`/api/files?document=${encodeURIComponent(documentId)}&directory=${encodeURIComponent(root)}`);
+        const response = await fetch(viewerPath(`/api/files?document=${encodeURIComponent(documentId)}&directory=${encodeURIComponent(root)}`));
         const data = await response.clone().json();
         setTruncated(!!data.truncated);
         return response;

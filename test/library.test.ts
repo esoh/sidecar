@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { readLibrarySession } from '../src/library.ts';
 import { startServer } from '../src/server.ts';
 import { createState, registerDocument, ownerKey, submit, claim } from '../src/store.ts';
-import { fixture } from './support.ts';
+import { fixture, gatewayConfig } from './support.ts';
 const exec = promisify(execFile), cliPath = new URL('../src/cli.ts', import.meta.url).pathname, tsx = import.meta.resolve('tsx');
 
 test('all-agent library verifies original viewers and previews stopped sessions without altering saved state', async t => {
@@ -23,7 +23,7 @@ test('all-agent library verifies original viewers and previews stopped sessions 
   const doc = registerDocument(original, { path: file, generated: false });
   const saved = JSON.stringify(original); await writeFile(join(directory, 'state.json'), saved);
   const owner = { agent: 'claude' as const, sessionId: randomUUID() }, hostKey = ownerKey(owner);
-  const host = await startServer({ owner, directory: join(root, hostKey) });
+  const host = await startServer({ owner, directory: join(root, hostKey), stateRoot: root });
   t.after(() => host.close());
   await writeFile(join(root, hostKey, 'runtime.json'), JSON.stringify({ url: host.url, instanceId: host.instanceId, ownerKey: hostKey }));
   const token = await readFile(join(root, hostKey, 'agent-token'), 'utf8');
@@ -131,23 +131,22 @@ test('library close refuses pending, locked, malformed and unauthenticated targe
   assert.equal((await host.view(`/api/library/not-an-owner/documents/${doc.id}`, undefined, 'DELETE')).status, 400);
 });
 
-for (const agent of ['codex', 'claude'] as const) test(`browse infers the ${agent} session without registering a document`, async t => {
+for (const agent of ['codex', 'claude'] as const) test(`browse from ${agent} opens the gateway without registering an owner`, async t => {
   const root = await mkdtemp(join(tmpdir(), 'sidecar-browse-'));
   const sessionId = randomUUID(), key = ownerKey({ agent, sessionId });
-  const env: NodeJS.ProcessEnv = { ...process.env, SIDECAR_STATE_DIR: root, PATH: `${root}:${process.env.PATH}` };
+  const env: NodeJS.ProcessEnv = { ...process.env, SIDECAR_STATE_DIR: root, SIDECAR_CONFIG: await gatewayConfig(root), PATH: `${root}:${process.env.PATH}` };
   delete env.CODEX_THREAD_ID; delete env.CLAUDE_SESSION_ID; delete env.CLAUDE_CODE_SESSION_ID;
   if (agent === 'codex') env.CODEX_THREAD_ID = sessionId; else env.CLAUDE_CODE_SESSION_ID = sessionId;
   const opener = join(root, process.platform === 'darwin' ? 'open' : 'xdg-open');
   await writeFile(opener, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(join(root, 'opened.json'))}, JSON.stringify(process.argv.slice(2)));\n`);
   await chmod(opener, 0o700);
   const cli = async (...args: string[]) => JSON.parse((await exec(process.execPath, ['--import', tsx, cliPath, ...args], { env })).stdout);
-  t.after(async () => { await cli('stop', '--owner', key).catch(() => {}); await rm(root, { recursive: true, force: true }); });
+  t.after(async () => { await cli('gateway', 'stop').catch(() => {}); await rm(root, { recursive: true, force: true }); });
   const opened = await cli('browse');
-  assert.equal(opened.ownerKey, key); assert.match(opened.url, /\/\?library=1$/);
+  assert.match(opened.url, /^http:\/\/127\.0\.0\.1:\d+\/$/); assert.equal(opened.ownerKey, undefined);
   assert.deepEqual(JSON.parse(await readFile(join(root, 'opened.json'), 'utf8')), [opened.url]);
   assert.equal((await cli('browse', '--agent', agent, '--no-browser')).url, opened.url);
-  const state = JSON.parse(await readFile(join(root, key, 'state.json'), 'utf8'));
-  assert.deepEqual(state.documents, {}); assert.deepEqual(state.threads, {}); assert.deepEqual(state.requests, {});
+  await assert.rejects(readFile(join(root, key, 'state.json')), { code: 'ENOENT' });
 });
 
 test('document opens persist across servers and sort each agent by its most recently opened document', async t => {
@@ -163,7 +162,7 @@ test('document opens persist across servers and sort each agent by its most rece
     }
     await writeFile(join(directory, 'state.json'), JSON.stringify(state));
   }
-  const host = await startServer({ owner: owners[0], directory: join(root, ownerKey(owners[0])) }); t.after(() => host.close());
+  const host = await startServer({ owner: owners[0], directory: join(root, ownerKey(owners[0])), stateRoot: root }); t.after(() => host.close());
   const cookie = (await fetch(host.url)).headers.get('set-cookie')!.split(';')[0]!;
   const request = (path: string, method = 'GET') => fetch(host.url + path, { method, headers: { Cookie: cookie, Origin: host.url } });
   const list = async () => (await request('/api/library')).json();

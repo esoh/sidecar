@@ -38,6 +38,9 @@ async function answer(text: string) {
 }
 
 test('settings configures and clears the public tunnel URL without exposing it to remote control', async ({ page }) => {
+  const previous = process.env.SIDECAR_CONFIG;
+  process.env.SIDECAR_CONFIG = join(f.directory, 'test-config.json');
+  cleanup.push(async () => { if (previous === undefined) delete process.env.SIDECAR_CONFIG; else process.env.SIDECAR_CONFIG = previous; });
   const doc = await f.register();
   await page.goto(`${f.url}/?document=${doc.id}`);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
@@ -3929,4 +3932,46 @@ test('Cloudflare settings show configured provider without publishing it, and ma
   await expect(page.getByRole('alert')).toContainText('Sidecar config');
   await page.getByRole('checkbox', { name: 'Allow access on local network' }).click();
   await expect(page.getByRole('checkbox', { name: 'Allow access on local network' })).not.toBeChecked();
+});
+
+async function prepareCompact(requestId: string) {
+  await f.agent('/agent/control', { ownerKey: ownerKey(f.owner), event: 'poll', turnId: 'compact-turn', activity: 'busy', protocol: 'sc1' });
+  const response = await fetch(`${f.url}/agent/requests/${requestId}/prepare`, { method: 'POST', headers: { 'X-Sidecar-Token': f.token, 'Content-Type': 'application/json', 'X-Sidecar-Protocol': 'sc1' }, body: '{}' });
+  expect(response.status).toBe(200);
+  const event = await response.json(); expect(event.type).toBe('sc.request'); expect(event.stream).toBeUndefined();
+  await f.agent('/agent/control', { ownerKey: ownerKey(f.owner), event: 'received', turnId: 'compact-turn', requestIds: [event.requestId], protocol: 'sc1' });
+  return (messageId: string, text: string) => f.agent('/agent/stream-events', { ownerKey: ownerKey(f.owner), turnId: 'compact-turn', messageId, index: 0, delta: text.replaceAll('REQUEST', event.requestId), final: true });
+}
+test('compact replies preserve message UI and hide protocol metadata', { tag: '@manual-delivery' }, async ({ page }) => {
+  const doc = await f.register('compact.md', '# Review\n\nThe client retries three times.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByLabel('Message', { exact: true }).fill('Propose a change'); await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('');
+  const request = await lastRequest(), emit = await prepareCompact(request.id);
+  await emit('progress', '[[scp:REQUEST]]\nChecking the passage.\n[[/scp:REQUEST]]');
+  await expect(page.getByRole('log')).toContainText('Checking the passage.');
+  await emit('final', '[[sc:REQUEST]]\n[[sc-meta {"threadTitle":"Retry review","highlights":[{"exact":"The client retries three times.","proposal":{"before":"The client retries three times.","after":"The client retries twice."}}]}]]\nReview [this change](#selection-1).\n[[/sc:REQUEST]]');
+  await expect(page.locator('.sidebar .proposal-card')).toBeVisible();
+  await expect(page.getByRole('log')).toContainText('Review this change.');
+  await expect(page.locator('.sidebar')).toContainText('Retry review');
+  await expect(page.locator('#document mark')).toContainText('The client retries three times.');
+  await expect(page.getByRole('log')).not.toContainText('sc-meta');
+  expect((await state()).requests[request.id].status).toBe('completed');
+  await page.reload(); await expect(page.getByRole('log')).toContainText('Checking the passage.');
+  await expect(page.locator('.sidebar .proposal-card')).toBeVisible();
+});
+test('compact interrupted replies retain progress and Stop state', { tag: '@manual-delivery' }, async ({ page }) => {
+  const doc = await f.register(); await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByLabel('Message', { exact: true }).fill('Explain'); await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('');
+  const request = await lastRequest(), emit = await prepareCompact(request.id);
+  await expect(page.getByRole('button', { name: 'Stop agent', exact: true })).toBeEnabled();
+  await emit('progress', '[[scp:REQUEST]]\nInspecting now.\n[[/scp:REQUEST]]');
+  await emit('partial', '[[sc:REQUEST]]\nPartial **answer**');
+  await f.agent('/agent/control', { ownerKey: ownerKey(f.owner), event: 'interrupted', turnId: 'compact-turn' });
+  await expect(page.getByText('Stopped', { exact: true })).toBeVisible();
+  await expect(page.getByRole('log')).toContainText('Inspecting now.'); await expect(page.getByRole('log')).toContainText('Partial answer');
+  expect((await state()).requests[request.id].status).toBe('stopped');
+  await page.reload(); await expect(page.getByText('Stopped', { exact: true })).toBeVisible();
+  await expect(page.getByRole('log')).not.toContainText('[[sc');
 });
