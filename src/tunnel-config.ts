@@ -6,19 +6,25 @@ import { DomainError, isObject } from './store.ts';
 export type TunnelConfig = { provider: 'ngrok'; publicUrl?: string } | { provider: 'cloudflare'; publicUrl: string; configPath: string };
 
 // Preferences only: reading this file must never enable access or launch a process.
-export async function readTunnelConfig(): Promise<{ path: string; tunnel: TunnelConfig }> {
+export async function readTunnelConfig(): Promise<{ path: string; tunnel: TunnelConfig; gateway: { port: number; networkPort: number } }> {
   const path = process.env.SIDECAR_CONFIG ?? join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'sidecar/config.json');
   const invalid = (reason: string): never => { throw new DomainError(`Sidecar config (${path}): ${reason}`); };
   let content: string;
   try { content = await readFile(path, 'utf8'); }
   catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return { path, tunnel: { provider: 'ngrok' } };
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return { path, tunnel: { provider: 'ngrok' }, gateway: { port: 43120, networkPort: 43121 } };
     return invalid('Cannot read the file. Check its path and permissions.');
   }
   if (content.length > 65536) return invalid('File exceeds 64 KiB.');
   let value: unknown;
   try { value = JSON.parse(content); } catch { return invalid('Expected valid JSON.'); }
   if (!isObject(value)) return invalid('Expected an object.');
+  const configured = value.gateway === undefined ? {} : value.gateway;
+  if (!isObject(configured) || Object.keys(configured).some(key => !['port', 'networkPort'].includes(key))) return invalid('gateway must contain only port and networkPort.');
+  const port = configured.port ?? 43120, networkPort = configured.networkPort ?? 43121;
+  if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535 || typeof networkPort !== 'number' || !Number.isInteger(networkPort) || networkPort < 1 || networkPort > 65535 || port === networkPort)
+    return invalid('gateway.port and gateway.networkPort must be distinct integer ports from 1 to 65535.');
+  const gateway = { port, networkPort };
   const tunnel = value.tunnel === undefined ? {} : value.tunnel;
   if (!isObject(tunnel)) return invalid('tunnel must be an object.');
   const provider = tunnel.provider === undefined ? 'ngrok' : tunnel.provider;
@@ -34,10 +40,10 @@ export async function readTunnelConfig(): Promise<{ path: string; tunnel: Tunnel
       return invalid('tunnel.publicUrl must be HTTPS with no credentials, port, path, query, wildcard, or fragment.');
     publicUrl = url.origin;
   }
-  if (provider === 'ngrok') return { path, tunnel: { provider, ...(publicUrl ? { publicUrl } : {}) } };
+  if (provider === 'ngrok') return { path, gateway, tunnel: { provider, ...(publicUrl ? { publicUrl } : {}) } };
   if (!publicUrl) return invalid('Cloudflare requires tunnel.publicUrl.');
   if (typeof tunnel.configPath !== 'string' || !tunnel.configPath || /[\x00-\x1f]/.test(tunnel.configPath)) return invalid('Cloudflare requires tunnel.configPath.');
   const configPath = tunnel.configPath.startsWith('~/') ? join(homedir(), tunnel.configPath.slice(2)) : tunnel.configPath;
   if (!isAbsolute(configPath)) return invalid('tunnel.configPath must be absolute or start with ~/.');
-  return { path, tunnel: { provider, publicUrl, configPath } };
+  return { path, gateway, tunnel: { provider, publicUrl, configPath } };
 }

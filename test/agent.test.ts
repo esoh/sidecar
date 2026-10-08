@@ -1,3 +1,4 @@
+import { gatewayConfig } from './support.ts';
 import { decodedDelivery } from './support.ts';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -73,14 +74,14 @@ test('owner selection uses only the selected native environment and rejects conf
 test('simultaneous CLI opens reuse one app; stop and reopen retain pending work', async t => {
   const root = await mkdtemp(join(tmpdir(), 'sidecar-cli-'));
   const owner = { agent: 'claude' as const, sessionId: randomUUID() }, key = ownerKey(owner);
-  const env = { ...process.env, SIDECAR_STATE_DIR: root, CLAUDE_SESSION_ID: owner.sessionId, PATH: `${root}:${process.env.PATH}` };
+  const env = { ...process.env, SIDECAR_STATE_DIR: root, SIDECAR_CONFIG: await gatewayConfig(root), CLAUDE_SESSION_ID: owner.sessionId, CLAUDE_CODE_SESSION_ID: owner.sessionId, PATH: `${root}:${process.env.PATH}` };
   await mkdir(join(root, key));
   await writeFile(join(root, key, 'owner.lock'), '999999999');
   const opener = join(root, process.platform === 'darwin' ? 'open' : 'xdg-open');
   await writeFile(opener, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(join(root, 'opener.json'))}, JSON.stringify(process.argv.slice(2)));\n`);
   await chmod(opener, 0o700);
   const cli = async (...args: string[]) => JSON.parse((await exec(process.execPath, ['--import', tsx, cliPath, ...args], { env })).stdout);
-  t.after(async () => { await cli('stop', '--owner', key).catch(() => {}); await rm(root, { recursive: true, force: true }); });
+  t.after(async () => { await cli('stop', '--owner', key).catch(() => {}); await cli('gateway', 'stop').catch(() => {}); await rm(root, { recursive: true, force: true }); });
   const file = join(root, 'review.md');
   await writeFile(file, '# Review\n');
   const launch = () => cli('open', '--agent', 'claude', '--session', owner.sessionId, '--file', file, '--no-browser');
@@ -89,7 +90,7 @@ test('simultaneous CLI opens reuse one app; stop and reopen retain pending work'
   const first = await cli('status', '--owner', key);
   const base = new URL(a.url).origin;
   const cookie = (await fetch(base)).headers.get('set-cookie')!.split(';')[0]!;
-  const request = await (await fetch(base + '/api/questions', { method: 'POST', headers: { Cookie: cookie, Origin: base, 'Content-Type': 'application/json' }, body: JSON.stringify({ documentId: new URL(a.url).searchParams.get('document'), text: 'Keep me', clientMessageId: 'keep' }) })).json();
+  const request = await (await fetch(base + new URL(a.url).pathname.replace(/\/$/, '') + '/api/questions', { method: 'POST', headers: { Cookie: cookie, Origin: base, 'Content-Type': 'application/json' }, body: JSON.stringify({ documentId: new URL(a.url).searchParams.get('document'), text: 'Keep me', clientMessageId: 'keep' }) })).json();
   const watcher = spawn(process.execPath, ['--import', tsx, cliPath, 'watch', '--owner', key], { env });
   t.after(() => watcher.kill());
   const event = await new Promise<string>((resolve, reject) => {

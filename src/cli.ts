@@ -1,3 +1,4 @@
+import { ensureGateway, serveGateway, gatewayStatus, stopGateway } from './gateway-client.ts';
 import { openAgentIds, isAgentAlias, type IdKind } from './agent-ids.ts';
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -6,7 +7,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
-import { agentCall, appStatus, ownerDirectory, parseOwner, readRuntime, selectOwner, watchClaude } from './agent.ts';
+import { agentCall, appStatus, ownerDirectory, parseOwner, readRuntime, selectOwner, watchClaude, stateDirectory } from './agent.ts';
 import { isObject, isOwner, ownerKey } from './store.ts';
 import { acquireLock, isAlive } from './owner-lock.ts';
 import { startServer } from './server.ts';
@@ -129,15 +130,16 @@ async function main() {
     if (values.agent === 'codex' && payload.hook_event_name === 'Stop') output({});
     return;
   }
+  if (command === 'gateway-serve') { await serveGateway(); return; }
+  if (command === 'gateway') {
+    if (inputId === 'stop') output(await stopGateway());
+    else if (inputId === undefined || inputId === 'status') output(await gatewayStatus());
+    else throw new Error('Use gateway status|stop');
+    return;
+  }
   if (command === 'browse') {
-    const nativeKinds = [process.env.CODEX_THREAD_ID && 'codex', (process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID) && 'claude'].filter(Boolean);
-    const owner = selectOwner(values.agent ?? (nativeKinds.length === 1 ? nativeKinds[0] : undefined), values.session);
-    const key = ownerKey(owner);
-    await ensureApp(key);
-    const runtime = await readRuntime(key), url = `${runtime.url}/?library=1`;
-    const ids = await openAgentIds(dirname(ownerDirectory(key)));
-    await ids.allocate(key, []);
-    output({ ownerKey: ids.encode(key, 'o', key), nativeOwnerKey: key, url });
+    const gateway = await ensureGateway(), url = `${gateway.url}/`;
+    output({ url });
     if (!values['no-browser']) await openBrowser(url);
     return;
   }
@@ -148,16 +150,17 @@ async function main() {
     let path = values.file ? resolve(values.file) : '';
     if (values.stdin) { path = join(ownerDirectory(key), `generated-${randomUUID()}.md`); await writeFile(path, await stdin(), { mode: 0o600, flag: 'wx' }); }
     const document = await agentCall(key, '/agent/documents', { path, title: values.title, generated: Boolean(values.stdin), ...(await workspaceMetadata(values.workspace)) });
-    const runtime = await readRuntime(key), url = `${runtime.url}/?document=${document.id}`;
+    const gateway = await ensureGateway();
     const ids = await openAgentIds(dirname(ownerDirectory(key)));
     await ids.allocate(key, [{ kind: 'd', id: document.id }]);
+    const url = `${gateway.url}/a/${ids.encode(key, 'o', key)}/?document=${document.id}`;
     output({ ownerKey: ids.encode(key, 'o', key), nativeOwnerKey: key, documentId: ids.encode(key, 'd', document.id), url });
     if (!values['no-browser']) await openBrowser(url);
     return;
   }
   if (!values.owner) throw new Error('Provide --owner KEY');
   const ownerIsAlias = isAgentAlias(values.owner, 'o');
-  const root = dirname(ownerDirectory('codex-00000000-0000-4000-8000-000000000000'));
+  const root = stateDirectory();
   const aliases = ownerIsAlias || [requestId, values.document, values.thread].some(value => value && /^[rdt][1-9A-Z][0-9A-Z]*$/.test(value)) ? await openAgentIds(root) : undefined;
   const key = ownerKey(parseOwner(ownerIsAlias && aliases ? await aliases.resolveOwner(values.owner) : values.owner));
   const resolveId = async (kind: IdKind, value?: string) => value && aliases && isAgentAlias(value, kind) ? aliases.resolve(key, kind, value) : value;

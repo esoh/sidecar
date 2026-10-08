@@ -21,9 +21,8 @@ export function selectOwner(agent: string | undefined, sessionId?: string, env: 
   if (!isOwner(owner)) throw new DomainError('A native session UUID is required');
   return { ...owner, sessionId: owner.sessionId.toLowerCase() };
 }
-export function ownerDirectory(key: string): string {
-  return join(process.env.SIDECAR_STATE_DIR ?? join(homedir(), '.local/state/sidecar'), ownerKey(parseOwner(key)));
-}
+export function stateDirectory(): string { return process.env.SIDECAR_STATE_DIR ?? join(homedir(), '.local/state/sidecar'); }
+export function ownerDirectory(key: string): string { return join(stateDirectory(), ownerKey(parseOwner(key))); }
 export type Runtime = { url: string; instanceId: string; ownerKey: string };
 export async function readRuntime(key: string, directory = ownerDirectory(key)): Promise<Runtime> {
   const value: unknown = JSON.parse(await readFile(join(directory, 'runtime.json'), 'utf8'));

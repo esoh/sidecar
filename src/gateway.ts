@@ -76,6 +76,7 @@ export async function startGateway({ stateRoot, port = 43120, networkPort = 4312
   }
   async function handle(request: IncomingMessage, response: ServerResponse, context: ViewerContext) {
     const { target, method, isLocal } = context;
+    if (request.headers['x-sidecar-instance'] && context.isAgent && request.headers['x-sidecar-instance'] !== instanceId) throw new DomainError('Gateway instance changed', 409);
     const rawPath = (request.url ?? '/').split('?')[0];
     if (/%(?:2e|2f|5c|25)/i.test(rawPath) || rawPath.includes('\\') || /(?:^|\/)\.\.?(?:\/|$)/.test(rawPath)) throw new DomainError('Invalid viewer route', 400);
     let path = context.path, key: string | undefined;
@@ -86,7 +87,7 @@ export async function startGateway({ stateRoot, port = 43120, networkPort = 4312
     }
     if (path === '/agent' || path.startsWith('/agent/') || (key && path.startsWith('/gateway/'))) throw new DomainError('Native agent endpoints are unavailable through the gateway', 403);
     if (context.isAgent) {
-      if (path === '/gateway/status' && method === 'GET') { json(response, { state: 'running', instanceId, url: host.url, network: host.networkStatus(true) }); return; }
+      if (path === '/gateway/status' && method === 'GET') { json(response, { state: 'running', gatewayProtocol: 1, instanceId, url: host.url, networkPort, network: host.networkStatus(true) }); return; }
       if (path === '/gateway/stop' && method === 'POST') { json(response, { ok: true }); setImmediate(() => { void close(); }); return; }
     }
     if (path === '/api/network' || path === '/gateway/network') {

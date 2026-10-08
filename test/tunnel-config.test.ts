@@ -16,9 +16,9 @@ test('config defaults to ngrok, reads Cloudflare paths, and fails closed on inva
   const cli = () => promisify(execFile)(process.execPath, ['--import', import.meta.resolve('tsx'), new URL('../src/cli.ts', import.meta.url).pathname, 'config'], {
     env: { ...process.env, SIDECAR_CONFIG: path },
   });
-  assert.deepEqual(JSON.parse((await cli()).stdout), { path, tunnel: { provider: 'ngrok' } });
+  assert.deepEqual(JSON.parse((await cli()).stdout), { path, gateway: { port: 43120, networkPort: 43121 }, tunnel: { provider: 'ngrok' } });
   await writeFile(path, JSON.stringify({ tunnel: { provider: 'cloudflare', publicUrl: 'https://sidecar.example.com/', configPath: '~/.cloudflared/sidecar.yml' } }));
-  assert.deepEqual(JSON.parse((await cli()).stdout), { path, tunnel: { provider: 'cloudflare', publicUrl: 'https://sidecar.example.com', configPath: join(homedir(), '.cloudflared/sidecar.yml') } });
+  assert.deepEqual(JSON.parse((await cli()).stdout), { path, gateway: { port: 43120, networkPort: 43121 }, tunnel: { provider: 'cloudflare', publicUrl: 'https://sidecar.example.com', configPath: join(homedir(), '.cloudflared/sidecar.yml') } });
   for (const value of [
     '{invalid-secret-text', 'null',
     JSON.stringify({ tunnel: null }),

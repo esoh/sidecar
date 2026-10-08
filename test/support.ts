@@ -58,3 +58,17 @@ export async function decodedDelivery(owner: import('../src/store.ts').Owner, ro
   delete result.streamError;
   return result;
 }
+
+export async function gatewayConfig(root: string) {
+  const { createServer } = await import('node:http');
+  const ports: number[] = [];
+  while (ports.length < 2) {
+    const server = createServer(); await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address(); assert.ok(address && typeof address !== 'string');
+    if (!ports.includes(address.port)) ports.push(address.port);
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+  const path = join(root, 'gateway-config.json');
+  await writeFile(path, JSON.stringify({ gateway: { port: ports[0], networkPort: ports[1] } }));
+  return path;
+}
