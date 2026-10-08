@@ -1,8 +1,8 @@
 import { build } from 'esbuild';
 import { createRequire } from 'node:module';
-import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
-import { join, dirname } from 'node:path';
+import { readFile, realpath } from 'node:fs/promises';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { join, dirname, relative, isAbsolute, extname } from 'node:path';
 import type { ServerResponse } from 'node:http';
 import { DomainError } from './store.ts';
 import { sendBody } from './viewer-http.ts';
@@ -53,4 +53,20 @@ export async function serveViewerAsset(path: string, method: string, response: S
         return true;
       }
   return false;
+}
+
+export async function serveDocumentImage(documentPath: string, target: URL, response: ServerResponse) {
+        const base = dirname(documentPath);
+        const imageUrl = new URL(target.searchParams.get('path') ?? '', pathToFileURL(documentPath));
+        if (imageUrl.protocol !== 'file:') throw new DomainError('Expected a local image', 400);
+        const imagePath = await realpath(fileURLToPath(imageUrl));
+        const fromBase = relative(base, imagePath);
+        if (fromBase.startsWith('..') || isAbsolute(fromBase)) throw new DomainError('Image must be inside the document directory', 403);
+        const types: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.avif': 'image/avif', '.svg': 'image/svg+xml' };
+        const mime = types[extname(imagePath).toLowerCase()];
+        if (!mime) throw new DomainError('Unsupported image type', 415);
+        // SVG remains an image even if opened directly; it cannot execute or fetch resources.
+        response.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; style-src 'unsafe-inline'");
+        response.setHeader('Content-Type', mime);
+        response.end(await readFile(imagePath));
 }

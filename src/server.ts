@@ -1,5 +1,5 @@
 import { createViewerHost, bodyOf, json, sendBody, type ViewerContext } from './viewer-http.ts';
-import { viewerHtml, serveViewerAsset } from './viewer-assets.ts';
+import { viewerHtml, serveViewerAsset, serveDocumentImage } from './viewer-assets.ts';
 import { openAgentIds, isAgentAlias, type IdKind } from './agent-ids.ts';
 import { compactNotification, compactContext } from './agent-protocol.ts';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -634,6 +634,7 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
     let { path } = context;
     try {
       if (closed) throw new DomainError('Sidecar is stopping. Reopen it from your agent.', 503);
+      if (request.headers['x-sidecar-instance'] && request.headers['x-sidecar-instance'] !== instanceId) throw new DomainError('The original viewer changed. Retry from its current page.', 409);
       if (method === 'GET' && path === '/') { response.setHeader('Content-Type', 'text/html; charset=utf-8'); response.end(await viewerHtml()); return; }
       if (await serveViewerAsset(path, method, response)) return;
       if (method === 'GET' && path === '/api/image') {
@@ -641,19 +642,7 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
         const document = key
           ? await libraryDocument(dirname(directory), key, target.searchParams.get('document') ?? '')
           : get(store.read().documents, target.searchParams.get('document') ?? '');
-        const base = dirname(document.path);
-        const imageUrl = new URL(target.searchParams.get('path') ?? '', pathToFileURL(document.path));
-        if (imageUrl.protocol !== 'file:') throw new DomainError('Expected a local image', 400);
-        const imagePath = await realpath(fileURLToPath(imageUrl));
-        const fromBase = relative(base, imagePath);
-        if (fromBase.startsWith('..') || isAbsolute(fromBase)) throw new DomainError('Image must be inside the document directory', 403);
-        const types: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.avif': 'image/avif', '.svg': 'image/svg+xml' };
-        const mime = types[extname(imagePath).toLowerCase()];
-        if (!mime) throw new DomainError('Unsupported image type', 415);
-        // SVG remains an image even if opened directly; it cannot execute or fetch resources.
-        response.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; style-src 'unsafe-inline'");
-        response.setHeader('Content-Type', mime);
-        response.end(await readFile(imagePath));
+        await serveDocumentImage(document.path, target, response);
         return;
       }
       if (method === 'GET' && path === '/api/state') { json(response, snapshot()); return; }
@@ -750,7 +739,7 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
         if (isLan) throw new DomainError('Manage tunnel settings from the local viewer', 403);
         json(response, await readTunnelConfig()); return;
       }
-      if (method === 'GET' && path === '/agent/status') { json(response, { ownerKey: ownerKey(owner), ownerAlias, agentProtocol: 'sc1', nativeDelivery: nativeDelivery(), instanceId, state: 'running', connection: connectionError ? 'error' : agents.size || nativeDelivery() ? 'connected' : 'waiting', connectionError }); return; }
+      if (method === 'GET' && path === '/agent/status') { json(response, { ownerKey: ownerKey(owner), ownerAlias, agentProtocol: 'sc1', gatewayProtocol: 1, nativeDelivery: nativeDelivery(), instanceId, state: 'running', connection: connectionError ? 'error' : agents.size || nativeDelivery() ? 'connected' : 'waiting', connectionError }); return; }
       if (method === 'POST' && path === '/agent/stop') { json(response, { ok: true }); setImmediate(() => { void close(); }); return; }
       const body = ['POST', 'PATCH'].includes(method) ? await bodyOf(request) : {};
       const compact = request.headers['x-sidecar-protocol'] === 'sc1';
