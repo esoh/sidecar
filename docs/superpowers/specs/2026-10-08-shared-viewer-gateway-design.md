@@ -1,6 +1,6 @@
 # Shared Sidecar gateway
 
-Date: 2026-10-08. Design for review; not implemented.
+Date: 2026-10-08. Approved design; local implementation annotated below.
 
 ## Intent and agreed behavior
 
@@ -178,3 +178,31 @@ then verifies both native agents through the shared hostname.
 - Browser checks for prefixed assets/links, cross-owner navigation, reconnects,
   retained drafts at the same origin, old-origin draft preservation, and the
   absence of repeated full-history idle traffic.
+
+## As built — 2026-10-08
+
+Implemented on `feat/shared-viewer-gateway`, based on compact protocol `10424ad`.
+The private owner services retain their state and native transport; the gateway
+uses shared HTTP authentication/assets, verified owner routes and streaming proxy
+responses. The CLI, browser paths, agent/document sorting, gateway network settings,
+README and shared Codex/Claude skill use the same gateway contract. No dependency
+or state-format migration was added. Existing direct owner URLs remain supported.
+
+The build also contains the separately verified Claude foreground-compaction
+module fix: native `session.compact` middleware reports start and clears status on
+completion, failure or interruption, while ignoring background/subagent work.
+
+Local verification used disposable Codex/Claude owner services and native-control
+fixtures, not real agent sessions. Backend/script checks passed all 274 tests with
+four workers; an initial unbounded run stalled in a Reset test under concurrent
+browser load, while isolated Reset passed all 10 tests. The browser run passed
+122 scenarios; its remaining settings fixture also failed on the unchanged base
+because it read the machine's Cloudflare preference instead of ngrok defaults.
+Isolating that fixture passed its rerun. Gateway checks cover prefixed rendering,
+files/images/history/proposals, draft storage, idle traffic, library sorting and
+stopped previews; HTTP checks cover native-route denial, owner identity, Stop/Reset
+routing, credential persistence and revocation of an open stream. Type checks pass.
+
+No installation, native plugin reload, real viewer restart, live tunnel change,
+phone test or live Claude compaction was performed. Those remain rollout checks,
+including one-time shared login and gateway ingress migration after authorization.

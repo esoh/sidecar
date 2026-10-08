@@ -7,8 +7,14 @@ let f: Awaited<ReturnType<typeof setupGateway>>, cleanup: (() => Promise<void>)[
 test.beforeEach(async () => { cleanup = []; f = await setupGateway({ after: fn => { cleanup.push(fn); } }); });
 test.afterEach(async () => { for (const fn of cleanup) await fn(); });
 
-test('prefixed document uses only its owner APIs and preserves its draft on reload', async ({ page }) => {
+test('prefixed document uses only its owner APIs and preserves its draft on reload', async ({ page, context }) => {
   const owner = f.owners[1], path = `/a/${owner.alias}/?document=${owner.doc.id}`;
+  const legacy = await context.newPage(), runtime = JSON.parse(await readFile(join(owner.directory, 'runtime.json'), 'utf8'));
+  await legacy.goto(runtime.url + '/?document=' + owner.doc.id);
+  await legacy.getByLabel('Message', { exact: true }).fill('Old origin draft');
+  await legacy.waitForTimeout(150);
+  const before = await legacy.evaluate(() => Object.entries(localStorage).filter(([key]) => key.startsWith('sidecar-draft:')));
+  expect(before.length).toBeGreaterThan(0);
   const errors: string[] = [], apiPaths: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   page.on('request', request => { const url = new URL(request.url()); if (url.pathname.includes('/api/')) apiPaths.push(url.pathname); });
@@ -21,6 +27,12 @@ test('prefixed document uses only its owner APIs and preserves its draft on relo
   await expect.poll(() => apiPaths.some(path => path.endsWith('/api/events'))).toBe(true);
   expect(apiPaths.every(path => path.startsWith(`/a/${owner.alias}/api/`))).toBe(true);
   expect(errors).toEqual([]);
+  const stateFetches = apiPaths.filter(path => path.endsWith('/api/state')).length;
+  await page.waitForTimeout(1200);
+  expect(apiPaths.filter(path => path.endsWith('/api/state'))).toHaveLength(stateFetches);
+  expect(apiPaths.some(path => path.includes('/api/files'))).toBe(false);
+  expect(await legacy.evaluate(() => Object.entries(localStorage).filter(([key]) => key.startsWith('sidecar-draft:')))).toEqual(before);
+  await legacy.close();
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('checkbox', { name: 'Allow access on local network' }).click();
   await page.getByLabel('Public HTTPS URL', { exact: true }).fill('https://sidecar.example');

@@ -21,7 +21,7 @@ export async function readTunnelConfig(): Promise<{ path: string; tunnel: Tunnel
   if (!isObject(value)) return invalid('Expected an object.');
   const configured = value.gateway === undefined ? {} : value.gateway;
   if (!isObject(configured) || Object.keys(configured).some(key => !['port', 'networkPort'].includes(key))) return invalid('gateway must contain only port and networkPort.');
-  const port = configured.port ?? 43120, networkPort = configured.networkPort ?? 43121;
+  const port = configured.port === undefined ? 43120 : configured.port, networkPort = configured.networkPort === undefined ? 43121 : configured.networkPort;
   if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535 || typeof networkPort !== 'number' || !Number.isInteger(networkPort) || networkPort < 1 || networkPort > 65535 || port === networkPort)
     return invalid('gateway.port and gateway.networkPort must be distinct integer ports from 1 to 65535.');
   const gateway = { port, networkPort };

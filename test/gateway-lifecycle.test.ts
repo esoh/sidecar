@@ -54,7 +54,7 @@ test('gateway config defaults are fixed and invalid or equal ports fail', async 
   const root = await mkdtemp(join(tmpdir(), 'sidecar-gateway-config-')), path = join(root, 'config.json'); t.after(() => rm(root, { recursive: true, force: true }));
   const run = () => promisify(execFile)(process.execPath, ['--import', import.meta.resolve('tsx'), new URL('../src/cli.ts', import.meta.url).pathname, 'config'], { env: { ...process.env, SIDECAR_CONFIG: path } });
   assert.deepEqual(JSON.parse((await run()).stdout).gateway, { port: 43120, networkPort: 43121 });
-  for (const gateway of [null, { port: 0 }, { port: 65536 }, { port: '43120' }, { networkPort: 1.5 }, { port: 43121 }, { typo: 1 }]) {
+  for (const gateway of [null, { port: null }, { networkPort: null }, { port: 0 }, { port: 65536 }, { port: '43120' }, { networkPort: 1.5 }, { port: 43121 }, { typo: 1 }]) {
     await writeFile(path, JSON.stringify({ gateway })); await assert.rejects(run(), /gateway/);
   }
 });

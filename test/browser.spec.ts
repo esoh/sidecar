@@ -38,6 +38,9 @@ async function answer(text: string) {
 }
 
 test('settings configures and clears the public tunnel URL without exposing it to remote control', async ({ page }) => {
+  const previous = process.env.SIDECAR_CONFIG;
+  process.env.SIDECAR_CONFIG = join(f.directory, 'test-config.json');
+  cleanup.push(async () => { if (previous === undefined) delete process.env.SIDECAR_CONFIG; else process.env.SIDECAR_CONFIG = previous; });
   const doc = await f.register();
   await page.goto(`${f.url}/?document=${doc.id}`);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
