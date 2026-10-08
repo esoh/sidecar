@@ -1,3 +1,5 @@
+import { openAgentIds, isAgentAlias, type IdKind } from './agent-ids.ts';
+import { compactNotification, compactContext } from './agent-protocol.ts';
 import { build } from 'esbuild';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -10,7 +12,7 @@ import { basename, join, dirname, relative, isAbsolute, extname } from 'node:pat
 import { notifyCodex } from './agent.ts';
 import { reconcileCodexQueue } from './codex-queue.ts';
 import { observeCodex, readCodexControl, resetCodexSession, type CodexObserver, type NativeResetResult, type NativeControl } from './codex-stream.ts';
-import { ReplyStream, ThreadReplyRouter, isStreamEvent } from './stream.ts';
+import { ReplyStream, ThreadReplyRouter, isStreamEvent, findReplyBlocks } from './stream.ts';
 import { parseReply } from './reply-metadata.ts';
 import { readDocument } from './documents.ts';
 import { prepareProposal } from './proposals.ts';
@@ -34,7 +36,7 @@ const rendererFonts = {
 
 type DocumentData = Awaited<ReturnType<typeof readDocument>>;
 type Cached = { data: DocumentData } | { error: string; status: number };
-export type ServerOptions = { owner: Owner; directory: string; port?: number; pollMs?: number };
+export type ServerOptions = { owner: Owner; directory: string; stateRoot: string; port?: number; pollMs?: number };
 function errorInfo(error: unknown): { error: string; status: number } {
   if (error instanceof DomainError) return { error: error.message, status: error.status };
   if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return { error: 'The registered file is unavailable', status: 404 };
@@ -129,7 +131,11 @@ function requestContext(state: State, id: string) {
   const { requestId: _, ...single } = messages[0];
   return { documentId: request.documentId, thread: { id: thread.id, lastRequestId: previous?.requestId ?? null, ...(thread.title ? { title: thread.title } : {}) }, ...(request.covers?.length ? { covers: request.covers } : {}), ...(messages.length > 1 ? { messages } : single) };
 }
-export async function startServer({ owner, directory, port = 0, pollMs = 1000 }: ServerOptions) {
+export async function startServer({ owner, directory, stateRoot, port = 0, pollMs = 1000 }: ServerOptions) {
+  const ids = await openAgentIds(stateRoot), key = ownerKey(owner);
+  await ids.allocate(key, []);
+  const ownerAlias = ids.encode(key, 'o', key);
+  const resolveId = async (kind: IdKind, value: string) => isAgentAlias(value, kind) ? ids.resolve(key, kind, value) : value;
   const appVersion = await readAppVersion();
   const store = await openStore(directory, owner);
   const browsingRoots = new Map<string, Set<string>>();
@@ -160,7 +166,24 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
   let nativeCleanupVersion = 0, nativeCleanedVersion = 0;
   const pendingNativeCleanup = new Set<string>();
   let connectionError: string | null = null;
-  let compacting = false;
+  let compacting = false, claudeProtocolAt = 0, nativeDeliveryAt = 0;
+  const nativeDelivery = () => nativeDeliveryAt > Date.now() - 2500;
+  const compactCapable = (requested: boolean) => requested && (owner.agent === 'codex' || claudeProtocolAt > Date.now() - 2500);
+  async function deliveryFormat(id: string, requested = false) {
+    const previous = await ids.deliveryFormat(key, id);
+    if (previous) return previous;
+    const record = get(store.read().requests, id);
+    const format = compactCapable(requested) && record.status === 'queued' && !record.handoff && !record.acceptedAt ? 'compact-v1' : 'legacy';
+    await ids.allocate(key, [], { requestId: id, format });
+    return format;
+  }
+  async function wire(event: Record<string, unknown>) {
+    return typeof event.requestId === 'string' && await ids.deliveryFormat(key, event.requestId) === 'compact-v1' ? compactNotification(owner, event, ids) : event;
+  }
+  async function replyStream(route: import('./stream.ts').ReplyRoute) {
+    const compact = await ids.deliveryFormat(key, route.requestId) === 'compact-v1';
+    return new ReplyStream(route, true, compact ? ids.encode(key, 'r', route.requestId) : undefined);
+  }
   let agentActivity = 'unknown';
   let activityTurnId: string | undefined;
   let stream: ReplyStream | undefined;
@@ -223,6 +246,8 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       } catch { stopFailed(active); }
     } else {
       if (stopping?.stream === active) stopFailed(active);
+      // A native turn may yield while delegated work is still pending.
+      if (status === 'completed' && !active.hasFinalStarted && !active.error && !store.read().requests[active.route.requestId]?.replyRecovery) return;
       active.fail('Reply could not be saved.');
       await store.update(state => {
         const request = get(state.requests, active.route.requestId);
@@ -244,12 +269,14 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     for (const request of Object.values(store.read().requests)) {
       if (request.nativeTurnId !== turnId || request.batchId !== request.id || streams.has(request.id) || !['queued', 'claimed', 'uncertain'].includes(request.status)) continue;
       await store.update(state => claim(state, request.id, { resume: true }));
-      const active = new ReplyStream({ requestId: request.id, documentId: request.documentId, threadId: request.threadId }, true);
+      const active = await replyStream({ requestId: request.id, documentId: request.documentId, threadId: request.threadId });
       streams.set(request.id, active); stream ??= active;
     }
-    if (answer) for (const active of [...streams.values()]) {
-      const start = answer.indexOf(active.prefix), end = answer.indexOf(active.suffix, start + active.prefix.length);
-      if (start >= 0 && end >= 0) await acceptReply(active, { messageId: `native-final:${turnId}`, turnId, index: 0, delta: answer.slice(start, end + active.suffix.length), final: true });
+    if (answer) for (const block of findReplyBlocks(answer, streams)) {
+      if (!answer.startsWith(block.stream.prefix, block.start)) continue;
+      if (block.end !== null)
+        await acceptReply(block.stream, { messageId: `native-final:${turnId}:${block.start}`, turnId, index: 0, delta: answer.slice(block.start, block.end), final: true });
+      else if (controlTurn(block.stream) === turnId) block.stream.recoverPartial(answer.slice(block.start));
     }
     for (const active of [...streams.values()]) await turnEnded(active, turnId, status, answer);
     replyRouter.endTurn(turnId);
@@ -289,17 +316,17 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
           // Withdraw native deliveries before interrupting: otherwise an old queued
           // submission can start after Sidecar has already marked it Stopped.
           const cancelled = [...new Set([...targets, ...terminalCodexRequests()])];
-          await reconcileCodexQueue(owner.sessionId, { cancelRequestIds: cancelled }, abort.signal);
+          await reconcileCodexQueue(owner.sessionId, { cancelRequestIds: cancelled, agentIds: ids }, abort.signal);
         }
         const result = owner.agent === 'codex' ? await resetCodexSession(owner.sessionId, abort.signal) : await confirmation;
         await capture(async () => {
           if (closed || abort.signal.aborted) throw new Error('Reset could not be confirmed.');
           if (result.answer) for (const active of [...streams.values()]) {
             if (!targets.includes(active.route.requestId)) continue;
-            const start = result.answer.indexOf(active.prefix), end = result.answer.indexOf(active.suffix, start + active.prefix.length);
-            if (start >= 0 && end >= 0)
-              await acceptReply(active, { messageId: `reset-final:${attempt.id}`, turnId: result.turnId ?? attempt.id, index: 0, delta: result.answer.slice(start, end + active.suffix.length), final: true });
-            else active.recoverPartial(result.answer);
+            const block = findReplyBlocks(result.answer, new Map([[active.route.requestId, active]]))[0];
+            if (block?.end != null && result.answer.startsWith(active.prefix, block.start))
+              await acceptReply(active, { messageId: `reset-final:${attempt.id}`, turnId: result.turnId ?? attempt.id, index: 0, delta: result.answer.slice(block.start, block.end), final: true });
+            else if (block) active.recoverPartial(result.answer.slice(block.start));
           }
           if ([...streams.values()].some(active => active.done)) throw new Error('The completed reply could not be saved. Retry saving it before Reset.');
           await store.update(state => {
@@ -425,7 +452,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     changed();
   }
   function notifyAgent(response: ServerResponse, sent: Set<string>) {
-    if (isResetting() || stopping) return;
+    if (isResetting() || stopping || nativeDelivery()) return;
     const recovering = pendingRecovery();
     if (recovering?.replyRecovery && !sent.has(recovering.replyRecovery.id) && !response.destroyed) {
       response.write(JSON.stringify({ type: 'sidecar.recovery', ownerKey: ownerKey(owner), requestId: recovering.id, recoveryId: recovering.replyRecovery.id }) + '\n');
@@ -458,7 +485,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     if (!request || announced.has(request.id)) return;
     dispatching = true; announced.add(request.id);
     try {
-      const notification = await prepareNotification(request.id);
+      const notification = await prepareNotification(request.id, true);
       if ('claimStatus' in notification && notification.claimStatus !== 'claimed') return;
       if (closed) return;
       await deliverCodex(request.id, notification);
@@ -513,7 +540,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     if (!startRequestId && !cancelRequestIds.length) return;
     nativeQueueWork = (async () => {
       try {
-        const turnId = await reconcileCodexQueue(owner.sessionId, { startRequestId, cancelRequestIds, canStart }, transportAbort.signal);
+        const turnId = await reconcileCodexQueue(owner.sessionId, { startRequestId, cancelRequestIds, canStart, agentIds: ids }, transportAbort.signal);
         if (turnId && startRequestId) await store.update(state => { if (state.requests[startRequestId]) markAccepted(state, startRequestId, turnId); });
         nativeCleanedVersion = cleanupVersion;
         for (const requestId of cancelRequestIds) pendingNativeCleanup.delete(requestId);
@@ -532,7 +559,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       stream: stream ? { ...stream.snapshot(), turnId: controlTurn(), canStop: canStop(), stopping: stopping?.stream === stream, stopError } : null,
       streams: [...streams.values()].filter(active => active.hasStarted).map(active => active.snapshot()),
       lastLifecycle, activity: compacting ? 'compacting' : agentActivity,
-      connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError };
+      connection: connectionError ? 'error' : agents.size || nativeDelivery() ? 'connected' : 'waiting', connectionError };
     const encoded = JSON.stringify(runtime);
     if (encoded !== lastRuntime) { lastRuntime = encoded; runtimeRevision++; }
     return { ...runtime, runtimeRevision };
@@ -574,7 +601,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     const current = get(state.requests, route.requestId);
     if (current.status !== 'claimed' || current.documentId !== route.documentId || current.threadId !== route.threadId) throw new DomainError('Claim the matching request before streaming', 409);
     let active = streams.get(current.id);
-    if (!active) { active = new ReplyStream(route, true); streams.set(current.id, active); stream ??= active; }
+    if (!active) { active = await replyStream(route); streams.set(current.id, active); stream ??= active; }
     try { await ensureObserver(); }
     catch (error) { active.fail('Streaming unavailable. Use a complete reply.'); changed(); throw error; }
     if (closed) throw new Error('Sidecar stopped');
@@ -594,7 +621,9 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     }
     await streamReady;
   }
-  async function prepareNotification(id: string) {
+  function prepareNotification(id: string, compact = false) { return capture(() => reserveNotification(id, compact)); }
+  async function reserveNotification(id: string, compact = false) {
+    await deliveryFormat(id, compact);
     if (isResetting()) throw new DomainError('Agent Reset is in progress', 409);
     const notification = { type: 'sidecar.request', ownerKey: ownerKey(owner), requestId: id };
     const prepared = await store.update(state => {
@@ -610,7 +639,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       request.handoff = 'prepared';
       return { claimStatus: result.claimStatus, context: requestContext(state, id) };
     });
-    if (!prepared.context) return { ...notification, ...(prepared.claimStatus ? { claimStatus: prepared.claimStatus } : {}) };
+    if (!prepared.context) return wire({ ...notification, ...(prepared.claimStatus ? { claimStatus: prepared.claimStatus } : {}) });
     const request = get(store.read().requests, id);
     directRequestId = id;
     const route = { requestId: id, documentId: request.documentId, threadId: request.threadId };
@@ -619,8 +648,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     catch { markers = { error: 'Streaming unavailable. Use the complete-reply command.' }; }
     if (get(store.read().requests, id).status !== 'claimed') return { ...notification, claimStatus: 'completed' };
     changed();
-    return { ...notification, stream: markers, ...prepared.context,
-      instruction: 'Follow the Sidecar skill.' };
+    return wire({ ...notification, ...prepared.context, stream: markers, instruction: 'Follow the Sidecar skill.' });
   }
   function prepareRecovery(id: string, recoveryId: string): Promise<Record<string, unknown>> {
     // Do not hand off a recovery while an earlier final answer is still saving.
@@ -648,9 +676,9 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     catch { markers = { error: 'Use the complete-reply command.' }; }
     if (closed || get(store.read().requests, id).status !== 'claimed') return { claimStatus: 'completed' };
     changed();
-    return { type: 'sidecar.recovery', ownerKey: ownerKey(owner), requestId: id, recoveryId,
+    return wire({ type: 'sidecar.recovery', ownerKey: ownerKey(owner), requestId: id, recoveryId,
       documentId: request.documentId, thread: { id: request.threadId }, stream: markers,
-      instruction: 'Follow the Sidecar skill. Reply recovery only: resend the existing answer using these exact markers. Do not repeat the original task, tools, or edits. If you cannot recover the answer, send an isError reply explaining that. Leave later queued messages for their own delivery.' };
+      instruction: 'Follow the Sidecar skill. Reply recovery only: resend the existing answer using these exact markers. Do not repeat the original task, tools, or edits. If you cannot recover the answer, send an isError reply explaining that. Leave later queued messages for their own delivery.' });
   }
   async function closeRegisteredDocument(id: string) {
     return proposalService.withDocument(id, async () => {
@@ -761,7 +789,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       if (request.headers.origin !== undefined && request.headers.origin !== origin) throw new DomainError('Foreign origin', 403);
       const target = new URL(request.url ?? '/', origin);
       if (target.origin !== origin) throw new DomainError('Foreign request target', 403);
-      const path = decodeURIComponent(target.pathname);
+      let path = decodeURIComponent(target.pathname);
       const method = request.method ?? 'GET';
       const name = isLan ? lanCookieName : cookieName;
       const cookie = request.headers.cookie?.split(';').map(part => part.trim()).find(part => part.startsWith(`${name}=`))?.slice(name.length + 1);
@@ -954,9 +982,32 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         if (isLan) throw new DomainError('Manage tunnel settings from the local viewer', 403);
         json(response, await readTunnelConfig()); return;
       }
-      if (method === 'GET' && path === '/agent/status') { json(response, { ownerKey: ownerKey(owner), instanceId, state: 'running', connection: connectionError ? 'error' : agents.size ? 'connected' : 'waiting', connectionError }); return; }
+      if (method === 'GET' && path === '/agent/status') { json(response, { ownerKey: ownerKey(owner), ownerAlias, agentProtocol: 'sc1', nativeDelivery: nativeDelivery(), instanceId, state: 'running', connection: connectionError ? 'error' : agents.size || nativeDelivery() ? 'connected' : 'waiting', connectionError }); return; }
       if (method === 'POST' && path === '/agent/stop') { json(response, { ok: true }); setImmediate(() => { void close(); }); return; }
       const body = ['POST', 'PATCH'].includes(method) ? await bodyOf(request) : {};
+      const compact = request.headers['x-sidecar-protocol'] === 'sc1';
+      if (isAgent) {
+        const match = /^\/agent\/(requests|threads|documents)\/([^/]+)(.*)$/.exec(path);
+        if (match) path = `/agent/${match[1]}/${await resolveId(match[1] === 'requests' ? 'r' : match[1] === 'threads' ? 't' : 'd', match[2])}${match[3]}`;
+        for (const [field, kind] of Object.entries({ requestId: 'r', documentId: 'd', threadId: 't', recoveryId: 'e' } as const)) if (typeof body[field] === 'string') body[field] = await resolveId(kind, body[field]);
+        if (Array.isArray(body.requestIds)) body.requestIds = await Promise.all(body.requestIds.map(id => typeof id === 'string' ? resolveId('r', id) : id));
+        if (typeof body.ownerKey === 'string' && isAgentAlias(body.ownerKey, 'o')) body.ownerKey = await ids.resolveOwner(body.ownerKey);
+      }
+      if (method === 'POST' && path === '/agent/inbox') {
+        if (owner.agent !== 'claude' || body.ownerKey !== key || !nativeDelivery()) throw new DomainError('Native delivery is unavailable', 409);
+        const notification = await capture(async () => {
+          if (isResetting() || stopping || (body.turnId === 'idle' ? agentActivity !== 'idle' : body.turnId !== nativeTurn())) return;
+          const recovering = pendingRecovery();
+          if (recovering?.replyRecovery) return reserveRecovery(recovering.id, recovering.replyRecovery.id);
+          const next = pending();
+          if (!next) return;
+          const notification = await reserveNotification(next.id, compact);
+          if (body.turnId !== 'idle') await store.update(state => { for (const member of requestBatch(state, next.id)) member.nativeTurnId = text(body, 'turnId'); });
+          return notification;
+        }).catch(error => { connectionError = 'Claude delivery could not be prepared. The question is retained; check the app and use Reset if needed.'; changed(); throw error; });
+        json(response, { ownerKey: key, instanceId, ...(notification ? { notification } : {}) }); return;
+      }
+
       if (method === 'POST' && (path === '/api/network' || path === '/agent/network')) {
         if (isLan) throw new DomainError('Manage network access from the local viewer', 403);
         await setNetworkAccess(boolean(body, 'enabled'), optionalText(body, 'passphrase'), optionalText(body, 'publicUrl'), optionalText(body, 'expectedTunnelTarget'), optionalText(body, 'expectedInstanceId'));
@@ -1003,8 +1054,25 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
       }
       if (method === 'POST' && path === '/agent/control') {
         if (owner.agent !== 'claude' || text(body, 'ownerKey') !== ownerKey(owner)) throw new DomainError('Control belongs to another owner', 409);
+        if (body.protocol === 'sc1') claudeProtocolAt = Date.now();
+        if (body.delivery === 'tool-context-v1') nativeDeliveryAt = Date.now();
         const event = text(body, 'event'), turnId = text(body, 'turnId');
-        if (!turnId || turnId.length > 256 || !['poll', 'received', 'started', 'completed', 'interrupted', 'stop-failed', 'reset-idle', 'reset-started', 'reset-failed'].includes(event)) throw new DomainError('Invalid native control event');
+        if (!turnId || turnId.length > 256 || !['poll', 'received', 'delivery-failed', 'started', 'completed', 'interrupted', 'stop-failed', 'reset-idle', 'reset-started', 'reset-failed'].includes(event)) throw new DomainError('Invalid native control event');
+        if (event === 'delivery-failed') {
+          if (!Array.isArray(body.requestIds) || body.requestIds.length !== 1 || typeof body.requestIds[0] !== 'string') throw new DomainError('Invalid failed delivery');
+          const id = body.requestIds[0];
+          if (typeof body.recoveryId === 'string') {
+            await recoveryFailed(id, body.recoveryId);
+            json(response, { ok: true }); return;
+          }
+          await store.update(state => {
+            const request = get(state.requests, id);
+            if (request.acceptedAt || !['claimed', 'queued'].includes(request.status)) return;
+            for (const member of requestBatch(state, id)) { member.status = 'uncertain'; member.handoff = 'uncertain'; }
+            connectionError = 'Claude delivery could not be confirmed. The question is retained; use Reset before retrying.';
+          });
+          changed(); json(response, { ok: true }); return;
+        }
         if (event === 'received') {
           const ids = body.requestIds;
           if (!Array.isArray(ids) || ids.length > 64 || !ids.every(id => typeof id === 'string')) throw new DomainError('Invalid native receipt');
@@ -1017,16 +1085,16 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
           });
           claudeControl = { turnId, seenAt: Date.now() }; agentActivity = 'busy';
           const state = store.read();
-          const notifications = ids.flatMap(id => {
+          const notifications = await Promise.all(ids.flatMap(id => {
             const request = state.requests[id], active = streams.get(id);
             if (!request || request.status !== 'claimed' || !active) return [];
             const stream = { prefix: active.prefix, suffix: active.suffix, progress: active.progress };
-            return [request.replyRecovery ? {
+            return [wire(request.replyRecovery ? {
               type: 'sidecar.recovery', ownerKey: ownerKey(owner), requestId: id, recoveryId: request.replyRecovery.id,
               documentId: request.documentId, thread: { id: request.threadId }, stream,
               instruction: 'Follow the Sidecar skill. Reply recovery only: resend the existing answer. Do not repeat the original task, tools, or edits.',
-            } : { type: 'sidecar.request', ownerKey: ownerKey(owner), requestId: id, stream, ...requestContext(state, id), instruction: 'Follow the Sidecar skill.' }];
-          });
+            } : { type: 'sidecar.request', ownerKey: ownerKey(owner), requestId: id, stream, ...requestContext(state, id), instruction: 'Follow the Sidecar skill.' })];
+          }));
           changed(); json(response, { ok: true, notifications }); return;
         }
         if (event.startsWith('reset-')) {
@@ -1054,6 +1122,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
           const marker = text(body, 'marker');
           const matching = [...streams.values()].filter(active => !active.done && [active.prefix, active.progress.prefix].some(prefix => prefix.startsWith(marker)));
           if (matching.length) {
+            for (const active of matching) if (active.prefix.startsWith(marker)) active.hasFinalStarted = true;
             await store.update(state => { for (const active of matching) markAccepted(state, active.route.requestId, turnId); });
             claudeControl = { turnId, seenAt: Date.now(), requestId: matching[0].route.requestId };
             agentActivity = 'busy';
@@ -1188,7 +1257,7 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         changed(); json(response, { ok: true }); return;
       }
       const preparePath = path.match(/^\/agent\/requests\/([^/]+)\/prepare$/);
-      if (method === 'POST' && preparePath?.[1]) { json(response, await prepareNotification(preparePath[1])); return; }
+      if (method === 'POST' && preparePath?.[1]) { json(response, await prepareNotification(preparePath[1], compact)); return; }
       const recoverPath = path.match(/^\/agent\/requests\/([^/]+)\/recover$/);
       if (method === 'POST' && recoverPath) { json(response, await prepareRecovery(recoverPath[1], text(body, 'recoveryId'))); return; }
       const recoveryFailedPath = path.match(/^\/agent\/requests\/([^/]+)\/recovery-failed$/);
@@ -1226,7 +1295,8 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
         const markers = result.claimStatus === 'already-claimed' && active
           ? active.error ? { error: active.error } : { prefix: active.prefix, suffix: active.suffix, progress: active.progress }
           : undefined;
-        changed(); json(response, { ...result, ...requestContext(state, id), ...(markers ? { stream: markers } : {}), document, thread: get(state.threads, result.request.threadId), proposals: Object.values(state.proposals).filter(p => p.threadId === result.request.threadId) }); return;
+        const context = { ...result, ...requestContext(state, id), ...(markers ? { stream: markers } : {}), document, thread: get(state.threads, result.request.threadId), proposals: Object.values(state.proposals).filter(p => p.threadId === result.request.threadId) };
+        changed(); json(response, compact ? await compactContext(owner, context, ids) : context); return;
       }
       if (method === 'POST' && path === '/agent/streams') {
         const route = { requestId: text(body, 'requestId'), documentId: text(body, 'documentId'), threadId: text(body, 'threadId') };
@@ -1299,5 +1369,5 @@ export async function startServer({ owner, directory, port = 0, pollMs = 1000 }:
     await closePromise; await dispatchWork; await nativeQueueWork; await resetWork; await captureWork; await finalizing; await proposalService.drain(); finish();
   }
   changed();
-  return { url, close, instanceId, done };
+  return { url, close, instanceId, ownerAlias, done };
 }

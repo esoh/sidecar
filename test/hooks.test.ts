@@ -14,7 +14,7 @@ for (const agent of ['codex', 'claude'] as const) {
     const owner = { agent, sessionId: randomUUID() }, key = ownerKey(owner), directory = join(root, key);
     const previous = process.env.SIDECAR_STATE_DIR;
     process.env.SIDECAR_STATE_DIR = root;
-    let server = await startServer({ owner, directory });
+    let server = await startServer({ owner, directory, stateRoot: directory });
     t.after(async () => { process.env.SIDECAR_STATE_DIR = previous; if (previous === undefined) delete process.env.SIDECAR_STATE_DIR; await server.close(); await rm(root, { recursive: true, force: true }); });
     const runtime = () => writeFile(join(directory, 'runtime.json'), JSON.stringify({ url: server.url, instanceId: server.instanceId, ownerKey: key }));
     await runtime();
@@ -57,7 +57,7 @@ for (const agent of ['codex', 'claude'] as const) {
       assert.equal((await snapshot()).lastLifecycle.event, 'interrupted');
       await forwardHook(agent, { session_id: owner.sessionId, hook_event_name: 'PreCompact' });
     }
-    await server.close(); server = await startServer({ owner, directory }); await runtime();
+    await server.close(); server = await startServer({ owner, directory, stateRoot: directory }); await runtime();
     assert.equal((await snapshot()).activity, 'unknown');
     await server.close();
     await forwardHook(agent, { session_id: owner.sessionId, hook_event_name: 'PreCompact' });

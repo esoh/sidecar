@@ -75,7 +75,8 @@ for (const origin of ['idle', 'busy', 'monitor'] as const) test(`Claude native $
     await handlers.get('turn.start')(api, { text: 'Ordinary CLI work', turnId: 'native-input' }, (e: unknown) => e);
     const truncated = '<event>' + JSON.stringify(event).slice(0, 600) + '...(truncated)</event>';
     const hydrated = await handlers.get('prompt.attachment')(api, { type: 'queued_command', origin: { kind: 'engine' }, text: truncated }, (e: unknown) => e);
-    assert.ok(hydrated.text.includes(JSON.stringify(event)), 'the model receives the original prepared question and markers without a fetch tool');
+    const payload = hydrated.text.slice(hydrated.text.indexOf('{'), hydrated.text.lastIndexOf('</event>'));
+    assert.deepEqual(JSON.parse(payload), event, 'the model receives the original prepared question and markers without a fetch tool');
     assert.ok(hydrated.text.endsWith('</event>'));
     const other = await handlers.get('prompt.attachment')(api, { type: 'file', origin: { kind: 'engine' }, text: truncated }, (e: unknown) => e);
     assert.equal(other.text, truncated, 'document content must not become a delivered input');

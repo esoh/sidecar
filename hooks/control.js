@@ -10,31 +10,35 @@ async function connect($) {
     if (runtime.ownerKey !== ownerKey || !/^http:\/\/127\.0\.0\.1:\d+$/.test(runtime.url) || typeof runtime.instanceId !== 'string') return;
     const token = (await $.fs.read(`${directory}/agent-token`)).trim();
     if (!/^[0-9a-f]{64}$/.test(token)) return;
-    return async (event, turnId, answer, marker, resetId, activity, requestIds) => {
-      const response = await $.http.fetch(`${runtime.url}/agent/control`, {
-        method: 'POST', headers: { 'X-Sidecar-Token': token, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ownerKey, event, turnId, ...(answer ? { answer: answer.slice(0, 128 * 1024) } : {}), ...(marker ? { marker } : {}), ...(resetId ? { resetId } : {}), ...(activity ? { activity } : {}), ...(requestIds ? { requestIds } : {}) }),
+    const post = async (event, turnId, answer, marker, resetId, activity, requestIds, recoveryId) => {
+      const response = await $.http.fetch(`${runtime.url}/agent/${event === 'inbox' ? 'inbox' : 'control'}`, {
+        method: 'POST', headers: { 'X-Sidecar-Token': token, 'Content-Type': 'application/json', 'X-Sidecar-Protocol': 'sc1' },
+        body: JSON.stringify({ ownerKey, event, turnId, protocol: 'sc1', delivery: 'tool-context-v1', ...(answer ? { answer: answer.slice(0, 128 * 1024) } : {}), ...(marker ? { marker } : {}), ...(resetId ? { resetId } : {}), ...(activity ? { activity } : {}), ...(requestIds ? { requestIds } : {}), ...(recoveryId ? { recoveryId } : {}) }),
       });
       if (!response.ok) throw new Error('Sidecar control unavailable');
       const result = JSON.parse(response.text);
-      if (event === 'poll' && (result.ownerKey !== ownerKey || result.instanceId !== runtime.instanceId)) throw new Error('Sidecar control identity mismatch');
+      if (['poll', 'inbox'].includes(event) && (result.ownerKey !== ownerKey || result.instanceId !== runtime.instanceId)) throw new Error('Sidecar control identity mismatch');
       return result;
     };
+    post.ownerKey = ownerKey; post.ownerAlias = runtime.ownerAlias;
+    return post;
 }
-let activeTurn, timer, polling = false, hasKnownState = false, handlingReset, lastCompletion;
+let activeTurn, timer, polling = false, hasKnownState = false, handlingReset, lastCompletion, delivering = false;
 const deliveries = new Map();
 async function received($, text, turnId) {
   if (typeof text !== 'string' || !turnId) return text;
   try {
-    const owner = `claude-${(await $.session.id()).toLowerCase()}`, ids = new Set();
-    const matches = [...text.matchAll(/\{"type":"sidecar\.(?:request|recovery)","ownerKey":"(claude-[0-9a-f-]{36})","requestId":"([0-9a-f-]{36})"(?:,"recoveryId":"([0-9a-f-]{36})")?/g)];
+    const post = await connect($);
+    if (!post) return text;
+    const owns = value => value === post.ownerKey || value === post.ownerAlias;
+    const ids = new Set();
+    const matches = [...text.matchAll(/\{"type":"(?:sidecar|sc)\.(?:request|recovery)","ownerKey":"([^"\n]+)","requestId":"([^"\n]+)"(?:,"recoveryId":"([^"\n]+)")?/g)];
     for (const match of matches) {
-      if (match[1] === owner && !deliveries.has(match[0])) ids.add(match[2]);
+      if (owns(match[1]) && !deliveries.has(match[0])) ids.add(match[2]);
     }
     if (ids.size) {
-      const post = await connect($);
       const result = await post?.('received', turnId, undefined, undefined, undefined, undefined, [...ids].slice(0, 64));
-      for (const match of matches) if (match[1] === owner) {
+      for (const match of matches) if (owns(match[1])) {
         const event = result?.notifications?.find(event => event.requestId === match[2]);
         if (event) deliveries.set(match[0], JSON.stringify(event));
       }
@@ -44,13 +48,38 @@ async function received($, text, turnId) {
     }
     // Native Monitor truncates each stdout line. Rehydrate only this owner's
     // known prepared event, locally, before the model sees the attachment.
-    return text.replace(/\{"type":"sidecar\.(?:request|recovery)"[^\n]*/g, line => {
+    return text.replace(/\{"type":"(?:sidecar|sc)\.(?:request|recovery)"[^\n]*/g, line => {
       const match = matches.find(match => line.startsWith(match[0]));
       const hydrated = match && deliveries.get(match[0]);
       return hydrated ? hydrated + (line.endsWith('</event>') ? '</event>' : '') : line;
     });
   } catch { /* Receipt reporting must not block the native prompt. */ }
   return text;
+}
+// One in-flight handoff across parallel tools and idle polling. Never replay
+// an ambiguous submission; the existing receipt/Reset path owns recovery.
+async function deliver($, turnId) {
+  if (delivering) return;
+  delivering = true;
+  let post, event;
+  try {
+    post = await connect($);
+    const result = await post?.('inbox', turnId ?? 'idle');
+    event = result?.notification;
+    if (!event || event.claimStatus && event.claimStatus !== 'claimed') return;
+    if (event.ownerKey !== post.ownerKey && event.ownerKey !== post.ownerAlias) return;
+    const text = JSON.stringify(event);
+    if (turnId) {
+      if (activeTurn !== turnId) throw new Error('Native turn ended before delivery');
+      return await received($, text, turnId);
+    }
+    // This is called only by the background timer, never awaited by an active hook.
+    const submitted = await $.prompt.submit({ text });
+    if (submitted.drop) throw new Error('Native prompt declined');
+  } catch {
+    if (event) try { await post?.('delivery-failed', turnId ?? 'idle', undefined, undefined, undefined, undefined, [event.requestId], event.recoveryId); } catch { /* The original reservation remains; never replay it. */ }
+  }
+  finally { delivering = false; }
 }
 function monitor($) {
   if (timer) return;
@@ -77,7 +106,11 @@ function monitor($) {
         }
         return;
       }
-      if (!activeTurn || result.stop?.turnId !== activeTurn) return;
+      if (!activeTurn) {
+        if (hasKnownState) await deliver($);
+        return;
+      }
+      if (result.stop?.turnId !== activeTurn) return;
       const turnId = activeTurn;
       try { await $.turn.abort({ turnId }); }
       catch { await post('stop-failed', turnId); }
@@ -90,23 +123,30 @@ function monitor($) {
   void poll();
 }
 export function register(on) {
-  activeTurn = undefined; timer = undefined; polling = false; hasKnownState = false; handlingReset = undefined; lastCompletion = undefined; deliveries.clear();
+  activeTurn = undefined; timer = undefined; polling = false; hasKnownState = false; handlingReset = undefined; lastCompletion = undefined; delivering = false; deliveries.clear();
   on('session.start', async ($, e, next) => { monitor($); return next(e); });
   on('session.end', async ($, e, next) => { timer?.cancel(); timer = undefined; activeTurn = undefined; hasKnownState = false; lastCompletion = undefined; return next(e); });
   on('turn.start', async ($, e, next) => {
     activeTurn = e.turnId; hasKnownState = true; monitor($);
-    await received($, e.text, e.turnId);
-    return next(e);
+    return next({ ...e, text: await received($, e.text, e.turnId) });
   });
   on('prompt.submit', async ($, e, next) => {
     const result = await next(e);
-    if (e.turnId && !e.wait && !result.drop) await received($, result.text, e.turnId);
+    if (e.turnId && !e.wait && !result.drop && !e.agentId) return { ...result, text: await received($, result.text, e.turnId) };
     return result;
   });
   on('prompt.attachment', async ($, e, next) => {
     if (e.type === 'queued_command' && e.origin.kind === 'engine' && !e.agentId)
       return next({ ...e, text: await received($, e.text, activeTurn) });
     return next(e);
+  });
+
+  on('tool.call', async ($, e, next) => {
+    const turnId = activeTurn;
+    const result = await next(e);
+    if (e.agentId || !turnId || activeTurn !== turnId || result.deny) return result;
+    const text = await deliver($, turnId);
+    return text ? { ...result, context: [...(result.context ?? []), text] } : result;
   });
 
   // MessageDisplay's turn_id differs from the native abort ID in Claude 2.1.288.
@@ -118,7 +158,7 @@ export function register(on) {
       yield chunk;
       if (checked || chunk.kind !== 'text') continue;
       prefix += chunk.text;
-      const marker = prefix.match(/^\[\[sidecar(?:-progress)?:[0-9a-f-]{36}\]\]\n\[\[sidecar-reply:[0-9a-f-]{36}\]\]\n/);
+      const marker = prefix.match(/^(?:\[\[sc(?:p)?:r[1-9A-Z][0-9A-Z]*\]\]\n|\[\[sidecar(?:-progress)?:[0-9a-f-]{36}\]\]\n\[\[sidecar-reply:[0-9a-f-]{36}\]\]\n)/);
       if (marker) {
         checked = true;
         try { const post = await connect($); await post?.('started', e.turnId, undefined, marker[0]); }

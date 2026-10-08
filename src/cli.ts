@@ -1,3 +1,4 @@
+import { openAgentIds, isAgentAlias, type IdKind } from './agent-ids.ts';
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, rm, open, rename, realpath } from 'node:fs/promises';
@@ -48,12 +49,12 @@ async function serve(key: string) {
   try {
     const previous = await readRuntime(key).catch(() => undefined);
     const port = previous ? Number(new URL(previous.url).port) : 0;
-    try { server = await startServer({ owner: parseOwner(key), directory, port }); }
+    try { server = await startServer({ owner: parseOwner(key), directory, stateRoot: dirname(directory), port }); }
     catch (error) {
       if (!(error instanceof Error && 'code' in error && error.code === 'EADDRINUSE')) throw error;
-      server = await startServer({ owner: parseOwner(key), directory });
+      server = await startServer({ owner: parseOwner(key), directory, stateRoot: dirname(directory) });
     }
-    const runtime = { url: server.url, instanceId: server.instanceId, ownerKey: key };
+    const runtime = { url: server.url, instanceId: server.instanceId, ownerKey: key, ownerAlias: server.ownerAlias };
     const temporary = join(directory, `runtime-${randomUUID()}.tmp`);
     await writeFile(temporary, JSON.stringify(runtime), { mode: 0o600 });
     await rename(temporary, join(directory, 'runtime.json'));
@@ -118,7 +119,8 @@ async function main() {
     process.stdout.write('Sidecar — document conversations with your existing agent.\n\nUsage: sidecar COMMAND [options]\nCommands: open, browse, status, config, network, cloudflare, request, name-thread, stream, reply, watch, stop, hook\n\nOpen: sidecar open --agent codex|claude --session UUID --file /absolute/document.md [--workspace /absolute/worktree]\nConfig: sidecar config (read machine-local tunnel preferences)\nNetwork: sidecar network [on|off] --owner KEY [--public-url https://sidecar.example.com]\nCloudflare: sidecar cloudflare --owner KEY (start/reuse configured protected tunnel)\nUse the Sidecar skill in the original agent to establish live delivery.\n');
     return;
   }
-  const [command, requestId] = positionals;
+  const [command, inputId] = positionals;
+  let requestId: string | undefined = inputId;
   const output = (value: unknown) => process.stdout.write(JSON.stringify(value) + '\n');
   if (command === 'config') { output(await readTunnelConfig()); return; }
   if (command === 'hook') {
@@ -133,7 +135,9 @@ async function main() {
     const key = ownerKey(owner);
     await ensureApp(key);
     const runtime = await readRuntime(key), url = `${runtime.url}/?library=1`;
-    output({ ownerKey: key, url });
+    const ids = await openAgentIds(dirname(ownerDirectory(key)));
+    await ids.allocate(key, []);
+    output({ ownerKey: ids.encode(key, 'o', key), nativeOwnerKey: key, url });
     if (!values['no-browser']) await openBrowser(url);
     return;
   }
@@ -145,14 +149,23 @@ async function main() {
     if (values.stdin) { path = join(ownerDirectory(key), `generated-${randomUUID()}.md`); await writeFile(path, await stdin(), { mode: 0o600, flag: 'wx' }); }
     const document = await agentCall(key, '/agent/documents', { path, title: values.title, generated: Boolean(values.stdin), ...(await workspaceMetadata(values.workspace)) });
     const runtime = await readRuntime(key), url = `${runtime.url}/?document=${document.id}`;
-    output({ ownerKey: key, documentId: document.id, url });
+    const ids = await openAgentIds(dirname(ownerDirectory(key)));
+    await ids.allocate(key, [{ kind: 'd', id: document.id }]);
+    output({ ownerKey: ids.encode(key, 'o', key), nativeOwnerKey: key, documentId: ids.encode(key, 'd', document.id), url });
     if (!values['no-browser']) await openBrowser(url);
     return;
   }
   if (!values.owner) throw new Error('Provide --owner KEY');
-  const key = ownerKey(parseOwner(values.owner));
+  const ownerIsAlias = isAgentAlias(values.owner, 'o');
+  const root = dirname(ownerDirectory('codex-00000000-0000-4000-8000-000000000000'));
+  const aliases = ownerIsAlias || [requestId, values.document, values.thread].some(value => value && /^[rdt][1-9A-Z][0-9A-Z]*$/.test(value)) ? await openAgentIds(root) : undefined;
+  const key = ownerKey(parseOwner(ownerIsAlias && aliases ? await aliases.resolveOwner(values.owner) : values.owner));
+  const resolveId = async (kind: IdKind, value?: string) => value && aliases && isAgentAlias(value, kind) ? aliases.resolve(key, kind, value) : value;
+  if (command && ['request', 'name-thread', 'stream', 'reply'].includes(command)) requestId = await resolveId(command === 'name-thread' ? 't' : 'r', requestId);
+  values.document = await resolveId('d', values.document); values.thread = await resolveId('t', values.thread);
+  const call = (path: string, body?: unknown) => agentCall(key, path, body, true);
   if (command === 'serve') { await serve(key); return; }
-  if (command === 'status') { output(await appStatus(key)); return; }
+  if (command === 'status') { const status = await appStatus(key); if (ownerIsAlias) { status.ownerKey = values.owner; delete status.instanceId; } output(status); return; }
   if (command === 'network') {
     if (requestId !== undefined && requestId !== 'on' && requestId !== 'off') throw new Error('Use network [on|off] --owner KEY');
     if (values['public-url'] !== undefined && requestId !== 'on') throw new Error('--public-url requires network on');
@@ -193,19 +206,19 @@ async function main() {
     await watchClaude(key, abort.signal); return;
   }
   if (command === 'request' && requestId) {
-    const result = await agentCall(key, `/agent/requests/${encodeURIComponent(requestId)}/claim`, { resume: Boolean(values.resume) });
+    const result = await call(`/agent/requests/${encodeURIComponent(requestId)}/claim`, { resume: Boolean(values.resume) });
     if (values.stream && result.claimStatus === 'claimed') {
       const { documentId, threadId } = result.request;
-      try { result.stream = await agentCall(key, '/agent/streams', { requestId, documentId, threadId }); }
+      try { result.stream = await call('/agent/streams', { requestId, documentId, threadId }); }
       // The claim succeeded; retain its context so the agent can send a complete reply.
       catch (error) { result.stream = { error: error instanceof Error ? error.message : 'Streaming unavailable' }; }
     }
     output(result); return;
   }
-  if (command === 'name-thread' && requestId) { output(await agentCall(key, `/agent/threads/${encodeURIComponent(requestId)}/title`, { title: values.title })); return; }
-  if (command === 'stream' && requestId) { output(await agentCall(key, '/agent/streams', { requestId, documentId: values.document, threadId: values.thread })); return; }
+  if (command === 'name-thread' && requestId) { output(await call(`/agent/threads/${encodeURIComponent(requestId)}/title`, { title: values.title })); return; }
+  if (command === 'stream' && requestId) { output(await call('/agent/streams', { requestId, documentId: values.document, threadId: values.thread })); return; }
   if (command === 'reply' && requestId) {
-    output(await agentCall(key, '/agent/replies', { requestId, documentId: values.document, threadId: values.thread, ...(values.stream ? { stream: true } : { text: await stdin() }), isError: Boolean(values.error) })); return;
+    output(await call('/agent/replies', { requestId, documentId: values.document, threadId: values.thread, ...(values.stream ? { stream: true } : { text: await stdin() }), isError: Boolean(values.error) })); return;
   }
   throw new Error('Commands: open, browse, status, config, network, cloudflare, request, name-thread, stream, reply, watch, stop, hook');
 }

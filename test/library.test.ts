@@ -23,7 +23,7 @@ test('all-agent library verifies original viewers and previews stopped sessions 
   const doc = registerDocument(original, { path: file, generated: false });
   const saved = JSON.stringify(original); await writeFile(join(directory, 'state.json'), saved);
   const owner = { agent: 'claude' as const, sessionId: randomUUID() }, hostKey = ownerKey(owner);
-  const host = await startServer({ owner, directory: join(root, hostKey) });
+  const host = await startServer({ owner, directory: join(root, hostKey), stateRoot: root });
   t.after(() => host.close());
   await writeFile(join(root, hostKey, 'runtime.json'), JSON.stringify({ url: host.url, instanceId: host.instanceId, ownerKey: hostKey }));
   const token = await readFile(join(root, hostKey, 'agent-token'), 'utf8');
@@ -143,7 +143,7 @@ for (const agent of ['codex', 'claude'] as const) test(`browse infers the ${agen
   const cli = async (...args: string[]) => JSON.parse((await exec(process.execPath, ['--import', tsx, cliPath, ...args], { env })).stdout);
   t.after(async () => { await cli('stop', '--owner', key).catch(() => {}); await rm(root, { recursive: true, force: true }); });
   const opened = await cli('browse');
-  assert.equal(opened.ownerKey, key); assert.match(opened.url, /\/\?library=1$/);
+  assert.equal(opened.nativeOwnerKey, key); assert.match(opened.ownerKey, /^o[1-9A-Z]/); assert.match(opened.url, /\/\?library=1$/);
   assert.deepEqual(JSON.parse(await readFile(join(root, 'opened.json'), 'utf8')), [opened.url]);
   assert.equal((await cli('browse', '--agent', agent, '--no-browser')).url, opened.url);
   const state = JSON.parse(await readFile(join(root, key, 'state.json'), 'utf8'));
@@ -163,7 +163,7 @@ test('document opens persist across servers and sort each agent by its most rece
     }
     await writeFile(join(directory, 'state.json'), JSON.stringify(state));
   }
-  const host = await startServer({ owner: owners[0], directory: join(root, ownerKey(owners[0])) }); t.after(() => host.close());
+  const host = await startServer({ owner: owners[0], directory: join(root, ownerKey(owners[0])), stateRoot: root }); t.after(() => host.close());
   const cookie = (await fetch(host.url)).headers.get('set-cookie')!.split(';')[0]!;
   const request = (path: string, method = 'GET') => fetch(host.url + path, { method, headers: { Cookie: cookie, Origin: host.url } });
   const list = async () => (await request('/api/library')).json();

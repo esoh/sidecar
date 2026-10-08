@@ -1,3 +1,4 @@
+import { decodedDelivery } from './support.ts';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from 'node:http';
@@ -69,7 +70,7 @@ async function delivery(t: { after: (fn: () => Promise<void>) => void }, holdRec
   await writeFile(join(n.root, 'codex'), `#!${process.execPath}
 const fs = require('node:fs'), message = process.argv[6];
 const deliver = () => fs.appendFileSync(${JSON.stringify(log)}, message + '\\n');
-if (${holdRecovery} && JSON.parse(message).type === 'sidecar.recovery') {
+if (${holdRecovery} && ['sidecar.recovery', 'sc.recovery'].includes(JSON.parse(message).type)) {
   fs.writeFileSync(${JSON.stringify(waiting)}, message);
   const timer = setInterval(() => { if (fs.existsSync(${JSON.stringify(release)})) { clearInterval(timer); deliver(); } }, 10);
 } else deliver();
@@ -77,16 +78,18 @@ if (${holdRecovery} && JSON.parse(message).type === 'sidecar.recovery') {
   const previousHome = process.env.CODEX_HOME, previousPath = process.env.PATH;
   process.env.CODEX_HOME = n.root; process.env.PATH = `${n.root}:${previousPath}`;
   t.after(async () => { if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome; process.env.PATH = previousPath; });
-  const events = async () => (await readFile(log, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+  const rawEvents = async () => (await readFile(log, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+  const events = async () => Promise.all((await rawEvents()).map(event => decodedDelivery(owner, join(n.root, 'viewer'), event)));
   const seen = new Set<string>();
   n.state.loadQueue = async () => {
-    for (const event of await events()) {
+    for (const raw of await rawEvents()) {
+      const event = await decodedDelivery(owner, join(n.root, 'viewer'), raw);
       const id = event.recoveryId ?? event.requestId;
       if (seen.has(id)) continue; seen.add(id);
-      n.state.queue.push({ id: `native-${id}`, clientUserMessageId: id, input: [{ type: 'text', text: JSON.stringify(event) }] });
+      n.state.queue.push({ id: `native-${id}`, clientUserMessageId: id, input: [{ type: 'text', text: JSON.stringify(raw) }] });
     }
   };
-  const directory = join(n.root, 'viewer'), server = await startServer({ owner, directory, pollMs: 20 });
+  const directory = join(n.root, 'viewer'), server = await startServer({ owner, directory, stateRoot: directory, pollMs: 20 });
   t.after(() => server.close());
   const token = await readFile(join(directory, 'agent-token'), 'utf8'), cookie = (await fetch(server.url)).headers.get('set-cookie')!.split(';')[0];
   const post = async (path: string, body: unknown) => fetch(server.url + path, { method: 'POST', headers: { Cookie: cookie, Origin: server.url, 'X-Sidecar-Token': token, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -140,8 +143,7 @@ for (const mode of ['reset', 'failed-withdrawal', 'idle-after-busy'] as const) t
   const { n, post, read, doc, events } = await delivery(t);
   const first = await (await post('/api/questions', { documentId: doc.id, text: 'First', clientMessageId: 'first' })).json();
   const second = await (await post('/api/questions', { documentId: doc.id, text: 'Next', clientMessageId: 'next' })).json();
-  for (let i = 0; i < 100 && !(await read()).requests[first.id].acceptedAt; i++) await delay(10);
-  assert.ok((await read()).requests[first.id].acceptedAt);
+  await waitFor(async () => { const saved = await read(); return !!saved.requests[first.id].acceptedAt && !!saved.requests[second.id].acceptedAt; }, 'both deliveries were not accepted before Reset');
   if (mode === 'idle-after-busy') {
     // Delivery while terminal work is active must start when it becomes idle,
     // even when no browser has an SSE connection.
@@ -184,7 +186,7 @@ for (const phase of ['queued', 'in-flight'] as const) test(`a complete reply wit
   let recovery;
   if (phase === 'in-flight') {
     await waitFor(() => readFile(waiting, 'utf8').then(() => true, () => false), 'the recovery CLI was not held before enqueue');
-    recovery = JSON.parse(await readFile(waiting, 'utf8'));
+    recovery = await decodedDelivery(owner, join(n.root, 'viewer'), JSON.parse(await readFile(waiting, 'utf8')));
     assert.equal((await events()).length, 1, 'the recovery must still be in flight');
   } else {
     await waitFor(async () => (await events()).length === 2, 'the recovery was not delivered');
@@ -224,7 +226,7 @@ test('closing a completed document retains cleanup of its in-flight recovery', a
   await waitFor(async () => (await read()).stream?.text === 'Partial', 'partial answer was not captured');
   n.emit({ method: 'turn/completed', params: { threadId: owner.sessionId, turn: { id: 'started-turn', status: 'completed', items: [] } } });
   await waitFor(() => readFile(waiting, 'utf8').then(() => true, () => false), 'the recovery CLI was not held before enqueue');
-  const recovery = JSON.parse(await readFile(waiting, 'utf8'));
+  const recovery = await decodedDelivery(owner, join(n.root, 'viewer'), JSON.parse(await readFile(waiting, 'utf8')));
   assert.equal((await post('/agent/replies', { requestId: first.id, documentId: doc.id, threadId: first.threadId, text: 'The original complete answer' })).status, 200);
   assert.equal((await closeDoc(doc.id)).status, 200);
   assert.equal((await read()).requests[first.id], undefined, 'closing deletes the completed request record');
@@ -249,7 +251,7 @@ test('the first oversized input steers its ID-only notification into busy CLI wo
   const request = await (await post('/api/questions', { documentId: doc.id, text: 'large '.repeat(9000), clientMessageId: 'large' })).json();
   await waitFor(async () => !!(await read()).requests[request.id].acceptedAt, 'large request handoff');
   assert.equal(n.state.steered.length, 1);
-  assert.equal(n.state.steered[0].requestId, request.id);
+  assert.equal((await decodedDelivery((await read()).owner, join(n.root, 'viewer'), n.state.steered[0])).requestId, request.id);
   assert.equal(n.state.steered[0].stream, undefined);
   assert.equal((await read()).requests[request.id].nativeTurnId, 'terminal-work');
   assert.deepEqual(await events(), [], 'native queue must not replace steering');

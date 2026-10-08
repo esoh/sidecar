@@ -1,3 +1,4 @@
+import { decodedDelivery } from './support.ts';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { chmod, mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
@@ -88,7 +89,7 @@ test('simultaneous CLI opens reuse one app; stop and reopen retain pending work'
   const first = await cli('status', '--owner', key);
   const base = new URL(a.url).origin;
   const cookie = (await fetch(base)).headers.get('set-cookie')!.split(';')[0]!;
-  const request = await (await fetch(base + '/api/questions', { method: 'POST', headers: { Cookie: cookie, Origin: base, 'Content-Type': 'application/json' }, body: JSON.stringify({ documentId: a.documentId, text: 'Keep me', clientMessageId: 'keep' }) })).json();
+  const request = await (await fetch(base + '/api/questions', { method: 'POST', headers: { Cookie: cookie, Origin: base, 'Content-Type': 'application/json' }, body: JSON.stringify({ documentId: new URL(a.url).searchParams.get('document'), text: 'Keep me', clientMessageId: 'keep' }) })).json();
   const watcher = spawn(process.execPath, ['--import', tsx, cliPath, 'watch', '--owner', key], { env });
   t.after(() => watcher.kill());
   const event = await new Promise<string>((resolve, reject) => {
@@ -119,7 +120,7 @@ test('unavailable native queue reports a connection error while preserving the r
   const { startServer } = await import('../src/server.ts');
   const previous = process.env.PATH;
   process.env.PATH = root;
-  const server = await startServer({ owner, directory: root });
+  const server = await startServer({ owner, directory: root, stateRoot: root });
   t.after(async () => { process.env.PATH = previous; await server.close(); await rm(root, { recursive: true, force: true }); });
   const token = await readFile(join(root, 'agent-token'), 'utf8');
   const file = join(root, 'a.md'); await writeFile(file, '# A\n');
@@ -146,7 +147,7 @@ for (const agent of ['claude', 'codex'] as const) test(`large-context fallback r
   process.env.PATH = `${root}:${previousPath}`;
   process.env.CODEX_HOME = root; // No native daemon: exercise Codex stream setup failure.
   const directory = join(root, key);
-  const server = await startServer({ owner, directory });
+  const server = await startServer({ owner, directory, stateRoot: directory });
   t.after(async () => {
     if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
     process.env.PATH = previousPath;
@@ -161,13 +162,14 @@ for (const agent of ['claude', 'codex'] as const) test(`large-context fallback r
   const doc = await (await post('/agent/documents', { path: file })).json();
   const cookie = (await fetch(server.url)).headers.get('set-cookie')!.split(';')[0]!;
   const request = await (await fetch(server.url + '/api/questions', { method: 'POST', headers: { Cookie: cookie, Origin: server.url, 'Content-Type': 'application/json' }, body: JSON.stringify({ documentId: doc.id, text: question, clientMessageId: 'combined' }) })).json();
-  assert.deepEqual(await (await post(`/agent/requests/${request.id}/prepare`, {})).json(), { type: 'sidecar.request', ownerKey: key, requestId: request.id });
+  assert.deepEqual(await decodedDelivery(owner, directory, await (await post(`/agent/requests/${request.id}/prepare`, {})).json()), { type: 'sidecar.request', ownerKey: key, requestId: request.id });
   const run = async () => JSON.parse((await exec(process.execPath, ['--import', tsx, cliPath, 'request', request.id, '--owner', key, '--stream'], { env: { ...process.env, SIDECAR_STATE_DIR: root } })).stdout);
   const claimed = await run();
   assert.equal(claimed.claimStatus, 'claimed');
   assert.equal(claimed.request.text, question);
   assert.equal(claimed.document.markdown, markdown);
-  assert.equal(claimed.thread.id, request.threadId);
+  const { openAgentIds } = await import('../src/agent-ids.ts');
+  assert.equal(await (await openAgentIds(directory)).resolve(key, 't', claimed.thread.id), request.threadId);
   assert.ok(claimed.stream, 'one command must include the streaming result');
   if (agent === 'claude') {
     assert.equal(typeof claimed.stream.prefix, 'string');

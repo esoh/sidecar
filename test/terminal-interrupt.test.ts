@@ -1,3 +1,4 @@
+import { decodedDelivery } from './support.ts';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from 'node:http';
@@ -5,16 +6,15 @@ import { mkdtemp, mkdir, readFile, rm, writeFile, appendFile } from 'node:fs/pro
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { startServer } from '../src/server.ts';
 import { forwardHook } from '../src/cli.ts';
 
-// Native transports are disposable; the real observer, Claude hooks, watcher,
+// Native transports are disposable; the real observer, Claude hooks and inbox,
 // stream parser and durable store remain in the path under test.
 for (const agent of ['codex', 'claude'] as const) {
-  for (const phase of ['between messages', 'during the second message', 'with a complete final snapshot'] as const) {
+  for (const phase of ['between messages', 'during the second message', 'with a complete final snapshot', 'progress-only normal completion'] as const) {
     test(`${agent}: terminal interruption ${phase} preserves output and releases queued work`, { timeout: 10000 }, async t => {
       const root = await mkdtemp(join(tmpdir(), 's'));
       const owner = { agent, sessionId: randomUUID() }, key = `${agent}-${owner.sessionId}`, directory = join(root, key);
@@ -37,17 +37,15 @@ for (const agent of ['codex', 'claude'] as const) {
           if (m.method === 'thread/queue/list') socket.send(JSON.stringify({ id: m.id, result: { data: [], nextCursor: null } }));
         });
       });
-      const server = await startServer({ owner, directory, pollMs: 20 });
-      await writeFile(join(directory, 'runtime.json'), JSON.stringify({ url: server.url, instanceId: server.instanceId, ownerKey: key }));
+      const server = await startServer({ owner, directory, stateRoot: directory, pollMs: 20 });
+      await writeFile(join(directory, 'runtime.json'), JSON.stringify({ url: server.url, instanceId: server.instanceId, ownerKey: key, ownerAlias: server.ownerAlias }));
       const token = (await readFile(join(directory, 'agent-token'), 'utf8')).trim();
       const cookie = (await fetch(server.url)).headers.get('set-cookie')!.split(';')[0]!;
       const post = (path: string, body: unknown) => fetch(server.url + path, { method: 'POST', headers: { Cookie: cookie, Origin: server.url, 'X-Sidecar-Token': token }, body: JSON.stringify(body) });
       const state = async () => (await fetch(server.url + '/api/state', { headers: { Cookie: cookie } })).json();
-      const watcher = agent === 'claude' ? spawn(process.execPath, ['--import', import.meta.resolve('tsx'), new URL('../src/cli.ts', import.meta.url).pathname, 'watch', '--owner', key], { env: process.env }) : undefined;
-      let watched = '';
-      watcher?.stdout.on('data', chunk => { watched += chunk; });
+      let watched = '', tick = () => {};
       t.after(async () => {
-        watcher?.kill(); await server.close();
+        await server.close();
         for (const socket of sockets) socket.terminate();
         ws.close(); await new Promise<void>(resolve => native.close(() => resolve()));
         for (const [name, value] of Object.entries(previous)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
@@ -59,8 +57,13 @@ for (const agent of ['codex', 'claude'] as const) {
       };
       const eventCount = async (count: number) => {
         for (let i = 0; i < 200; i++) {
+          if (agent === 'claude') {
+            tick();
+            const result = await handlers.get('tool.call')(api, { tool: 'Read' }, async () => ({ result: 'original tool result' }));
+            for (const text of result.context ?? []) watched += text + '\n';
+          }
           const lines = (agent === 'codex' ? await readFile(deliveries, 'utf8') : watched).trim().split('\n').filter(Boolean);
-          if (lines.length >= count) return JSON.parse(lines[count - 1]);
+          if (lines.length >= count) return decodedDelivery(owner, directory, JSON.parse(lines[count - 1]));
           await delay(10);
         }
         assert.fail('Queued work was not delivered');
@@ -70,6 +73,8 @@ for (const agent of ['codex', 'claude'] as const) {
       register((name: string, handler: unknown) => handlers.set(name, handler));
       const api = {
         session: { id: async () => owner.sessionId },
+        clock: { every: (_ms: number, callback: () => void) => { tick = callback; return { cancel() {} }; } },
+        prompt: { submit: async ({ text }: { text: string }) => { watched += text + '\n'; await handlers.get('turn.start')(api, { text, turnId: 'idle-delivery' }, (e: unknown) => e); } },
         env: { get: async (name: string) => name === 'SIDECAR_STATE_DIR' ? root : undefined },
         fs: { read: (path: string) => readFile(path, 'utf8') },
         http: { fetch: async (url: string, options: RequestInit) => { const response = await fetch(url, options); return { ok: response.ok, text: await response.text() }; } },
@@ -84,10 +89,11 @@ for (const agent of ['codex', 'claude'] as const) {
           await forwardHook('claude', { session_id: owner.sessionId, hook_event_name: 'MessageDisplay', message_id: messageId, turn_id: `display-${turnId}`, index: 0, delta: text, final });
         }
       }
-      async function interrupt(turnId: string, answer: string) {
-        if (agent === 'codex') for (const socket of sockets) socket.send(JSON.stringify({ method: 'turn/completed', params: { threadId: owner.sessionId, turn: { id: turnId, status: 'interrupted', items: [{ id: 'last-message', type: 'agentMessage', text: answer }] } } }));
-        else await handlers.get('turn.complete')(api, { turnId, answer, isAborted: true }, (e: unknown) => e);
+      async function interrupt(turnId: string, answer: string, isAborted = true) {
+        if (agent === 'codex') for (const socket of sockets) socket.send(JSON.stringify({ method: 'turn/completed', params: { threadId: owner.sessionId, turn: { id: turnId, status: isAborted ? 'interrupted' : 'completed', items: [{ id: 'last-message', type: 'agentMessage', text: answer }] } } }));
+        else await handlers.get('turn.complete')(api, { turnId, answer, isAborted }, (e: unknown) => e);
       }
+      if (agent === 'claude') await handlers.get('turn.start')(api, { turnId: 'first-turn', text: 'CLI work' }, (e: unknown) => e);
       const file = join(root, 'doc.md'); await writeFile(file, '# Scratch document\n');
       const doc = await (await post('/agent/documents', { path: file })).json();
       const request = await (await post('/api/questions', { documentId: doc.id, text: 'Explain', clientMessageId: 'first' })).json();
@@ -102,6 +108,18 @@ for (const agent of ['codex', 'claude'] as const) {
       for (const lifecycle of ['agent-idle', 'agent-disconnected']) await post('/agent/lifecycle', { ownerKey: key, event: lifecycle });
       await interrupt('unrelated-turn', first);
       assert.equal((await state()).requests[request.id].status, 'claimed');
+      if (phase === 'progress-only normal completion') {
+        await interrupt('first-turn', first, false);
+        await delay(30);
+        const pending = await state();
+        assert.equal(pending.requests[request.id].status, 'claimed');
+        assert.equal(pending.requests[request.id].replyRecovery, undefined);
+        assert.equal(pending.stream.error, null);
+        await emit('result-turn', 'delegated-result', event.stream.prefix + 'Delegated result.' + event.stream.suffix);
+        const final = await waitFor(s => s.requests[request.id].status === 'completed');
+        assert.deepEqual(final.threads[request.threadId].messages.filter((m: any) => m.role === 'agent').map((m: any) => m.text), ['Message one is complete.', 'Delegated result.']);
+        return;
+      }
       let answer = first;
       if (phase !== 'between messages') {
         answer = event.stream.prefix + metadata + 'Message two is partly written';

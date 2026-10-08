@@ -147,7 +147,7 @@ test('simultaneous stream startup shares one observer and closes it with the app
     });
   });
   const directory = join(root, 'state');
-  const sidecar = await startServer({ owner, directory });
+  const sidecar = await startServer({ owner, directory, stateRoot: directory });
   const token = await readFile(join(directory, 'agent-token'), 'utf8');
   const cookie = (await fetch(sidecar.url)).headers.get('set-cookie')!.split(';')[0];
   const post = async (path: string, body: unknown) => fetch(sidecar.url + path, { method: 'POST', headers: { 'X-Sidecar-Token': token, Cookie: cookie, Origin: sidecar.url, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
