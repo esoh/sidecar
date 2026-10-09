@@ -1,4 +1,5 @@
 import { viewerPath, isGateway, libraryPath } from './viewer-path.ts';
+import { ViewerEvents } from './viewer-events.ts';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
@@ -328,7 +329,7 @@ function App() {
           const next = await api<ViewerState>('/api/state');
           if (stopped) return;
           if (generation !== connectionGeneration) { again = true; continue; }
-          // A slow history response must not rewind newer text/status received over SSE.
+          // A slow history response must not rewind newer text/status received over the live stream.
           if (!latestRuntime || next.runtimeRevision >= latestRuntime.runtimeRevision) {
             const { stateRevision, runtimeRevision, stream, streams, agentControl, activity, reset, connectionError } = next;
             latestRuntime = { stateRevision, runtimeRevision, stream, streams, agentControl, activity, reset, connectionError };
@@ -362,7 +363,7 @@ function App() {
         refreshing = false;
       }
     }
-    const events = new EventSource(viewerPath('/api/events?updates=1'));
+    const events = new ViewerEvents(viewerPath('/api/events?updates=1'));
     events.onopen = () => {
       // Revisions belong to one server lifetime; a reconnect may follow an upgrade.
       connectionGeneration++; latestRuntime = undefined;

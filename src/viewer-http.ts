@@ -1,4 +1,6 @@
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http';
+import type { Duplex } from 'node:stream';
+import { WebSocketServer, WebSocket } from 'ws';
 import { randomBytes, randomUUID, timingSafeEqual, createHash } from 'node:crypto';
 import { gzip } from 'node:zlib';
 import { networkInterfaces } from 'node:os';
@@ -71,6 +73,12 @@ export async function createViewerHost({ directory, port = 0, networkPort = 0, p
   await mkdir(directory, { recursive: true, mode: 0o700 });
   let closed = false, url = '';
   const viewerToken = randomBytes(32).toString('hex');
+  const upgrades = new WeakMap<ReturnType<typeof createServer>, Set<Duplex>>();
+  function disconnect(listener: ReturnType<typeof createServer> | undefined) {
+    if (!listener) return;
+    for (const socket of upgrades.get(listener) ?? []) socket.destroy();
+    listener.closeAllConnections();
+  }
   async function saveNetwork() {
     const path = join(directory, 'network.json'), temporary = `${path}.${randomUUID()}.tmp`;
     try { await writeFile(temporary, JSON.stringify({ enabled: !!lanServer, publicUrl }), { mode: 0o600, flag: 'wx' }); await rename(temporary, path); }
@@ -78,6 +86,63 @@ export async function createViewerHost({ directory, port = 0, networkPort = 0, p
   }
   function createListener(isLan = false) {
     const listener = createServer((request, response) => { void handle(request, response, isLan); });
+    const sockets = new Set<Duplex>(); upgrades.set(listener, sockets);
+    const webSockets = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: 1024 });
+    listener.on('close', () => webSockets.close());
+    listener.on('upgrade', (request, socket, head) => {
+      sockets.add(socket);
+      socket.once('close', () => sockets.delete(socket));
+      socket.on('error', () => socket.destroy());
+      const reject = (status: number) => {
+        if (!socket.destroyed && !socket.writableEnded) socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`, () => socket.destroy());
+      };
+      try {
+        const { target, origin, hasViewer } = authenticate(request, isLan);
+        if (request.method !== 'GET' || request.headers.origin !== origin) throw new DomainError('Origin required', 403);
+        if (!hasViewer) throw new DomainError('Viewer login required', isLan ? 401 : 403);
+        // Only viewer events may cross this bridge; never forward agent capabilities or arbitrary paths.
+        if (!/^\/(?:a\/o[1-9A-Z][0-9A-Z]*\/)?api\/events(?:\?updates=1)?$/.test(request.url ?? '')) throw new DomainError('Not found', 404);
+        let ws: WebSocket | undefined;
+        const upstream = httpRequest(url + target.pathname + '?updates=1', {
+          headers: { Cookie: `${cookieName}=${viewerToken}`, Origin: url },
+        });
+        const timeout = setTimeout(() => { reject(504); upstream.destroy(); }, 10000); timeout.unref();
+        socket.once('close', () => { clearTimeout(timeout); upstream.destroy(); });
+        upstream.on('error', () => { clearTimeout(timeout); if (ws) ws.terminate(); else reject(502); });
+        upstream.on('response', response => {
+          clearTimeout(timeout);
+          try {
+            // Credentials or exposure can change while the owner's stream is opening.
+            if (!authenticate(request, isLan).hasViewer) throw new DomainError('Viewer login required', isLan ? 401 : 403);
+            if (socket.destroyed) { response.destroy(); return; }
+            if (response.statusCode !== 200 || !response.headers['content-type']?.startsWith('text/event-stream')) {
+              reject(response.statusCode === 200 ? 502 : response.statusCode ?? 502); response.destroy(); return;
+            }
+            webSockets.handleUpgrade(request, socket, head, connected => {
+              ws = connected;
+              // The existing internal SSE stream preserves owner routing and incremental payloads.
+              response.setEncoding('utf8');
+              response.on('data', (chunk: string) => {
+                if (connected.bufferedAmount > 4 * 1024 * 1024) connected.terminate();
+                else if (connected.readyState === WebSocket.OPEN) connected.send(chunk);
+              });
+              response.on('close', () => connected.terminate());
+              response.on('error', () => connected.terminate());
+              let alive = true;
+              const heartbeat = setInterval(() => {
+                if (!alive) { connected.terminate(); return; }
+                alive = false; connected.ping();
+              }, 25000); heartbeat.unref();
+              connected.on('pong', () => { alive = true; });
+              connected.on('message', () => connected.close(1008, 'Read-only stream'));
+              connected.on('error', () => connected.terminate());
+              connected.once('close', () => { clearInterval(heartbeat); response.destroy(); upstream.destroy(); });
+            });
+          } catch (error) { reject(error instanceof DomainError ? error.status : 500); response.destroy(); }
+        });
+        upstream.end();
+      } catch (error) { reject(error instanceof DomainError ? error.status : error instanceof URIError ? 400 : 500); }
+    });
     listener.requestTimeout = 10000;
     listener.headersTimeout = 10000;
     return listener;
@@ -108,8 +173,8 @@ export async function createViewerHost({ directory, port = 0, networkPort = 0, p
       await rename(temporary, path);
     } finally { await rm(temporary, { force: true }); }
     lanAuth = next; failedLogins = 0;
-    // Revoke connected browsers too, so an old SSE connection cannot keep receiving updates.
-    lanServer?.closeAllConnections();
+    // Revoke open streams as well as cookies.
+    disconnect(lanServer);
   }
   const lanAddresses = () => [...new Set(Object.values(networkInterfaces()).flatMap(addresses =>
     addresses?.filter(address => address.family === 'IPv4' && !address.internal).map(address => address.address) ?? []))];
@@ -148,36 +213,41 @@ export async function createViewerHost({ directory, port = 0, networkPort = 0, p
         lanServer = listener;
       } else if (!enabled && lanServer) {
         const listener = lanServer; lanServer = undefined;
+        disconnect(listener);
         await closeListener(listener);
       }
       const next = enabled ? nextPublicUrl === undefined ? publicUrl : nextPublicUrl || null : null;
-      if (next !== publicUrl) { publicUrl = next; lanServer?.closeAllConnections(); }
+      if (next !== publicUrl) { publicUrl = next; disconnect(lanServer); }
       if (persistNetwork) await saveNetwork();
     });
     lanChange = change.catch(() => {});
     return change;
   }
+  function authenticate(request: IncomingMessage, isLan: boolean) {
+    if (closed) throw new DomainError('Sidecar is stopping. Reopen it from your agent.', 503);
+    const isTunnel = !!(isLan && publicUrl && request.headers.host === new URL(publicUrl).host);
+    // Only a loopback proxy for the explicitly allowed HTTPS origin can use this route.
+    // Forwarded headers never select an origin or grant localhost/agent privileges.
+    if (isTunnel && (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(request.socket.remoteAddress ?? '') || request.headers['x-forwarded-proto'] !== 'https'))
+      throw new DomainError('Use an HTTPS tunnel forwarded through localhost', 403);
+    const origin = isTunnel && publicUrl ? publicUrl : isLan ? `http://${request.headers.host}` : url;
+    if (isLan ? !isTunnel && !networkStatus(false).urls.includes(origin) : request.headers.host !== new URL(url).host) throw new DomainError('Invalid host', 403);
+    if (request.headers.origin !== undefined && request.headers.origin !== origin) throw new DomainError('Foreign origin', 403);
+    const target = new URL(request.url ?? '/', origin);
+    if (target.origin !== origin) throw new DomainError('Foreign request target', 403);
+    const path = decodeURIComponent(target.pathname);
+    const method = request.method ?? 'GET';
+    const name = isLan ? lanCookieName : cookieName;
+    const cookie = request.headers.cookie?.split(';').map(part => part.trim()).find(part => part.startsWith(`${name}=`))?.slice(name.length + 1);
+    const hasViewer = isLan ? !!lanAuth && sameSecret(cookie, lanAuth.token) : sameSecret(cookie, viewerToken);
+    return { target, path, method, origin, isTunnel, hasViewer };
+  }
   async function handle(request: IncomingMessage, response: ServerResponse, isLan: boolean) {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
-    response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
     try {
-      if (closed) throw new DomainError('Sidecar is stopping. Reopen it from your agent.', 503);
-      const isTunnel = !!(isLan && publicUrl && request.headers.host === new URL(publicUrl).host);
-      // Only a loopback proxy for the explicitly allowed HTTPS origin can use this route.
-      // Forwarded headers never select an origin or grant localhost/agent privileges.
-      if (isTunnel && (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(request.socket.remoteAddress ?? '') || request.headers['x-forwarded-proto'] !== 'https'))
-        throw new DomainError('Use an HTTPS tunnel forwarded through localhost', 403);
-      const origin = isTunnel && publicUrl ? publicUrl : isLan ? `http://${request.headers.host}` : url;
-      if (isLan ? !isTunnel && !networkStatus(false).urls.includes(origin) : request.headers.host !== new URL(url).host) throw new DomainError('Invalid host', 403);
-      if (request.headers.origin !== undefined && request.headers.origin !== origin) throw new DomainError('Foreign origin', 403);
-      const target = new URL(request.url ?? '/', origin);
-      if (target.origin !== origin) throw new DomainError('Foreign request target', 403);
-      let path = decodeURIComponent(target.pathname);
-      const method = request.method ?? 'GET';
-      const name = isLan ? lanCookieName : cookieName;
-      const cookie = request.headers.cookie?.split(';').map(part => part.trim()).find(part => part.startsWith(`${name}=`))?.slice(name.length + 1);
-      const hasViewer = isLan ? !!lanAuth && sameSecret(cookie, lanAuth.token) : sameSecret(cookie, viewerToken);
+      const { target, path, method, origin, isTunnel, hasViewer } = authenticate(request, isLan);
+      response.setHeader('Content-Security-Policy', `default-src 'self'; connect-src 'self' ${origin.replace(/^http/, 'ws')}; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'`);
       if (isLan && hasViewer) response.setHeader('Set-Cookie', networkCookie(isTunnel));
       async function unlockPage(error = '', status = 200) {
         response.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
@@ -238,8 +308,9 @@ export async function createViewerHost({ directory, port = 0, networkPort = 0, p
   } catch (error) { await close(); throw error; }
   async function close() {
     if (closed) return; closed = true;
+    for (const socket of upgrades.get(server) ?? []) socket.destroy();
     await Promise.all([closeListener(server), lanChange.then(async () => {
-      if (lanServer) { const listener = lanServer; lanServer = undefined; await closeListener(listener); }
+      if (lanServer) { const listener = lanServer; lanServer = undefined; disconnect(listener); await closeListener(listener); }
     })]);
   }
   return { url, close, networkStatus, setNetworkAccess };

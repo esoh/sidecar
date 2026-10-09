@@ -2,10 +2,34 @@ import { writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test, expect } from '@playwright/test';
 import { setupGateway } from './gateway-support.ts';
+import { startGateway } from '../src/gateway.ts';
 
 let f: Awaited<ReturnType<typeof setupGateway>>, cleanup: (() => Promise<void>)[];
 test.beforeEach(async () => { cleanup = []; f = await setupGateway({ after: fn => { cleanup.push(fn); } }); });
 test.afterEach(async () => { for (const fn of cleanup) await fn(); });
+
+test('seven shared-origin tabs can load documents and send a message without starving HTTP requests', async ({ context }) => {
+  test.setTimeout(30000);
+  const pages = await Promise.all(Array.from({ length: 7 }, () => context.newPage()));
+  cleanup.unshift(async () => { await Promise.all(pages.map(page => page.close())); });
+  for (const [index, page] of pages.entries()) {
+    const owner = f.owners[(index + 1) % 2];
+    await page.goto(`${f.gateway.url}/a/${owner.alias}/?document=${owner.doc.id}`);
+    await expect(page.getByRole('heading', { name: owner.owner.agent, exact: true })).toBeVisible();
+  }
+  const owner = f.owners[1], page = pages[6], input = page.getByLabel('Message', { exact: true });
+  await input.fill('Question from the seventh tab');
+  await input.press('Enter');
+  await expect(input).toHaveValue('');
+  let request: any;
+  await expect.poll(async () => {
+    request = Object.values<any>((await (await f.view(`/a/${owner.alias}/api/state`)).json()).requests).at(-1);
+    return request?.text;
+  }).toBe('Question from the seventh tab');
+  await owner.agentCall(`/agent/requests/${request.id}/claim`, {});
+  await owner.agentCall('/agent/replies', { requestId: request.id, documentId: owner.doc.id, threadId: request.threadId, text: 'The seventh tab works.' });
+  await expect(page.locator('.sidebar').getByText('The seventh tab works.', { exact: true })).toBeVisible();
+});
 
 test('prefixed document uses only its owner APIs and preserves its draft on reload', async ({ page, context }) => {
   const owner = f.owners[1], path = `/a/${owner.alias}/?document=${owner.doc.id}`;
@@ -18,6 +42,7 @@ test('prefixed document uses only its owner APIs and preserves its draft on relo
   const errors: string[] = [], apiPaths: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   page.on('request', request => { const url = new URL(request.url()); if (url.pathname.includes('/api/')) apiPaths.push(url.pathname); });
+  page.on('websocket', socket => apiPaths.push(new URL(socket.url()).pathname));
   await page.goto(f.gateway.url + path);
   await expect(page.getByRole('heading', { name: 'claude', exact: true })).toBeVisible();
   const input = page.getByRole('textbox', { name: 'Message', exact: true });
@@ -38,6 +63,39 @@ test('prefixed document uses only its owner APIs and preserves its draft on relo
   await page.getByLabel('Public HTTPS URL', { exact: true }).fill('https://sidecar.example');
   await page.getByRole('button', { name: 'Save URL', exact: true }).click();
   await expect(page.getByRole('link', { name: /^https:\/\/sidecar\.example/ })).toHaveAttribute('href', `https://sidecar.example${path}`);
+});
+
+test('a live tab reconnects after its owner restarts and keeps its unsent draft', async ({ page }) => {
+  const owner = f.owners[1], sockets: string[] = [];
+  page.on('websocket', socket => sockets.push(socket.url()));
+  await page.goto(`${f.gateway.url}/a/${owner.alias}/?document=${owner.doc.id}`);
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Keep this unsent draft');
+  await expect(page.getByRole('heading', { name: 'claude', exact: true })).toBeVisible();
+  await owner.stop();
+  await writeFile(join(owner.directory, 'review.md'), '# Reconnected document\n\nAn update while disconnected.');
+  await owner.restart();
+  await expect(page.getByRole('heading', { name: 'Reconnected document', exact: true })).toBeVisible();
+  await expect(input).toHaveValue('Keep this unsent draft');
+  expect(sockets.length).toBeGreaterThan(1);
+  expect(Object.keys((await (await f.view(`/a/${owner.alias}/api/state`)).json()).requests)).toHaveLength(0);
+});
+
+test('a local tab renews its login after a gateway restart without reloading or sending its draft', async ({ page }) => {
+  const owner = f.owners[1];
+  let snapshots = 0;
+  page.on('response', response => { if (response.ok() && new URL(response.url()).pathname.endsWith('/api/state')) snapshots++; });
+  await page.goto(`${f.gateway.url}/a/${owner.alias}/?document=${owner.doc.id}`);
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Keep this draft across gateway restart');
+  await expect(page.getByRole('heading', { name: 'claude', exact: true })).toBeVisible();
+  const before = snapshots;
+  await f.gateway.close();
+  const gateway = await startGateway({ stateRoot: f.root, port: Number(new URL(f.gateway.url).port), networkPort: 0 });
+  cleanup.unshift(() => gateway.close());
+  await expect.poll(() => snapshots).toBeGreaterThan(before);
+  await expect(input).toHaveValue('Keep this draft across gateway restart');
+  expect(Object.keys((await (await page.request.get(`${gateway.url}/a/${owner.alias}/api/state`)).json()).requests)).toHaveLength(0);
 });
 
 

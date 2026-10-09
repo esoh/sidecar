@@ -1,6 +1,6 @@
 # Sidecar on your own domain with Cloudflare Tunnel
 
-Use a locally managed **named tunnel** and a hostname you control. [Quick Tunnels do not support SSE](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/), which Sidecar needs for live updates. This guide uses generic placeholders; keep real domains, tunnel IDs, account details, credentials, and local paths outside the public repository.
+Use a locally managed **named tunnel** and a hostname you control. Sidecar's browser live updates use WebSockets through the protected gateway; the provider helper manages named tunnels with a stable hostname. This guide uses generic placeholders; keep real domains, tunnel IDs, account details, credentials, and local paths outside the public repository.
 
 For a full DNS setup using Universal SSL, choose a first-level hostname such as `sidecar.example.com`. Deeper names require additional certificate coverage; see [Universal SSL limitations](https://developers.cloudflare.com/ssl/edge-certificates/universal-ssl/limitations/).
 
