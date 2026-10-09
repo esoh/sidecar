@@ -70,6 +70,10 @@ function App() {
   const requestedDocument = new URL(location.href).searchParams.get('document');
   const documentId = requestedDocument ?? Object.keys(state?.documents ?? {})[0] ?? '';
   const current = state?.documents[documentId];
+  const [unreadCount, setUnreadCount] = useState(0);
+  useEffect(() => {
+    if (current && !closedDocument) document.title = `${unreadCount ? `(${unreadCount}) ` : ''}${current.title}`;
+  }, [current?.title, unreadCount, closedDocument]);
   const drafts = useQuestionDrafts(documentId);
   const floatingDrafts = useMemo<QuestionDrafts>(() => ({
     get: id => passageDrafts.current.get(id),
@@ -308,6 +312,16 @@ function App() {
     }
   }, [documentId]);
   useEffect(() => {
+    if (!documentId || closedDocument) return;
+    const key = `sidecar-closed-document:${documentId}`;
+    const showClosed = () => documentClosed({ documentId, threadIds: [], nextDocumentId: null });
+    const onStorage = (event: StorageEvent) => { if (event.key === key && event.newValue === '1') showClosed(); };
+    // A stopped viewer cannot broadcast closure; the library still updates its open tabs.
+    try { if (localStorage.getItem(key) === '1') showClosed(); } catch { /* Live viewer events still work without storage. */ }
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [documentId, closedDocument, documentClosed]);
+  useEffect(() => {
     if (closedDocument) return;
     let stopped = false,
       refreshing = false,
@@ -343,7 +357,6 @@ function App() {
           const id = requestedDocument ?? Object.keys(next.documents)[0] ?? '';
           const doc = next.documents[id];
           if (!doc) { setContent({ html: '', markdown: '', version: '' }); continue; }
-          document.title = doc.title;
           setDocumentError(doc.error ?? '');
           if (!version || (doc.version && version !== doc.version)) {
             try {
@@ -908,6 +921,7 @@ function App() {
           />
         )}
         <ConversationSidebar
+          onUnreadChange={setUnreadCount}
           documentId={documentId}
           threads={threads}
           activeId={activeThreadId ?? null}

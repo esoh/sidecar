@@ -6,7 +6,7 @@ import { openAgentIds, isAgentAlias } from './agent-ids.ts';
 import { readRuntime } from './agent.ts';
 import { DomainError } from './store.ts';
 import { readDocument } from './documents.ts';
-import { listLibrary, libraryDocument, closeLibraryDocument, recordDocumentOpen } from './library.ts';
+import { listLibrary, libraryDocument, closeLibraryDocument, recordDocumentOpen, removeEmptyLibrarySession } from './library.ts';
 import { readTunnelConfig } from './tunnel-config.ts';
 import { createViewerHost, bodyOf, json, type ViewerContext } from './viewer-http.ts';
 import { viewerHtml, serveViewerAsset, serveDocumentImage } from './viewer-assets.ts';
@@ -121,12 +121,17 @@ export async function startGateway({ stateRoot, port = 43120, networkPort = 4312
       if (key) library.sessions = library.sessions.filter(session => session.ownerKey === key);
       json(response, library); return;
     }
+    const agentEntry = /^\/api\/library\/([^/]+)$/.exec(path);
+    if (agentEntry && method === 'DELETE') {
+      if (key && agentEntry[1] !== key) throw new DomainError('Agent belongs to another session', 404);
+      await removeEmptyLibrarySession(stateRoot, agentEntry[1]); json(response, { ok: true }); return;
+    }
     const entry = /^\/api\/library\/([^/]+)\/documents\/([^/]+)(\/opened)?$/.exec(path);
     if (entry) {
       if (key && entry[1] !== key) throw new DomainError('Document belongs to another agent', 404);
       const document = await libraryDocument(stateRoot, entry[1], entry[2]);
       if (entry[3] && method === 'POST') { await recordDocumentOpen(join(stateRoot, entry[1]), document.id); json(response, { ok: true }); return; }
-      if (!entry[3] && method === 'DELETE') { json(response, await closeLibraryDocument(stateRoot, entry[1], document.id)); return; }
+      if (!entry[3] && method === 'DELETE') { json(response, await closeLibraryDocument(stateRoot, entry[1], document.id, target.searchParams.get('discardPending') === 'true')); return; }
       if (!entry[3] && method === 'GET') {
         const content = await readDocument(document.path);
         json(response, { ...content, title: document.userTitle ?? document.providedTitle ?? content.heading ?? basename(document.path) }); return;

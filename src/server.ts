@@ -426,7 +426,7 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
       await deliverCodex(request.id, notification);
       connectionError = null;
     } catch (error) {
-      if (!closed) {
+      if (!closed && store.read().requests[request.id]) {
         // A failed queue command may already have delivered. Do not automatically execute it twice.
         await store.update(state => {
           const current = state.requests[request.id];
@@ -615,9 +615,19 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
       documentId: request.documentId, thread: { id: request.threadId }, stream: markers,
       instruction: 'Follow the Sidecar skill. Reply recovery only: resend the existing answer using these exact markers. Do not repeat the original task, tools, or edits. If you cannot recover the answer, send an isError reply explaining that. Leave later queued messages for their own delivery.' });
   }
-  async function closeRegisteredDocument(id: string) {
-    return proposalService.withDocument(id, async () => {
-      const threadIds = await store.update(state => closeDocument(state, id));
+  async function closeRegisteredDocument(id: string, discardPending = false) {
+    return capture(() => proposalService.withDocument(id, async () => {
+      const { threadIds, requestIds } = await store.update(state => {
+        const requestIds = Object.values(state.requests).filter(request => request.documentId === id).map(request => request.id);
+        return { threadIds: closeDocument(state, id, discardPending), requestIds };
+      });
+      retireStreams();
+      if (owner.agent === 'codex' && requestIds.length) {
+        nativeCleanupVersion++;
+        for (const requestId of requestIds) pendingNativeCleanup.add(requestId);
+      }
+      if (directRequestId && requestIds.includes(directRequestId)) directRequestId = undefined;
+      if (stopping?.stream?.route.documentId === id) clearStop(true);
       // Finish reads that started before deletion so none can recreate a removed snapshot.
       await Promise.allSettled([...documentReads].filter(reading => reading.documentId === id).map(reading => reading.done));
       const cleanup = await cleanupClosedDocument(directory, id);
@@ -626,7 +636,7 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
       const result = { documentId: id, threadIds, nextDocumentId: Object.keys(store.read().documents)[0] ?? null, ...cleanup };
       for (const viewer of viewers.keys()) if (!viewer.destroyed) viewer.write(`event: document-closed\ndata: ${JSON.stringify(result)}\n\n`);
       changed(); return result;
-    });
+    }));
   }
 
   async function handle(request: IncomingMessage, response: ServerResponse, context: ViewerContext) {
@@ -668,9 +678,10 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
       }
       const libraryRead = path.match(/^\/api\/library\/([^/]+)\/documents\/([^/]+)$/);
       if (method === 'DELETE' && libraryRead) {
+        const discardPending = target.searchParams.get('discardPending') === 'true';
         json(response, libraryRead[1] === ownerKey(owner)
-          ? await closeRegisteredDocument(libraryRead[2])
-          : await closeLibraryDocument(dirname(directory), libraryRead[1], libraryRead[2]));
+          ? await closeRegisteredDocument(libraryRead[2], discardPending)
+          : await closeLibraryDocument(dirname(directory), libraryRead[1], libraryRead[2], discardPending));
         return;
       }
       if (method === 'GET' && libraryRead) {
@@ -718,7 +729,7 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
       }
       const closingDocument = path.match(/^\/api\/documents\/([^/]+)$/);
       if (method === 'DELETE' && closingDocument) {
-        json(response, await closeRegisteredDocument(closingDocument[1])); return;
+        json(response, await closeRegisteredDocument(closingDocument[1], target.searchParams.get('discardPending') === 'true')); return;
       }
 
       if (method === 'GET' && (path === '/api/events' || path === '/agent/events')) {
@@ -773,7 +784,7 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
       const agentClose = path.match(/^\/agent\/documents\/([^/]+)\/close$/);
       if (method === 'POST' && agentClose) {
         if (body.instanceId !== instanceId) throw new DomainError('The original viewer changed. Refresh the list and try again.', 409);
-        json(response, await closeRegisteredDocument(agentClose[1])); return;
+        json(response, await closeRegisteredDocument(agentClose[1], body.discardPending === undefined ? false : boolean(body, 'discardPending'))); return;
       }
       const proposalDecision = path.match(/^\/api\/proposals\/([^/]+)\/decision$/);
       if (method === 'POST' && proposalDecision) {
@@ -1057,7 +1068,7 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
       }
       if (method === 'POST' && path === '/agent/streams') {
         const route = { requestId: text(body, 'requestId'), documentId: text(body, 'documentId'), threadId: text(body, 'threadId') };
-        const markers = await startReplyStream(route);
+        const markers = await capture(() => startReplyStream(route));
         changed(); json(response, markers); return;
       }
       if (method === 'POST' && path === '/agent/stream-events') {

@@ -406,6 +406,7 @@ export function ConversationSidebar({
   messageJump,
   onQuoteMessage,
   onOpenFileQuote,
+  onUnreadChange,
 }: {
   documentId: string;
   threads: Thread[];
@@ -431,6 +432,7 @@ export function ConversationSidebar({
   messageJump: { id: string; sequence: number } | null;
   onQuoteMessage: (quote: MessageQuote) => void;
   onOpenFileQuote: (quote: FileQuote) => void;
+  onUnreadChange: (count: number) => void;
 }) {
   const [filter, setFilter] = useState('unresolved'),
     [search, setSearch] = useState(''),
@@ -460,6 +462,12 @@ export function ConversationSidebar({
     window.addEventListener('storage', syncRead);
     return () => window.removeEventListener('storage', syncRead);
   }, []);
+  const unreadThreads = new Set(threads.filter(thread => {
+    const reply = thread.messages.filter(message => message.role === 'agent').at(-1);
+    return reply && readReplies[thread.id] !== reply.id;
+  }).map(thread => thread.id));
+  const unreadCount = unreadThreads.size;
+  useEffect(() => { onUnreadChange(unreadCount); }, [unreadCount, onUnreadChange]);
   const creatingId = useRef<string | null>(null),
     createBusy = useRef(false);
   const positions = useRef(new Map<string, { top: number; isAtBottom: boolean }>());
@@ -814,9 +822,7 @@ export function ConversationSidebar({
                   </time>
                 </span>
                 <span className="preview-line">
-                  {thread.messages.some((message) => message.role === 'agent') &&
-                    readReplies[thread.id] !==
-                      thread.messages.filter((message) => message.role === 'agent').at(-1)?.id && (
+                  {unreadThreads.has(thread.id) && (
                       <span className="unread-dot" role="img" aria-label="Unread reply" title="Unread reply" />
                     )}
                   {inProgress.has(thread.id) ? (

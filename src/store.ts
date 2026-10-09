@@ -188,10 +188,10 @@ export function registerDocument(state: State, input: {path: string; title?: str
   if (input.title?.trim()) document.providedTitle = input.title.trim();
   return document;
 }
-export function closeDocument(state: State, documentId: string): string[] {
+export function closeDocument(state: State, documentId: string, discardPending = false): string[] {
   get(state.documents, documentId);
   const requests = Object.values(state.requests).filter(request => request.documentId === documentId);
-  if (requests.some(request => ['queued', 'claimed', 'uncertain'].includes(request.status)))
+  if (!discardPending && requests.some(request => ['queued', 'claimed', 'uncertain'].includes(request.status)))
     throw new DomainError('Wait for this document’s pending agent requests to finish before closing it.', 409);
   const threadIds = Object.values(state.threads).filter(thread => thread.documentId === documentId).map(thread => thread.id);
   for (const id of threadIds) delete state.threads[id];

@@ -1,11 +1,11 @@
-import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem } from '@plannotator/ui/components/ui/dropdown-menu';
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuRadioGroup, DropdownMenuRadioItem } from '@plannotator/ui/components/ui/dropdown-menu';
 import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
 import { sortDocuments, sortSessions, sessionTimes, type LibrarySort } from '../src/library-sort.ts';
 import { isGateway, viewerBase, viewerPath, libraryPath } from './viewer-path.ts';
 import { useEffect, useState } from 'react';
 import type { LibraryDocument, LibraryState, LibrarySession } from '../src/library.ts';
 import { api, errorText, type ClosedDocument } from './api.ts';
-import { confirmCloseDocument } from './close-document.ts';
+import { confirmCloseDocument, confirmCloseAllDocuments } from './close-document.ts';
 import { forgetDocument } from './useQuestionDrafts.ts';
 import { Icon, age } from './conversations.tsx';
 import { AgentSession } from './AgentSession.tsx';
@@ -40,17 +40,45 @@ export function DocumentLibrary() {
     } catch (reason) { setError(errorText(reason)); }
     finally { setLoading(false); }
   }
+  async function deleteDocument(owner: string, document: LibraryDocument, discardPending = false) {
+    const result = await api<ClosedDocument>(`/api/library/${encodeURIComponent(owner)}/documents/${encodeURIComponent(document.id)}${discardPending ? '?discardPending=true' : ''}`, undefined, 'DELETE');
+    const storageError = forgetDocument(result.documentId, result.threadIds);
+    setLibrary(current => current && { ...current, sessions: current.sessions.map(session => session.ownerKey === owner
+      ? { ...session, documents: session.documents.filter(item => item.id !== result.documentId) } : session).filter(session => isGateway || session.documents.length) });
+    return result.cleanupError ?? storageError;
+  }
   async function closeDocument(owner: string, document: LibraryDocument) {
     if (closing || !confirmCloseDocument(document.title)) return;
     setClosing(document.id); setError('');
+    try { setError(await deleteDocument(owner, document) ?? ''); }
+    catch (reason) { setError(errorText(reason)); }
+    finally { setClosing(null); }
+  }
+  async function removeAgent(session: LibrarySession) {
+    const label = session.sessionName ?? session.ownerAlias ?? session.owner.sessionId;
+    if (closing || !window.confirm(`Remove “${label}” from the agents list?\n\nThe agent session and files stay untouched. Opening a Sidecar document from this agent makes it appear again.`)) return;
+    setClosing(session.ownerKey); setError('');
     try {
-      const result = await api<ClosedDocument>(`/api/library/${encodeURIComponent(owner)}/documents/${encodeURIComponent(document.id)}`, undefined, 'DELETE');
-      const storageError = forgetDocument(result.documentId, result.threadIds);
-      setLibrary(current => current && { ...current, sessions: current.sessions.map(session => session.ownerKey === owner
-        ? { ...session, documents: session.documents.filter(item => item.id !== result.documentId) } : session).filter(session => isGateway || session.documents.length) });
-      setError(result.cleanupError ?? storageError ?? '');
+      await api(`/api/library/${encodeURIComponent(session.ownerKey)}`, undefined, 'DELETE');
+      await refresh();
     } catch (reason) { setError(errorText(reason)); }
     finally { setClosing(null); }
+  }
+  async function closeAllDocuments(session: LibrarySession) {
+    const label = `${session.sessionName ?? session.owner.agent} (${session.ownerAlias ?? session.owner.sessionId})`;
+    if (closing || !session.documents.length || !confirmCloseAllDocuments(label, session.documents.length)) return;
+    setClosing(session.ownerKey); setError('');
+    let closed = 0;
+    const errors: string[] = [];
+    try {
+      for (const document of session.documents) {
+        try {
+          const cleanupError = await deleteDocument(session.ownerKey, document, true); closed++;
+          if (cleanupError) errors.push(`${document.title}: ${cleanupError}`);
+        } catch (reason) { errors.push(`${document.title}: ${errorText(reason)}`); }
+      }
+      if (errors.length) setError(`Closed ${closed} of ${session.documents.length} documents. ${errors.join(' ')}`);
+    } finally { setClosing(null); }
   }
   useEffect(() => {
     void refresh();
@@ -87,16 +115,18 @@ export function DocumentLibrary() {
                   </DropdownMenuRadioGroup></DropdownMenuContent>
                 </DropdownMenu>
               </div>
-              {isAgentList ? sessions.map(session => <AgentRow key={session.ownerKey} session={session} now={now} onError={setError} />) : sessions.map(session => (
+              {isAgentList ? sessions.map(session => <AgentRow key={session.ownerKey} session={session} sort={sort} now={now} onError={setError} disabled={loading || !!closing} onCloseAll={() => { void closeAllDocuments(session); }} onRemove={() => { void removeAgent(session); }} />) : sessions.map(session => (
                 <section className="library-session" key={session.ownerKey} aria-label={`${session.owner.agent} ${session.owner.sessionId}`}>
-                  <header><AgentSession owner={session.owner} /><span className="library-session-id">{session.owner.sessionId.slice(0, 8)}</span></header>
+                  <header className="library-owner-header">
+                    <AgentIdentity session={session} details />
+                  </header>
                   {sortDocuments(session.documents, sort).map(document => (
                     <div className="library-document-row" key={document.id}>
                     <a className="library-document" href={session.url
                       ? `${session.url}/?document=${document.id}`
                       : `${isGateway && session.ownerAlias ? `/a/${session.ownerAlias}/` : '/'}?library=1&owner=${encodeURIComponent(session.ownerKey)}&document=${document.id}`}>
                       <span><strong>{document.title}</strong><small title={document.path}>{document.path}</small></span>
-                      <span className="library-document-meta"><span>{document.threadCount} {document.threadCount === 1 ? 'thread' : 'threads'} · {session.url ? 'Open' : 'Preview'}</span><span>Last opened {document.lastOpenedAt ? <time dateTime={new Date(document.lastOpenedAt).toISOString()} title={new Date(document.lastOpenedAt).toLocaleString()}>{age(document.lastOpenedAt, now)}{age(document.lastOpenedAt, now) === 'now' ? '' : ' ago'}</time> : '—'}</span></span>
+                      <span className="library-document-meta"><span>{document.threadCount} {document.threadCount === 1 ? 'thread' : 'threads'} · {session.url ? 'Open' : 'Preview'}</span><LibraryTime times={document} sort={sort} now={now} /></span>
                     </a>
                     <button className="icon-button library-document-close" aria-label={`Close “${document.title}”`} title="Close document" disabled={loading || !!closing} onClick={() => { void closeDocument(session.ownerKey, document); }}>
                       <Icon name="close" />
@@ -116,16 +146,42 @@ export function DocumentLibrary() {
   );
 }
 
-function AgentRow({ session, now, onError }: { session: LibrarySession; now: number; onError: (error: string) => void }) {
+function AgentRow({ session, sort, now, onError, disabled, onCloseAll, onRemove }: { session: LibrarySession; sort: LibrarySort; now: number; onError: (error: string) => void; disabled: boolean; onCloseAll: () => void; onRemove: () => void }) {
   const [copied, setCopied] = useState(false), times = sessionTimes(session);
   return <section className="library-agent-row library-session">
     <a className="library-document" href={`/a/${session.ownerAlias}/`}>
-      <span><strong>{session.owner.agent === 'claude' ? 'Claude' : 'Codex'}</strong><code className="library-session-id">{session.owner.sessionId}</code></span>
+      <AgentIdentity session={session} />
       <span className="library-document-meta"><span>{session.documents.length} {session.documents.length === 1 ? 'document' : 'documents'} · {session.url ? 'Running' : 'Stopped'}</span>
-        <span>Last opened {times.lastOpenedAt === null ? '—' : `${age(times.lastOpenedAt, now)}${age(times.lastOpenedAt, now) === 'now' ? '' : ' ago'}`}</span></span>
+        <LibraryTime times={times} sort={sort} now={now} /></span>
     </a>
-    <button className="icon-button" aria-label={copied ? 'Copied session ID' : 'Copy session ID'} title={copied ? 'Copied' : 'Copy session ID'} onClick={async () => {
-      if (await copyTextToClipboard(session.owner.sessionId)) setCopied(true); else onError('Could not copy the session ID.');
-    }}><Icon name={copied ? 'check' : 'copy'} /></button>
+    <DropdownMenu onOpenChange={open => { if (open) setCopied(false); }}>
+      <DropdownMenuTrigger className="icon-button" aria-label="Agent actions" title="Agent actions" disabled={disabled}><Icon name="more" /></DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="thread-filter-menu">
+        <DropdownMenuItem closeOnClick={false} onClick={async () => {
+          if (await copyTextToClipboard(session.owner.sessionId)) setCopied(true); else onError('Could not copy the session ID.');
+        }}><Icon name={copied ? 'check' : 'copy'} />{copied ? 'Copied session ID' : 'Copy session ID'}</DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem variant="destructive" onClick={session.documents.length ? onCloseAll : onRemove}><Icon name="close" />{session.documents.length ? 'Close all documents' : 'Remove agent'}</DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   </section>;
+}
+
+function AgentIdentity({ session, details = false }: { session: LibrarySession; details?: boolean }) {
+  const workspace = sortDocuments(session.documents, 'opened')[0]?.workspace;
+  const name = session.sessionName || workspace?.branch || 'Unnamed session';
+  return <span className="library-agent-identity">
+    <strong className="library-agent-name" title={name}>{name}</strong>
+    <span className="library-agent-meta">
+      {session.sessionName && workspace?.branch && <span className="library-agent-branch" title={workspace.branch}>{workspace.branch}</span>}
+      {details ? <AgentSession owner={session.owner} /> : <span>{session.owner.agent === 'claude' ? 'Claude' : 'Codex'}</span>}
+      <code className="library-session-id" title={session.owner.sessionId}>{!details && session.ownerAlias && `${session.ownerAlias}:`}{session.owner.sessionId.slice(0, 3)}…{session.owner.sessionId.slice(-3)}</code>
+    </span>
+    {workspace && <small className="library-agent-context"><span title={workspace.path}>{workspace.displayPath}</span></small>}
+  </span>;
+}
+
+function LibraryTime({ times, sort, now }: { times: Pick<LibraryDocument, 'lastOpenedAt' | 'updatedAt'>; sort: LibrarySort; now: number }) {
+  const time = sort === 'activity' ? times.updatedAt : times.lastOpenedAt, relative = time ? age(time, now) : null;
+  return <span>{sort === 'activity' ? 'Last message:' : 'Last opened'} {time ? <time dateTime={new Date(time).toISOString()} title={new Date(time).toLocaleString()}>{relative}{sort === 'opened' && relative !== 'now' ? ' ago' : ''}</time> : '—'}</span>;
 }
