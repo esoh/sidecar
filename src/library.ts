@@ -51,6 +51,12 @@ export async function readLibrarySession(root: string, key: string) {
   if (ownerKey(state.owner) !== ownerKey(owner)) throw new DomainError('Saved Sidecar session is unavailable', 404);
   return state;
 }
+export async function removeEmptyLibrarySession(root: string, key: string) {
+  const state = await readLibrarySession(root, key);
+  if (Object.keys(state.documents).length) throw new DomainError('Close all documents before removing this agent.', 409);
+  // Only suppress empty entries, so a concurrently opened document always remains visible.
+  await writeFile(join(root, ownerKey(state.owner), 'library-hidden'), '', { mode: 0o600 });
+}
 export async function libraryDocument(root: string, key: string, id: string) {
   return get((await readLibrarySession(root, key)).documents, id);
 }
@@ -65,8 +71,12 @@ export async function listLibrary(root: string, includeEmpty = false): Promise<L
   const sessions = await Promise.all(entries.filter(entry => entry.isDirectory() && /^(codex|claude)-[0-9a-f-]{36}$/.test(entry.name)).map(async entry => {
     try {
       const state = await readLibrarySession(root, entry.name);
-      if (!includeEmpty && !Object.keys(state.documents).length) return null;
       const directory = join(root, entry.name);
+      if (!Object.keys(state.documents).length) {
+        if (!includeEmpty) return null;
+        const hidden = await stat(join(directory, 'library-hidden')).then(() => true).catch(error => { if (error.code === 'ENOENT') return false; throw error; });
+        if (hidden) return null;
+      }
       const status = await appStatus(entry.name, directory);
       const url = status.state === 'running' ? (await readRuntime(entry.name, directory)).url : null;
       const documents: LibraryDocument[] = await Promise.all(Object.values(state.documents).map(async document => {

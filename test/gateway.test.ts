@@ -160,3 +160,27 @@ test('Stop and Reset reach only the selected owner; sibling restart leaves its s
   const update = await Promise.race([reader.read(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Sibling interrupted SSE')), 1000).unref())]);
   assert.equal(update.done, false); abort.abort();
 });
+
+for (const running of [true, false]) test(`empty ${running ? 'live' : 'stopped'} agents can be removed without deleting data and reappear with documents`, async t => {
+  const f = await setupGateway(t), [other, owner] = f.owners;
+  const target = `/api/library/${owner.key}`;
+  assert.equal((await f.view(target, undefined, 'DELETE')).status, 409);
+  assert.equal((await f.view(`/a/${other.alias}${target}`, undefined, 'DELETE')).status, 404);
+  assert.equal((await fetch(f.gateway.url + target, { method: 'DELETE' })).status, 403);
+  assert.equal((await f.view(`${target}/documents/${owner.doc.id}`, undefined, 'DELETE')).status, 200);
+  if (!running) await owner.stop();
+  const saved = await readFile(join(owner.directory, 'state.json'), 'utf8');
+  const registry = await readFile(join(f.root, 'agent-ids/registry.json'), 'utf8');
+  const source = await readFile(owner.doc.path, 'utf8');
+  assert.equal((await f.view(target, undefined, 'DELETE')).status, 200);
+  assert.equal((await f.view(target, undefined, 'DELETE')).status, 200);
+  const list = async () => (await (await f.view('/api/library')).json()).sessions;
+  assert.deepEqual((await list()).map((session: any) => session.ownerKey), [other.key]);
+  assert.equal(await readFile(join(owner.directory, 'state.json'), 'utf8'), saved);
+  assert.equal(await readFile(join(f.root, 'agent-ids/registry.json'), 'utf8'), registry);
+  assert.equal(await readFile(owner.doc.path, 'utf8'), source);
+  await owner.restart();
+  assert.equal((await list()).length, 1);
+  assert.equal((await owner.agentCall('/agent/documents', { path: owner.doc.path })).status, 200);
+  assert.equal((await list()).find((session: any) => session.ownerKey === owner.key)?.ownerAlias, owner.alias);
+});

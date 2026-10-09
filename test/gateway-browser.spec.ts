@@ -317,7 +317,17 @@ for (const running of [true, false]) test(`agent menu confirms closing all ${run
   await expect(viewer.getByRole('heading', { name: 'Document closed', exact: true })).toBeVisible();
   expect(await viewer.evaluate(() => Object.entries(localStorage).some(([key, value]) => key.startsWith('sidecar-draft:') && value.includes('Unsent draft')))).toBe(false);
   await row.getByRole('button', { name: 'Agent actions' }).click();
-  await expect(page.getByRole('menuitem', { name: 'Close all documents' })).toBeDisabled();
+  page.once('dialog', dialog => dialog.dismiss());
+  await page.getByRole('menuitem', { name: 'Remove agent' }).click();
+  await expect(row).toContainText('0 documents');
+  await row.getByRole('button', { name: 'Agent actions' }).click();
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('menuitem', { name: 'Remove agent' }).click();
+  await expect(row).toHaveCount(0);
+  await page.reload();
+  await expect(row).toHaveCount(0);
+  expect(JSON.parse(await readFile(join(owner.directory, 'state.json'), 'utf8'))).toEqual(saved);
+  expect(await readFile(join(f.root, 'agent-ids', 'registry.json'), 'utf8')).toBe(registry);
   await viewer.close();
 });
 

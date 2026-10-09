@@ -54,6 +54,16 @@ export function DocumentLibrary() {
     catch (reason) { setError(errorText(reason)); }
     finally { setClosing(null); }
   }
+  async function removeAgent(session: LibrarySession) {
+    const label = session.sessionName ?? session.ownerAlias ?? session.owner.sessionId;
+    if (closing || !window.confirm(`Remove “${label}” from the agents list?\n\nThe agent session and files stay untouched. Opening a Sidecar document from this agent makes it appear again.`)) return;
+    setClosing(session.ownerKey); setError('');
+    try {
+      await api(`/api/library/${encodeURIComponent(session.ownerKey)}`, undefined, 'DELETE');
+      await refresh();
+    } catch (reason) { setError(errorText(reason)); }
+    finally { setClosing(null); }
+  }
   async function closeAllDocuments(session: LibrarySession) {
     const label = `${session.sessionName ?? session.owner.agent} (${session.ownerAlias ?? session.owner.sessionId})`;
     if (closing || !session.documents.length || !confirmCloseAllDocuments(label, session.documents.length)) return;
@@ -105,7 +115,7 @@ export function DocumentLibrary() {
                   </DropdownMenuRadioGroup></DropdownMenuContent>
                 </DropdownMenu>
               </div>
-              {isAgentList ? sessions.map(session => <AgentRow key={session.ownerKey} session={session} sort={sort} now={now} onError={setError} disabled={loading || !!closing} onCloseAll={() => { void closeAllDocuments(session); }} />) : sessions.map(session => (
+              {isAgentList ? sessions.map(session => <AgentRow key={session.ownerKey} session={session} sort={sort} now={now} onError={setError} disabled={loading || !!closing} onCloseAll={() => { void closeAllDocuments(session); }} onRemove={() => { void removeAgent(session); }} />) : sessions.map(session => (
                 <section className="library-session" key={session.ownerKey} aria-label={`${session.owner.agent} ${session.owner.sessionId}`}>
                   <header className="library-owner-header">
                     <AgentIdentity session={session} details />
@@ -136,7 +146,7 @@ export function DocumentLibrary() {
   );
 }
 
-function AgentRow({ session, sort, now, onError, disabled, onCloseAll }: { session: LibrarySession; sort: LibrarySort; now: number; onError: (error: string) => void; disabled: boolean; onCloseAll: () => void }) {
+function AgentRow({ session, sort, now, onError, disabled, onCloseAll, onRemove }: { session: LibrarySession; sort: LibrarySort; now: number; onError: (error: string) => void; disabled: boolean; onCloseAll: () => void; onRemove: () => void }) {
   const [copied, setCopied] = useState(false), times = sessionTimes(session);
   return <section className="library-agent-row library-session">
     <a className="library-document" href={`/a/${session.ownerAlias}/`}>
@@ -151,7 +161,7 @@ function AgentRow({ session, sort, now, onError, disabled, onCloseAll }: { sessi
           if (await copyTextToClipboard(session.owner.sessionId)) setCopied(true); else onError('Could not copy the session ID.');
         }}><Icon name={copied ? 'check' : 'copy'} />{copied ? 'Copied session ID' : 'Copy session ID'}</DropdownMenuItem>
         <DropdownMenuSeparator />
-        <DropdownMenuItem variant="destructive" disabled={!session.documents.length} onClick={onCloseAll}><Icon name="close" />Close all documents</DropdownMenuItem>
+        <DropdownMenuItem variant="destructive" onClick={session.documents.length ? onCloseAll : onRemove}><Icon name="close" />{session.documents.length ? 'Close all documents' : 'Remove agent'}</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   </section>;
