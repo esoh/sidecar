@@ -9,7 +9,7 @@ import type { FileQuote } from '../src/quote.ts';
 import { ChangedFiles } from './ChangedFiles.tsx';
 import type { Comparison, WorkspaceFileChange } from './useComparison.ts';
 
-type WindowPosition = { id: string; x: number; y: number; width: number; height: number; layer: number };
+type WindowPosition = { id: string; x: number; y: number; width: number; height: number; layer: number; zoom: number };
 type Point = { x: number; y: number };
 type DockPreview = { id: string; index: number };
 type WindowEntry = { id: string; label: string } & (
@@ -30,9 +30,9 @@ function clampWindow(value: WindowPosition): WindowPosition {
   return { ...value, width, height, x: Math.max(margin, Math.min(value.x, innerWidth - width - margin)), y: Math.max(margin, Math.min(value.y, innerHeight - height - margin)) };
 }
 
-export function PinnedWindows({ workspace, threads, files, root, documentId, comparison, changesScope, openRequests, onOpened, onCloseFile, onCloseChanges, onOpenChange, onQuoteFile, onRevealFile, onGoToMessage, ...contentProps }: {
+export function PinnedWindows({ workspace, threads, files, root, documentId, comparison, changesScope, openRequests, onOpened, onCloseFile, onSetFileScripts, onCloseChanges, onOpenChange, onQuoteFile, onRevealFile, onGoToMessage, ...contentProps }: {
   workspace: RefObject<HTMLDivElement | null>; threads: Thread[]; documentId: string;
-  files: OpenFile[]; root?: string; onCloseFile: (id: string) => void;
+  files: OpenFile[]; root?: string; onCloseFile: (id: string) => void; onSetFileScripts: (id: string, enabled: boolean) => void;
   comparison: Comparison; changesScope: string | null; onCloseChanges: () => void; onOpenChange: (change: WorkspaceFileChange) => void;
   onQuoteFile: (quote: FileQuote) => void;
   onRevealFile: (path: string) => void;
@@ -95,7 +95,7 @@ export function PinnedWindows({ workspace, threads, files, root, documentId, com
       const nextLayer = layers.get(id) ?? 0;
       if (current.some(window => window.id === id)) return current.map(window => window.id === id ? { ...window, layer: nextLayer } : window);
       const width = isWide(id) ? Math.min(620, Math.max(240, (bounds?.width ?? innerWidth) - 40)) : 410;
-      const window = clampWindow({ id, x: (bounds?.right ?? innerWidth) - width - 20 + current.length % 4 * 18, y: 80 + current.length % 4 * 24, width, height: isWide(id) ? 480 : 330, layer: nextLayer });
+      const window = clampWindow({ id, x: (bounds?.right ?? innerWidth) - width - 20 + current.length % 4 * 18, y: 80 + current.length % 4 * 24, width, height: isWide(id) ? 480 : 330, layer: nextLayer, zoom: 100 });
       // Single-window mode limits content windows; the Changed files list stays open beside one.
       return [...(windowMode === 'single' ? current.filter(other => (other.id === changesWindowId) !== (id === changesWindowId)) : current), window];
     }, previous));
@@ -202,9 +202,18 @@ export function PinnedWindows({ workspace, threads, files, root, documentId, com
   const displayedId = preview?.id ?? activeId;
   const isDockOpen = expanded || !!preview;
   const displayTabs = preview ? visibleDock.filter(id => id !== preview.id) : visibleDock;
+  const zoomFor = (id: string | null) => windows.find(value => value.id === id)?.zoom ?? 100;
+  const zoomControls = (id: string) => {
+    const zoom = zoomFor(id);
+    return <div className="window-zoom" role="group" aria-label="Content zoom">
+      <button aria-label="Zoom out" title="Zoom out" disabled={zoom <= 25} onClick={() => updateWindow(id, { zoom: Math.max(25, zoom - 25) })}>−</button>
+      <button className="window-zoom-reset" aria-label="Reset content zoom" title="Reset zoom to 100%" disabled={zoom === 100} onClick={() => updateWindow(id, { zoom: 100 })}>{zoom}%</button>
+      <button aria-label="Zoom in" title="Zoom in" disabled={zoom >= 200} onClick={() => updateWindow(id, { zoom: Math.min(200, zoom + 25) })}>+</button>
+    </div>;
+  };
   const renderContent = (id: string, prefix: string) => {
     const entry = find(id);
-    if (entry?.kind === 'file') return <FilePreview key={entry.id} {...entry.file} documentId={documentId} root={entry.file.root ?? root} comparison={comparison} onQuoteFile={onQuoteFile} onRevealFile={onRevealFile} />;
+    if (entry?.kind === 'file') return <FilePreview key={entry.id} {...entry.file} documentId={documentId} root={entry.file.root ?? root} comparison={comparison} onQuoteFile={onQuoteFile} onRevealFile={onRevealFile} onSetScripts={enabled => onSetFileScripts(entry.id, enabled)} />;
     if (entry?.kind === 'changes') return <ChangedFiles scope={entry.scope} comparison={comparison} onOpenFile={onOpenChange} />;
     return entry && <div className={`message ${entry.message.role}`}><MessageContent {...contentProps} {...entry} documentId={documentId} prefix={prefix} onGoToMessage={onGoToMessage} /></div>;
   };
@@ -219,11 +228,12 @@ export function PinnedWindows({ workspace, threads, files, root, documentId, com
             if (delta) { event.preventDefault(); updateWindow(value.id, event.shiftKey ? { width: Math.max(240, value.width + delta[0]), height: Math.max(160, value.height + delta[1]) } : { x: value.x + delta[0], y: value.y + delta[1] }); }
           }}>
           <div className="reference-grip" title={filePath(value.id)}>{symbol(value.id)}<span>{labels.get(value.id)}</span></div>
+          {zoomControls(value.id)}
           <button aria-label="Minimize window" title="Minimize window" onClick={() => { moveIn(value.id); setExpanded(false); }}><Icon name="minimize" /></button>
           <button aria-label="Dock window" title="Dock window" onClick={() => { moveIn(value.id); setExpanded(true); }}><Icon name="dock" /></button>
           <button aria-label={chrome[kindOf(value.id)].close} title="Close window" onClick={() => close(value.id)}><Icon name="close" /></button>
         </header>
-        <div className="reference-body">{renderContent(value.id, 'reference')}</div>
+        <div className="reference-body" style={{ zoom: value.zoom / 100 }}>{renderContent(value.id, 'reference')}</div>
         {kindOf(value.id) === 'message' && <footer className="reference-footer"><button onClick={() => onGoToMessage(value.id)}>Go to message<Icon name="arrowUpRight" /></button></footer>}
         {['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'].map(edge => <div key={edge} className={`resize-edge resize-${edge}`} onPointerDown={event => resize(event, value, edge)} />)}
       </section>
@@ -261,10 +271,11 @@ export function PinnedWindows({ workspace, threads, files, root, documentId, com
               })()}
             </div>)}
           </div>
+          {displayedId && !preview && zoomControls(displayedId)}
           <button className="dock-toggle" aria-label="Collapse dock" aria-expanded="true" onClick={() => setExpanded(false)}><Icon name="chevron" /></button>
         </> : <button className="dock-collapsed" aria-label="Expand dock" aria-expanded="false" onClick={() => setExpanded(true)}><Icon name="dock" /><span>{visibleDock.length} {visibleDock.length === 1 ? 'window' : 'windows'}</span><Icon name="chevron" /></button>}
       </header>
-      {isDockOpen && <div className="reference-body" role="tabpanel" tabIndex={-1} id={`dock-panel-${displayedId}`} aria-labelledby={preview ? undefined : `dock-tab-${displayedId}`} aria-label={preview ? 'Dock preview' : undefined}>
+      {isDockOpen && <div className="reference-body" style={{ zoom: zoomFor(displayedId) / 100 }} role="tabpanel" tabIndex={-1} id={`dock-panel-${displayedId}`} aria-labelledby={preview ? undefined : `dock-tab-${displayedId}`} aria-label={preview ? 'Dock preview' : undefined}>
         {displayedId ? renderContent(displayedId, 'dock') : <p className="dock-empty">Drop a window here</p>}
       </div>}
       {isDockOpen && displayedId && !preview && kindOf(displayedId) === 'message' && <footer className="reference-footer"><button onClick={() => onGoToMessage(displayedId)}>Go to message<Icon name="arrowUpRight" /></button></footer>}

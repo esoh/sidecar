@@ -60,7 +60,7 @@ export async function startGateway({ stateRoot, port = 43120, networkPort = 4312
       const outgoing = httpRequest(upstream.url + target, { method: request.method, headers }, incoming => {
         outgoing.setTimeout(0);
         response.statusCode = incoming.statusCode ?? 502;
-        for (const name of ['content-type', 'content-length', 'content-encoding', 'cache-control', 'etag', 'vary', 'content-security-policy', 'content-disposition', 'retry-after']) {
+        for (const name of ['content-type', 'content-length', 'content-encoding', 'cache-control', 'etag', 'vary', 'content-security-policy', 'content-disposition', 'referrer-policy', 'retry-after']) {
           const value = incoming.headers[name]; if (value !== undefined) response.setHeader(name, value);
         }
         response.flushHeaders(); incoming.pipe(response);

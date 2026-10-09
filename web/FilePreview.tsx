@@ -3,6 +3,7 @@ import { guideLanguageForPath } from '@plannotator/core/guide-format';
 import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
 import type { CodeFileData, FileDiffData, FilePreviewData } from '../src/files.ts';
 import { api, errorText } from './api.ts';
+import { viewerPath } from './viewer-path.ts';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
 import type { FileQuote } from '../src/quote.ts';
 import { excludedSelection, selectionText } from './selection.ts';
@@ -17,11 +18,11 @@ function fenced(language: string, text: string) {
   return `${fence}${language}\n${text}\n${fence}\n`;
 }
 
-export type OpenFile = { id: string; path: string; root?: string; kind: 'doc' | 'code'; refusal?: string; revision: number };
+export type OpenFile = { id: string; path: string; root?: string; kind: 'doc' | 'code'; refusal?: string; fragment?: string; areScriptsEnabled?: boolean; revision: number };
 
-export function FilePreview({ documentId, root, path, kind, refusal, revision, comparison, onQuoteFile, onRevealFile }: {
+export function FilePreview({ documentId, root, path, kind, refusal, revision, fragment, areScriptsEnabled = false, comparison, onQuoteFile, onRevealFile, onSetScripts }: {
   documentId: string; root?: string; comparison: Comparison; onQuoteFile: (quote: FileQuote) => void;
-  onRevealFile: (path: string) => void;
+  onRevealFile: (path: string) => void; onSetScripts: (enabled: boolean) => void;
 } & OpenFile) {
   const anchorPrefix = useId();
   const [preview, setPreview] = useState<FilePreviewData | null>(null),
@@ -100,8 +101,9 @@ export function FilePreview({ documentId, root, path, kind, refusal, revision, c
   ) : sourceLanguage ? (
     <CodeFileView path={path} contents={preview.text} onQuote={quote => root && onQuoteFile({ path: `${root.replace(/\/$/, '')}/${preview.path}`, kind, ...quote })} />
   ) : markdown === null ? (
-    // Sidecar's CSP is inherited by srcdoc, so the preview stays static: no scripts, opaque origin.
-    <iframe className="file-preview-frame" title={`Preview of ${path}`} sandbox="" srcDoc={preview.text} />
+    // A separate response keeps inline-script permission out of the main viewer's CSP.
+    <iframe key={`${areScriptsEnabled}:${revision}:${fragment ?? ''}`} className="file-preview-frame" title={`Preview of ${path}`} sandbox={areScriptsEnabled ? 'allow-scripts' : ''} referrerPolicy="no-referrer"
+      src={viewerPath(`/api/files/html?document=${encodeURIComponent(documentId)}&path=${encodeURIComponent(path)}${root ? `&directory=${encodeURIComponent(root)}` : ''}${areScriptsEnabled ? '&scripts=1' : ''}`) + (fragment ?? '')} />
   ) : (
     <article onMouseUp={event => capture(event.currentTarget)} onTouchEnd={event => capture(event.currentTarget)} onKeyUp={event => { if (event.key === 'Shift' || event.key.startsWith('Arrow')) capture(event.currentTarget); }}>
       {/* An empty document ID keeps relative images from resolving against the open document's folder. */}
@@ -113,6 +115,7 @@ export function FilePreview({ documentId, root, path, kind, refusal, revision, c
       <div className="file-preview-path">
         <button className="file-reveal" title="Show in file browser" aria-label="Show in file browser" onClick={() => root && onRevealFile(`${root.replace(/\/$/, '')}/${path}`)}><code>{path}</code></button>
         {canDiff && <label className="file-diff-toggle"><input type="checkbox" checked={diffOn} onChange={event => setShowDiff(event.target.checked)} />Show diff</label>}
+        {renderAs === 'html' && !isSource && !diffOn && <label className="file-diff-toggle" title="Only enable for trusted HTML. Blocks external resources and viewer access, but scripts can navigate their own frame."><input type="checkbox" checked={areScriptsEnabled} onChange={event => onSetScripts(event.target.checked)} />Run scripts</label>}
         <span>Read-only</span>
       </div>
       {!diffOn ? plain : diff ? diffView : diffError ? <><p role="alert">Diff unavailable: {diffError}</p>{plain}</> : <p role="status">Loading diff…</p>}

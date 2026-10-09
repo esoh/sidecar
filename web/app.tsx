@@ -219,7 +219,7 @@ function App() {
     setComposing(false);
     setChoices(null);
   }, []);
-  const openPreview = useCallback((path: string, refusal?: string, kind: OpenFile['kind'] = 'doc', root = current?.workspace) => {
+  const openPreview = useCallback((path: string, refusal?: string, kind: OpenFile['kind'] = 'doc', root = current?.workspace, fragment?: string) => {
     // Keep passage drafts; file windows cannot attach selections to the main document.
     clearPendingSelection();
     window.getSelection()?.removeAllRanges();
@@ -228,7 +228,7 @@ function App() {
     const id = `file:${absolutePath}`;
     setFiles(previous => {
       const existing = previous.find(file => file.id === id);
-      const file = { id, path, root, kind, refusal, revision: (existing?.revision ?? 0) + 1 };
+      const file = { id, path, root, kind, refusal, fragment, areScriptsEnabled: existing?.areScriptsEnabled, revision: (existing?.revision ?? 0) + 1 };
       return existing ? previous.map(value => value.id === id ? file : value) : [...previous, file];
     });
     setOpenPins(previous => [...previous, id]);
@@ -253,13 +253,13 @@ function App() {
       : current?.workspace && insideRoot(path, current.workspace) ? current.workspace : path.slice(0, path.lastIndexOf('/')) || '/';
     void changeVisibleRoot(root, path);
   }
-  const openAbsoluteFile = useCallback(async (absolutePath: string, kind?: OpenFile['kind']) => {
+  const openAbsoluteFile = useCallback(async (absolutePath: string, kind?: OpenFile['kind'], fragment?: string) => {
     const path = absolutePath.replace(/^\/\/+/, '/');
     const sourceRoot = browserRoot && insideRoot(path, browserRoot) ? browserRoot
       : current?.workspace && insideRoot(path, current.workspace) ? current.workspace : path.slice(0, path.lastIndexOf('/')) || '/';
     try {
       const root = await allowRoot(sourceRoot);
-      openPreview(path.slice(sourceRoot.replace(/\/$/, '').length + 1), undefined, kind ?? (isAnnotatableDocPath(path) ? 'doc' : 'code'), root);
+      openPreview(path.slice(sourceRoot.replace(/\/$/, '').length + 1), undefined, kind ?? (isAnnotatableDocPath(path) ? 'doc' : 'code'), root, fragment);
     } catch (reason) { setError(errorText(reason)); }
   }, [browserRoot, current?.workspace, allowRoot, openPreview]);
   // The Changed files window is a singleton: asking again retargets its scope and raises it.
@@ -281,10 +281,11 @@ function App() {
   };
   const handleLink = useRef<OpenWorkspaceLink>(() => undefined);
   handleLink.current = (kind, target, baseDir) => {
-    const [file] = kind === 'code' ? splitLineSuffix(target) : [target];
+    const html = kind === 'doc' ? target.match(/^([^#]*\.html?)(#.*)$/i) : null;
+    const [file] = kind === 'code' ? splitLineSuffix(target) : [html ? html[1] : target];
     const resolved = resolveLink(kind, file, baseDir);
     if (!resolved) openPreview(file, 'This document has no recorded workspace. Reopen it from your agent.');
-    else void openAbsoluteFile('outside' in resolved ? resolved.outside : `${workspaceRoot.current}/${resolved.path}`, kind);
+    else void openAbsoluteFile('outside' in resolved ? resolved.outside : `${workspaceRoot.current}/${resolved.path}`, kind, html?.[2]);
   };
   // Stable identity so memoized documents and messages do not re-render on every state tick.
   const openLink = useCallback<OpenWorkspaceLink>((...args) => handleLink.current(...args), []);
@@ -918,7 +919,7 @@ function App() {
             </article>
           </div>
         </main>
-        <PinnedWindows key={documentId} workspace={workspace} threads={threads} files={files} root={current?.workspace} documentId={documentId} comparison={comparison} changesScope={changesScope} onCloseChanges={() => setChangesScope(null)} onOpenChange={openChange} onQuoteFile={quoteFile} onRevealFile={revealFile} openRequests={openPins} onOpened={ids => setOpenPins(previous => previous.filter(id => !ids.includes(id)))} onCloseFile={id => {
+        <PinnedWindows key={documentId} workspace={workspace} threads={threads} files={files} onSetFileScripts={(id, enabled) => setFiles(previous => previous.map(file => file.id === id ? { ...file, areScriptsEnabled: enabled } : file))} root={current?.workspace} documentId={documentId} comparison={comparison} changesScope={changesScope} onCloseChanges={() => setChangesScope(null)} onOpenChange={openChange} onQuoteFile={quoteFile} onRevealFile={revealFile} openRequests={openPins} onOpened={ids => setOpenPins(previous => previous.filter(id => !ids.includes(id)))} onCloseFile={id => {
           setFiles(previous => previous.filter(file => file.id !== id));
           setPreviewPath(previous => `file:${previous}` === id ? null : previous);
         }} {...selectionActions} onGoToMessage={goToMessage} />

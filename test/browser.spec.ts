@@ -4180,3 +4180,65 @@ test('base comparison excludes base-only commits, persists on the document, and 
   // The panel stays open across reloads; the document's base branch selects the comparison again.
   await expect(page.getByRole('complementary', { name: 'Files' }).getByRole('button', { name: 'vs main ▾' })).toBeVisible();
 });
+
+test('window zoom scales HTML independently, keeps chrome fixed, and follows docked tabs', async ({ page }) => {
+  const root = await filesWorkspace({ 'diagram.html': '<div id="box" style="width:100px;height:20px;background:red">Diagram</div>', 'other.md': '# Other file' });
+  const doc = await f.register('zoom.md', `# Zoom review\n\n[Diagram](${root}/diagram.html) · [Other](${root}/other.md)`);
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('link', { name: 'Diagram', exact: true }).click();
+  const first = page.getByRole('dialog', { name: 'File: diagram.html', exact: true });
+  const box = first.frameLocator('iframe').locator('#box');
+  await expect(box).toBeVisible();
+  const geometry = await first.boundingBox(), header = await first.locator('header').boundingBox();
+  await first.getByRole('button', { name: 'Zoom out', exact: true }).click({ clickCount: 2 });
+  await expect(first.getByRole('button', { name: 'Reset content zoom', exact: true })).toHaveText('50%');
+  // Playwright reports iframe-child bounds in the child viewport's CSS pixels.
+  // Map those pixels to the displayed frame; a 100px diagram should occupy 50 screen pixels.
+  const frameWidth = (await first.locator('iframe').boundingBox())!.width;
+  const viewportWidth = await box.evaluate(() => innerWidth);
+  expect((await box.boundingBox())!.width * frameWidth / viewportWidth).toBeCloseTo(50, 0);
+  expect(await first.boundingBox()).toEqual(geometry);
+  expect(await first.locator('header').boundingBox()).toEqual(header);
+  await first.getByRole('button', { name: 'Dock window', exact: true }).click();
+  const dock = page.getByRole('region', { name: 'Window dock', exact: true });
+  await expect(dock.getByRole('button', { name: 'Reset content zoom', exact: true })).toHaveText('50%');
+  await page.getByRole('link', { name: 'Other', exact: true }).click();
+  const second = page.getByRole('dialog', { name: 'File: other.md', exact: true });
+  await expect(second.getByRole('button', { name: 'Reset content zoom', exact: true })).toHaveText('100%');
+  await second.getByRole('button', { name: 'Zoom in', exact: true }).click();
+  await second.getByRole('button', { name: 'Dock window', exact: true }).click();
+  await expect(dock.getByRole('button', { name: 'Reset content zoom', exact: true })).toHaveText('125%');
+  await dock.getByRole('tab', { name: 'diagram.html', exact: true }).click();
+  await expect(dock.getByRole('button', { name: 'Reset content zoom', exact: true })).toHaveText('50%');
+  await dock.getByRole('button', { name: 'Reset content zoom', exact: true }).click();
+  await expect(dock.getByRole('button', { name: 'Reset content zoom', exact: true })).toHaveText('100%');
+  await dock.getByRole('button', { name: 'Zoom out', exact: true }).click({ clickCount: 3 });
+  await expect(dock.getByRole('button', { name: 'Zoom out', exact: true })).toBeDisabled();
+  await dock.getByRole('button', { name: 'Reset content zoom', exact: true }).click();
+  await dock.getByRole('button', { name: 'Zoom in', exact: true }).click({ clickCount: 4 });
+  await expect(dock.getByRole('button', { name: 'Zoom in', exact: true })).toBeDisabled();
+  await dock.getByRole('button', { name: 'Close file window', exact: true }).first().click();
+  await page.getByRole('link', { name: 'Diagram', exact: true }).click();
+  await expect(first.getByRole('button', { name: 'Reset content zoom', exact: true })).toHaveText('100%');
+});
+
+test('pinned reply zoom does not resize the conversation or main document', async ({ page }) => {
+  const doc = await f.register('pin-zoom.md', '# Original document\n\nOriginal passage.');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByLabel('Message', { exact: true }).fill('Reply to pin');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByRole('log').getByText('Reply to pin', { exact: true })).toBeVisible();
+  await answer('A pinned reply.');
+  const reply = page.locator('.messages .message.agent');
+  await reply.hover(); await reply.getByRole('button', { name: 'Pin message', exact: true }).click();
+  const floating = page.getByRole('dialog', { name: 'Pinned message', exact: true });
+  const original = await reply.getByText('A pinned reply.', { exact: true }).boundingBox();
+  const document = await page.locator('#document').boundingBox();
+  const before = await floating.locator('.reference-body').getByText('A pinned reply.', { exact: true }).boundingBox();
+  await floating.getByRole('button', { name: 'Zoom in', exact: true }).click();
+  expect((await floating.locator('.reference-body').getByText('A pinned reply.', { exact: true }).boundingBox())!.height).toBeGreaterThan(before!.height);
+  expect((await reply.getByText('A pinned reply.', { exact: true }).boundingBox())!.height).toBe(original!.height);
+  expect((await reply.getByText('A pinned reply.', { exact: true }).boundingBox())!.width).toBe(original!.width);
+  expect(await page.locator('#document').boundingBox()).toEqual(document);
+});

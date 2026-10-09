@@ -362,3 +362,100 @@ test('stopped agent retains preview and close confirmation, including its empty 
   await page.getByRole('link', { name: 'All agents', exact: true }).click();
   await expect(row).toContainText('0 documents');
 });
+
+for (const access of ['direct', 'gateway', 'network'] as const) test(`HTML scripts are opt-in and isolated through ${access}`, async ({ page }) => {
+  const owner = f.owners[1];
+  await writeFile(join(owner.directory, 'diagram.html'), `<!doctype html><html><body>
+    <p id="result">Static diagram</p><button onclick="document.querySelector('#result').textContent='Clicked'">Trace</button>
+    <script>
+      const denied = action => { try { action(); return false; } catch { return true; } };
+      document.querySelector('#result').textContent = 'Tab ' + location.hash;
+      document.body.dataset.isolated = JSON.stringify({
+        parent: denied(() => parent.document.body), cookie: denied(() => document.cookie), storage: denied(() => localStorage.length)
+      });
+    </script></body></html>`);
+  await writeFile(join(owner.directory, 'review.md'), '# Diagram review\n\n[Basic](diagram.html#basic)\n\n[Chained](diagram.html#chained)\n\n[Nested fragment](diagram.html#chained.html#tab)');
+  let base = `${f.gateway.url}/a/${owner.alias}`;
+  if (access === 'direct') base = JSON.parse(await readFile(join(owner.directory, 'runtime.json'), 'utf8')).url;
+  if (access === 'network') {
+    const network = await (await f.view('/api/network', { enabled: true })).json();
+    base = `${network.urls[0]}/a/${owner.alias}`;
+    await page.goto(base + '/');
+    await page.getByLabel('Passphrase', { exact: true }).fill(network.passphrase);
+    await page.getByRole('button', { name: 'Unlock', exact: true }).click();
+  }
+  await page.goto(`${base}/?document=${owner.doc.id}`);
+  await page.getByRole('link', { name: 'Basic', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'File: diagram.html', exact: true });
+  const toggle = dialog.getByRole('checkbox', { name: 'Run scripts', exact: true });
+  const frame = dialog.frameLocator('iframe');
+  await expect(toggle).not.toBeChecked();
+  await expect(frame.locator('#result')).toHaveText('Static diagram');
+  await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
+  await toggle.check();
+  await expect(frame.locator('#result')).toHaveText('Tab #basic');
+  await expect(frame.locator('body')).toHaveAttribute('data-isolated', '{"parent":true,"cookie":true,"storage":true}');
+  await frame.getByRole('button', { name: 'Trace' }).click();
+  await expect(frame.locator('#result')).toHaveText('Clicked');
+  await page.getByRole('link', { name: 'Chained', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'File: diagram.html', exact: true })).toHaveCount(1);
+  await expect(frame.locator('#result')).toHaveText('Tab #chained');
+  await page.getByRole('link', { name: 'Nested fragment', exact: true }).click();
+  await expect(frame.locator('#result')).toHaveText('Tab #chained.html#tab');
+  await dialog.getByRole('button', { name: 'Dock window', exact: true }).click();
+  const dock = page.getByRole('region', { name: 'Window dock', exact: true });
+  await expect(dock.getByRole('checkbox', { name: 'Run scripts', exact: true })).toBeChecked();
+  await dock.getByRole('button', { name: /Move.*out of dock/ }).click();
+  await toggle.uncheck();
+  await expect(frame.locator('#result')).toHaveText('Static diagram');
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
+  await dialog.getByRole('button', { name: 'Close file window' }).click();
+  await page.getByRole('link', { name: 'Basic', exact: true }).click();
+  await expect(toggle).not.toBeChecked();
+});
+
+test('scripted HTML blocks resource requests and keeps the main viewer policy unchanged', async ({ page }) => {
+  const { createServer } = await import('node:http');
+  const received: string[] = [];
+  const probe = createServer((request, response) => { received.push(request.url ?? ''); response.end('external'); });
+  await new Promise<void>(resolve => probe.listen(0, '127.0.0.1', resolve));
+  cleanup.unshift(() => new Promise<void>((resolve, reject) => probe.close(error => error ? reject(error) : resolve())));
+  const address = probe.address();
+  if (!address || typeof address === 'string') throw new Error('Missing probe listener');
+  const external = `http://127.0.0.1:${address.port}`;
+  const owner = f.owners[1];
+  const attempts = ['/api/state', `${external}/fetch`, `${external}/script`, `${external}/image`, `${external}/style`];
+  await writeFile(join(owner.directory, 'probe.html'), `<!doctype html><p id="result">Static</p><script>
+    const blocked = new Set();
+    addEventListener('securitypolicyviolation', event => {
+      blocked.add(event.effectiveDirective);
+      document.body.dataset.blocked = JSON.stringify([...blocked].sort());
+    });
+    Promise.all([fetch('${attempts[0]}').then(() => false, () => true), fetch('${attempts[1]}').then(() => false, () => true)])
+      .then(results => { document.body.dataset.fetchBlocked = JSON.stringify(results); });
+    const script = document.createElement('script'); script.src='${attempts[2]}'; document.body.append(script);
+    const img = new Image(); img.src='${attempts[3]}'; document.body.append(img);
+    const style = document.createElement('link'); style.rel='stylesheet'; style.href='${attempts[4]}'; document.head.append(style);
+    const nested = document.createElement('iframe'); nested.src='${external}/frame'; document.body.append(nested);
+    document.querySelector('#result').textContent='Script ran';
+  </script>`);
+  await writeFile(join(owner.directory, 'review.md'), '# Probe\n\n[Probe](probe.html)');
+  const base = `${f.gateway.url}/a/${owner.alias}`;
+  const response = await page.goto(`${base}/?document=${owner.doc.id}`);
+  expect(response!.headers()['content-security-policy']).toContain("script-src 'self' 'wasm-unsafe-eval'");
+  await page.getByRole('link', { name: 'Probe', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Run scripts', exact: true }).check();
+  const frame = page.frameLocator('iframe[title="Preview of probe.html"]');
+  await expect(frame.locator('#result')).toHaveText('Script ran');
+  await expect(frame.locator('body')).toHaveAttribute('data-fetch-blocked', '[true,true]');
+  await expect(frame.locator('body')).toHaveAttribute('data-blocked', '["connect-src","frame-src","img-src","script-src-elem","style-src-elem"]');
+  expect(received).toEqual([]);
+  // A direct open has no iframe attribute: the response header must still deny cookie access.
+  const standalone = await page.context().newPage();
+  try {
+    const source = await page.locator('iframe[title="Preview of probe.html"]').getAttribute('src');
+    await standalone.goto(new URL(source!, page.url()).href);
+    await expect(standalone.locator('#result')).toHaveText('Script ran');
+    expect(await standalone.evaluate(() => { try { void document.cookie; return false; } catch { return true; } })).toBe(true);
+  } finally { await standalone.close(); }
+});
