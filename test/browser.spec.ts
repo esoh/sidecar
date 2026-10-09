@@ -2162,6 +2162,43 @@ test('thread previews show unread dots and active-request spinners independently
   await expect(unread).toHaveCount(0);
 });
 
+test('document tab title counts unread threads rather than messages and clears when read', async ({ page }) => {
+  const doc = await f.register('unread.md', '# Unread count'), other = await f.register('other.md', '# Other document');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  const ids: string[] = [];
+  for (const index of [1, 2, 3]) {
+    const request = await (await f.view('/api/questions', { documentId: doc.id, clientMessageId: randomUUID(), text: `Question ${index}` })).json();
+    ids.push(request.threadId);
+    await answer(`Answer ${index}`);
+    await expect(page).toHaveTitle(`(${index}) Unread count`);
+  }
+  await f.view('/api/questions', { documentId: doc.id, threadId: ids[0], clientMessageId: randomUUID(), text: 'Another question in the same thread' });
+  await answer('Another answer');
+  await expect(page).toHaveTitle('(3) Unread count');
+  await f.view('/api/questions', { documentId: other.id, clientMessageId: randomUUID(), text: 'Another document' });
+  await answer('An unrelated reply');
+  await expect(page).toHaveTitle('(3) Unread count');
+  await page.reload(); await expect(page).toHaveTitle('(3) Unread count');
+  await page.getByRole('button', { name: 'Edit document name' }).click();
+  await page.getByLabel('Document name', { exact: true }).fill('Renamed review');
+  await page.getByLabel('Document name', { exact: true }).press('Enter');
+  await expect(page).toHaveTitle('(3) Renamed review');
+  for (const [index, id] of ids.entries()) {
+    await page.locator(`[data-thread-id="${id}"]`).click();
+    await expect(page.getByRole('log')).toContainText('Answer');
+    await expect(page).toHaveTitle(index === 2 ? 'Renamed review' : `(${2 - index}) Renamed review`);
+    if (index !== 2) await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  }
+  await page.getByRole('button', { name: 'Hide conversations', exact: true }).click();
+  await f.view('/api/questions', { documentId: doc.id, threadId: ids[2], clientMessageId: randomUUID(), text: 'While hidden' });
+  await answer('A hidden-panel reply');
+  await expect(page).toHaveTitle('(1) Renamed review');
+  await page.getByRole('button', { name: 'Show conversations', exact: true }).click();
+  await expect(page.getByRole('log')).toContainText('A hidden-panel reply');
+  await expect(page).toHaveTitle('Renamed review');
+});
+
 test('read replies persist independently across document tabs', async ({ page, context }) => {
   const a = await f.register(), b = await f.register('b.md', '# Second document');
   const other = await context.newPage();

@@ -1,5 +1,6 @@
-import { writeFile, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { writeFile, readFile, mkdir, readdir } from 'node:fs/promises';
+import { join, sep } from 'node:path';
+import { homedir } from 'node:os';
 import { test, expect } from '@playwright/test';
 import { setupGateway } from './gateway-support.ts';
 import { startGateway } from '../src/gateway.ts';
@@ -136,12 +137,17 @@ test('global agents and owner documents have independent remembered sort setting
   await page.goto(f.gateway.url);
   await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible();
   const rows = page.locator('.library-agent-row'); await expect(rows).toHaveCount(2);
-  await expect(rows.filter({ hasText: f.owners[0].owner.sessionId })).toContainText('1 document');
-  await rows.filter({ hasText: f.owners[0].owner.sessionId }).getByRole('button', { name: 'Copy session ID' }).click();
+  const first = rows.filter({ has: page.getByTitle(f.owners[0].owner.sessionId, { exact: true }) });
+  await expect(first).toContainText('1 document');
+  await expect(first.locator('.library-session-id')).toHaveText(`${f.owners[0].alias}:${f.owners[0].owner.sessionId.slice(0, 3)}…${f.owners[0].owner.sessionId.slice(-3)}`);
+  await first.getByRole('button', { name: 'Agent actions' }).click();
+  await page.getByRole('menuitem', { name: 'Copy session ID' }).click();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(f.owners[0].owner.sessionId);
+  await expect(page.getByRole('menuitem', { name: 'Copied session ID' })).toBeVisible();
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Sort agents' }).click();
   await page.getByRole('menuitemradio', { name: 'Recent conversation activity' }).click();
-  await page.getByRole('link', { name: new RegExp(f.owners[1].owner.sessionId) }).click();
+  await rows.filter({ has: page.getByTitle(f.owners[1].owner.sessionId, { exact: true }) }).getByRole('link').click();
   await expect(page.getByRole('heading', { name: 'Documents', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Sort documents' })).toContainText('Last opened');
   await page.getByRole('button', { name: 'Sort documents' }).click();
@@ -152,11 +158,190 @@ test('global agents and owner documents have independent remembered sort setting
   await page.screenshot({ path: '/private/tmp/sidecar-gateway-agents.png' });
 });
 
+test('agent and document rows display the timestamp for the selected sort', async ({ page }) => {
+  const now = Date.now(), lastMessage = now - 3 * 86400000;
+  await page.clock.setFixedTime(now);
+  await page.route('**/api/library', async route => {
+    const response = await route.fetch(), library = await response.json();
+    for (const session of library.sessions) for (const document of session.documents) {
+      document.lastOpenedAt = now - 2 * 3600000;
+      document.updatedAt = session.owner.agent === 'codex' ? lastMessage : 0;
+    }
+    await route.fulfill({ response, json: library });
+  });
+  await page.goto(f.gateway.url);
+  const row = page.locator('.library-agent-row').filter({ has: page.getByTitle(f.owners[0].owner.sessionId, { exact: true }) });
+  await expect(row).toContainText('Last opened 2h ago');
+  await page.getByRole('button', { name: 'Sort agents' }).click();
+  await page.getByRole('menuitemradio', { name: 'Recent conversation activity' }).click();
+  await expect(row).toContainText('Last message: 3d');
+  await expect(row).not.toContainText('ago');
+  await expect(row.locator('time')).toHaveAttribute('datetime', new Date(lastMessage).toISOString());
+  await expect(row.locator('time')).toHaveAttribute('title', /\d/);
+  await expect(page.locator('.library-agent-row').filter({ has: page.getByTitle(f.owners[1].owner.sessionId, { exact: true }) })).toContainText('Last message: —');
+  await row.getByRole('link').click();
+  const document = page.locator('.library-document');
+  await expect(document).toContainText('Last opened 2h ago');
+  await page.getByRole('button', { name: 'Sort documents' }).click();
+  await page.getByRole('menuitemradio', { name: 'Recent conversation activity' }).click();
+  await expect(document).toContainText('Last message: 3d');
+  await expect(document).not.toContainText('ago');
+});
+
+test('agent cards show native session names and the last-opened workspace and branch', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  const owner = f.owners[0];
+  const previousCodex = process.env.CODEX_HOME, previousClaude = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CODEX_HOME = join(f.root, 'codex'); process.env.CLAUDE_CONFIG_DIR = join(f.root, 'claude');
+  cleanup.unshift(async () => {
+    if (previousCodex === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousCodex;
+    if (previousClaude === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previousClaude;
+  });
+  const project = join(process.env.CLAUDE_CONFIG_DIR, 'projects', 'original-project');
+  await mkdir(project, { recursive: true }); await mkdir(process.env.CODEX_HOME);
+  await writeFile(join(process.env.CODEX_HOME, 'session_index.jsonl'), JSON.stringify({ id: owner.owner.sessionId, thread_name: 'Review semantic graph and queue admission evidence' }) + '\n');
+  await writeFile(join(project, f.owners[1].owner.sessionId + '.jsonl'), JSON.stringify({ type: 'ai-title', sessionId: f.owners[1].owner.sessionId, aiTitle: 'Transfer review' }) + '\n');
+  await owner.agentCall('/agent/documents', { path: owner.doc.path, workspace: homedir(), repoInfo: { display: 'example', branch: 'main' } });
+  const file = join(owner.directory, 'latest.md'); await writeFile(file, '# Latest workspace');
+  const latest = await (await owner.agentCall('/agent/documents', { path: file, workspace: process.cwd(), repoInfo: { display: 'example', branch: 'feat/workspace-labels' } })).json();
+  await f.view(`/a/${owner.alias}/api/documents/${latest.id}/opened`, {});
+  await page.goto(f.gateway.url);
+  const row = page.locator('.library-agent-row').filter({ has: page.getByTitle(owner.owner.sessionId, { exact: true }) });
+  await expect(row.locator('.library-agent-name')).toHaveText('Review semantic graph and queue admission evidence');
+  await expect(row.locator('.library-agent-meta')).toContainText('Codex');
+  await expect(page.locator('.library-agent-row').filter({ has: page.getByTitle(f.owners[1].owner.sessionId, { exact: true }) }).locator('.library-agent-name')).toHaveText('Transfer review');
+  const workspace = row.locator('.library-agent-context');
+  const displayPath = process.cwd() === homedir() ? '~' : process.cwd().startsWith(homedir() + sep) ? '~' + process.cwd().slice(homedir().length) : process.cwd();
+  await expect(workspace.getByTitle(process.cwd(), { exact: true })).toHaveText(displayPath);
+  await expect(row.locator('.library-agent-meta').getByTitle('feat/workspace-labels', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Sort agents' }).click();
+  await page.getByRole('menuitemradio', { name: 'Recent conversation activity' }).click();
+  await expect(row.locator('.library-agent-meta')).toContainText('feat/workspace-labels');
+  await page.screenshot({ path: '/private/tmp/sidecar-agent-workspaces-desktop.png' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(row.getByTitle('feat/workspace-labels', { exact: true })).toBeVisible();
+  const card = await row.getByRole('link').boundingBox();
+  for (const label of [row.locator('.library-agent-name'), ...await row.locator('.library-agent-meta, .library-agent-context span').all()]) {
+    const bounds = await label.boundingBox();
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(card!.x + card!.width);
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: '/private/tmp/sidecar-agent-workspaces-mobile.png' });
+  await row.getByRole('link').click();
+  const header = page.locator('.library-owner-header');
+  await expect(header.getByTitle('Review semantic graph and queue admission evidence', { exact: true })).toBeVisible();
+  await expect(header.getByTitle(process.cwd(), { exact: true })).toHaveText(displayPath);
+  await expect(header.getByTitle('feat/workspace-labels', { exact: true })).toBeVisible();
+  await expect(header.getByTitle(owner.owner.sessionId, { exact: true })).toHaveText(`${owner.owner.sessionId.slice(0, 3)}…${owner.owner.sessionId.slice(-3)}`);
+  await header.getByRole('button', { name: 'Codex session details' }).click();
+  await expect(page.locator('.agent-session-popover code')).toHaveText(owner.owner.sessionId);
+  await page.locator('.agent-session-popover').getByRole('button', { name: 'Copy', exact: true }).click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(owner.owner.sessionId);
+  await page.keyboard.press('Escape');
+  const headerBounds = await header.boundingBox();
+  for (const label of await header.locator('strong, span').all()) {
+    const bounds = await label.boundingBox();
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(headerBounds!.x + headerBounds!.width);
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: '/private/tmp/sidecar-agent-documents-mobile.png' });
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.screenshot({ path: '/private/tmp/sidecar-agent-documents-desktop.png' });
+  await page.getByRole('link', { name: 'All agents', exact: true }).click();
+  await page.locator('.library-agent-row').filter({ has: page.getByTitle(f.owners[1].owner.sessionId, { exact: true }) }).getByRole('link').click();
+  await expect(header.getByTitle('Transfer review', { exact: true })).toBeVisible();
+  await expect(header.getByTitle(f.owners[1].doc.workspace, { exact: true })).toBeVisible();
+});
+
+test('unnamed sessions use the branch as the heading or fall back to Unnamed session', async ({ page }) => {
+  const owner = f.owners[0];
+  await owner.agentCall('/agent/documents', { path: owner.doc.path, repoInfo: { display: 'example', branch: 'feat/unnamed-review' } });
+  await page.goto(f.gateway.url);
+  const row = page.locator('.library-agent-row').filter({ has: page.getByTitle(owner.owner.sessionId, { exact: true }) });
+  await expect(row.locator('.library-agent-name')).toHaveText('feat/unnamed-review');
+  await expect(row.locator('.library-agent-meta')).not.toContainText('feat/unnamed-review');
+  await expect(page.locator('.library-agent-row').filter({ has: page.getByTitle(f.owners[1].owner.sessionId, { exact: true }) }).locator('.library-agent-name')).toHaveText('Unnamed session');
+  await row.getByRole('link').click();
+  await expect(page.locator('.library-owner-header .library-agent-name')).toHaveText('feat/unnamed-review');
+});
+
+for (const running of [true, false]) test(`agent menu confirms closing all ${running ? 'live' : 'stopped'} documents, including pending requests`, async ({ page, context }) => {
+  const owner = f.owners[1], base = `/a/${owner.alias}`;
+  const source = await readFile(owner.doc.path, 'utf8');
+  const file = join(owner.directory, 'second.md'); await writeFile(file, '# Second');
+  const second = await (await owner.agentCall('/agent/documents', { path: file, title: 'Second' })).json();
+  const question = async (documentId: string, text: string) => (await (await f.view(`${base}/api/questions`, { documentId, text, clientMessageId: text })).json());
+  const answered = await question(owner.doc.id, 'Propose');
+  await owner.agentCall(`/agent/requests/${answered.id}/claim`, {});
+  await owner.agentCall('/agent/replies', { requestId: answered.id, documentId: owner.doc.id, threadId: answered.threadId,
+    text: '[[sidecar-meta {"highlights":[{"exact":"Own document.","proposal":{"before":"Own document.","after":"Proposed text."}}]}]]\n[Proposal](#selection-1)' });
+  await question(owner.doc.id, 'Queued');
+  const claimed = await question(second.id, 'Claimed');
+  await owner.agentCall(`/agent/requests/${claimed.id}/claim`, {});
+  await f.view(`${base}/api/documents/${second.id}`);
+  const viewer = await context.newPage();
+  await viewer.goto(`${f.gateway.url}${base}/?document=${owner.doc.id}`);
+  await viewer.getByLabel('Message', { exact: true }).fill('Unsent draft');
+  await expect.poll(() => viewer.evaluate(() => Object.entries(localStorage).filter(([key, value]) => key.startsWith('sidecar-draft:') && value.includes('Unsent draft')).length)).toBe(1);
+  const before = await readFile(join(owner.directory, 'state.json'), 'utf8');
+  const other = await readFile(join(f.owners[0].directory, 'state.json'), 'utf8');
+  const registry = await readFile(join(f.root, 'agent-ids', 'registry.json'), 'utf8');
+  expect(Object.keys(JSON.parse(before).proposals)).toHaveLength(1);
+  if (!running) await owner.stop();
+  await page.goto(f.gateway.url);
+  const row = page.locator('.library-agent-row').filter({ has: page.getByTitle(owner.owner.sessionId, { exact: true }) });
+  await row.getByRole('button', { name: 'Agent actions' }).click();
+  page.once('dialog', async dialog => {
+    expect(dialog.message()).toContain('Close all 2 documents');
+    expect(dialog.message()).toContain('queued and unfinished');
+    await dialog.dismiss();
+  });
+  await page.getByRole('menuitem', { name: 'Close all documents' }).click();
+  await expect(row).toContainText('2 documents');
+  expect(await readFile(join(owner.directory, 'state.json'), 'utf8')).toBe(before);
+  await row.getByRole('button', { name: 'Agent actions' }).click();
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('menuitem', { name: 'Close all documents' }).click();
+  await expect(row).toContainText('0 documents');
+  await expect(row.getByRole('button', { name: 'Agent actions' })).toBeEnabled();
+  const saved = JSON.parse(await readFile(join(owner.directory, 'state.json'), 'utf8'));
+  for (const field of ['documents', 'threads', 'requests', 'proposals', 'proposalWrites']) expect(saved[field]).toEqual({});
+  for (const id of [owner.doc.id, second.id]) {
+    await expect(readdir(join(owner.directory, 'versions', id))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readFile(join(owner.directory, 'opened', id))).rejects.toMatchObject({ code: 'ENOENT' });
+  }
+  expect(await readFile(owner.doc.path, 'utf8')).toBe(source);
+  expect(await readFile(file, 'utf8')).toBe('# Second');
+  expect(await readFile(join(f.owners[0].directory, 'state.json'), 'utf8')).toBe(other);
+  expect(await readFile(join(f.root, 'agent-ids', 'registry.json'), 'utf8')).toBe(registry);
+  await expect(viewer.getByRole('heading', { name: 'Document closed', exact: true })).toBeVisible();
+  expect(await viewer.evaluate(() => Object.entries(localStorage).some(([key, value]) => key.startsWith('sidecar-draft:') && value.includes('Unsent draft')))).toBe(false);
+  await row.getByRole('button', { name: 'Agent actions' }).click();
+  await expect(page.getByRole('menuitem', { name: 'Close all documents' })).toBeDisabled();
+  await viewer.close();
+});
+
+test('agent bulk close reports partial failure and retains the documents it could not close', async ({ page }) => {
+  const owner = f.owners[1], file = join(owner.directory, 'second.md'); await writeFile(file, '# Second');
+  await owner.agentCall('/agent/documents', { path: file });
+  await page.route(`**/api/library/${owner.key}/documents/${owner.doc.id}?discardPending=true`, route => route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: 'Viewer unavailable. Retry when ready.' }) }));
+  await page.goto(f.gateway.url);
+  const row = page.locator('.library-agent-row').filter({ has: page.getByTitle(owner.owner.sessionId, { exact: true }) });
+  await row.getByRole('button', { name: 'Agent actions' }).click();
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('menuitem', { name: 'Close all documents' }).click();
+  await expect(page.getByRole('alert')).toContainText('Closed 1 of 2 documents.');
+  await expect(page.getByRole('alert')).toContainText('Viewer unavailable. Retry when ready.');
+  await expect(row).toContainText('1 document');
+  expect(Object.keys((await (await f.view(`/a/${owner.alias}/api/state`)).json()).documents)).toEqual([owner.doc.id]);
+});
+
 test('stopped agent retains preview and close confirmation, including its empty document list', async ({ page }) => {
   const owner = f.owners[1]; await owner.stop();
   await page.goto(f.gateway.url);
-  await expect(page.locator('.library-agent-row').filter({ hasText: owner.owner.sessionId })).toContainText('Stopped');
-  await page.getByRole('link', { name: new RegExp(owner.owner.sessionId) }).click();
+  const row = page.locator('.library-agent-row').filter({ has: page.getByTitle(owner.owner.sessionId, { exact: true }) });
+  await expect(row).toContainText('Stopped');
+  await row.getByRole('link').click();
   await page.getByRole('link', { name: /^claude/ }).click();
   await expect(page.getByRole('article', { name: 'Document' })).toContainText('Own document.');
   await page.getByRole('link', { name: 'All documents', exact: true }).click();
@@ -165,5 +350,5 @@ test('stopped agent retains preview and close confirmation, including its empty 
   page.once('dialog', dialog => dialog.accept()); await page.getByRole('button', { name: 'Close “claude”' }).click();
   await expect(page.getByText('No saved documents.', { exact: true })).toBeVisible();
   await page.getByRole('link', { name: 'All agents', exact: true }).click();
-  await expect(page.locator('.library-agent-row').filter({ hasText: owner.owner.sessionId })).toContainText('0 documents');
+  await expect(row).toContainText('0 documents');
 });

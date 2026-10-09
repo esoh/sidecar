@@ -126,7 +126,7 @@ export async function startGateway({ stateRoot, port = 43120, networkPort = 4312
       if (key && entry[1] !== key) throw new DomainError('Document belongs to another agent', 404);
       const document = await libraryDocument(stateRoot, entry[1], entry[2]);
       if (entry[3] && method === 'POST') { await recordDocumentOpen(join(stateRoot, entry[1]), document.id); json(response, { ok: true }); return; }
-      if (!entry[3] && method === 'DELETE') { json(response, await closeLibraryDocument(stateRoot, entry[1], document.id)); return; }
+      if (!entry[3] && method === 'DELETE') { json(response, await closeLibraryDocument(stateRoot, entry[1], document.id, target.searchParams.get('discardPending') === 'true')); return; }
       if (!entry[3] && method === 'GET') {
         const content = await readDocument(document.path);
         json(response, { ...content, title: document.userTitle ?? document.providedTitle ?? content.heading ?? basename(document.path) }); return;

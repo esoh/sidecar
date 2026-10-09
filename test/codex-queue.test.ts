@@ -93,7 +93,7 @@ if (${holdRecovery} && ['sidecar.recovery', 'sc.recovery'].includes(JSON.parse(m
   t.after(() => server.close());
   const token = await readFile(join(directory, 'agent-token'), 'utf8'), cookie = (await fetch(server.url)).headers.get('set-cookie')!.split(';')[0];
   const post = async (path: string, body: unknown) => fetch(server.url + path, { method: 'POST', headers: { Cookie: cookie, Origin: server.url, 'X-Sidecar-Token': token, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const closeDoc = (id: string) => fetch(server.url + `/api/documents/${id}`, { method: 'DELETE', headers: { Cookie: cookie, Origin: server.url } });
+  const closeDoc = (id: string, discardPending = false) => fetch(server.url + `/api/documents/${id}${discardPending ? '?discardPending=true' : ''}`, { method: 'DELETE', headers: { Cookie: cookie, Origin: server.url } });
   const read = async () => (await fetch(server.url + '/api/state', { headers: { Cookie: cookie } })).json();
   const file = join(n.root, 'review.md'); await writeFile(file, '# Review');
   const doc = await (await post('/agent/documents', { path: file })).json();
@@ -216,7 +216,7 @@ for (const phase of ['queued', 'in-flight'] as const) test(`a complete reply wit
   assert.equal((await events()).length, 3, 'native start and cleanup must not re-enqueue work');
 });
 
-test('closing a completed document retains cleanup of its in-flight recovery', async t => {
+for (const completed of [true, false]) test(`closing a ${completed ? 'completed' : 'confirmed unfinished'} document retains cleanup of its in-flight recovery`, async t => {
   const { owner, n, post, read, doc, events, waiting, release, closeDoc } = await delivery(t, true);
   n.state.status = 'idle';
   const first = await (await post('/api/questions', { documentId: doc.id, text: 'First', clientMessageId: 'first' })).json();
@@ -227,9 +227,9 @@ test('closing a completed document retains cleanup of its in-flight recovery', a
   n.emit({ method: 'turn/completed', params: { threadId: owner.sessionId, turn: { id: 'started-turn', status: 'completed', items: [] } } });
   await waitFor(() => readFile(waiting, 'utf8').then(() => true, () => false), 'the recovery CLI was not held before enqueue');
   const recovery = await decodedDelivery(owner, join(n.root, 'viewer'), JSON.parse(await readFile(waiting, 'utf8')));
-  assert.equal((await post('/agent/replies', { requestId: first.id, documentId: doc.id, threadId: first.threadId, text: 'The original complete answer' })).status, 200);
-  assert.equal((await closeDoc(doc.id)).status, 200);
-  assert.equal((await read()).requests[first.id], undefined, 'closing deletes the completed request record');
+  if (completed) assert.equal((await post('/agent/replies', { requestId: first.id, documentId: doc.id, threadId: first.threadId, text: 'The original complete answer' })).status, 200);
+  assert.equal((await closeDoc(doc.id, !completed)).status, 200);
+  assert.equal((await read()).requests[first.id], undefined, 'closing deletes the request record');
   await writeFile(release, 'go');
   await waitFor(async () => (await events()).length === 2, 'the recovery CLI did not finish');
   await n.state.loadQueue();
@@ -257,4 +257,23 @@ test('the first oversized input steers its ID-only notification into busy CLI wo
   assert.deepEqual(await events(), [], 'native queue must not replace steering');
   n.emit({ method: 'turn/completed', params: { threadId: n.state.threadId, turn: { id: 'terminal-work', status: 'interrupted', items: [] } } });
   await waitFor(async () => (await read()).requests[request.id].status === 'stopped', 'unfetched large input must stop with its native turn');
+});
+
+test('confirmed document cleanup ignores late Codex output without interrupting its active terminal turn', async t => {
+  const { owner, n, post, read, doc, closeDoc } = await delivery(t);
+  n.state.steerable = true;
+  const request = await (await post('/api/questions', { documentId: doc.id, text: 'Work', clientMessageId: 'work' })).json();
+  await waitFor(async () => !!(await read()).requests[request.id].acceptedAt, 'request was not accepted');
+  const event = await decodedDelivery(owner, join(n.root, 'viewer'), n.state.steered[0]);
+  const send = (delta: string) => n.emit({ method: 'item/agentMessage/delta', params: { threadId: owner.sessionId, turnId: 'terminal-work', itemId: 'reply', delta } });
+  send(event.stream.prefix + 'Partial');
+  await waitFor(async () => (await read()).stream?.text === 'Partial', 'partial was not captured');
+  assert.equal((await closeDoc(doc.id, true)).status, 200);
+  send(' answer' + event.stream.suffix);
+  n.emit({ method: 'turn/completed', params: { threadId: owner.sessionId, turn: { id: 'terminal-work', status: 'completed', items: [] } } });
+  await waitFor(async () => (await read()).activity === 'idle', 'late completion was not observed');
+  const saved = await read();
+  assert.deepEqual(saved.documents, {}); assert.deepEqual(saved.requests, {}); assert.deepEqual(saved.threads, {});
+  assert.equal(saved.stream, null); assert.deepEqual(saved.streams, []);
+  assert.ok(!n.state.methods.includes('turn/interrupt'));
 });

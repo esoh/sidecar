@@ -1,13 +1,15 @@
 import { sortDocuments, sortSessions } from './library-sort.ts';
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { basename, join, sep } from 'node:path';
+import { homedir } from 'node:os';
 import { agentFetch, appStatus, parseOwner, readRuntime } from './agent.ts';
 import { acquireLock } from './owner-lock.ts';
 import { readDocument } from './documents.ts';
+import { readSessionNames } from './session-names.ts';
 import { closeDocument, DomainError, get, readSavedState, updateSavedState, ownerKey, type Owner } from './store.ts';
 
-export type LibraryDocument = { id: string; title: string; path: string; updatedAt: number; lastOpenedAt: number | null; threadCount: number };
-export type LibrarySession = { owner: Owner; ownerKey: string; ownerAlias?: string; url: string | null; documents: LibraryDocument[] };
+export type LibraryDocument = { id: string; title: string; path: string; updatedAt: number; lastOpenedAt: number | null; threadCount: number; workspace?: { path: string; displayPath: string; branch?: string } };
+export type LibrarySession = { owner: Owner; ownerKey: string; ownerAlias?: string; sessionName?: string; url: string | null; documents: LibraryDocument[] };
 export type LibraryState = { sessions: LibrarySession[]; unavailable: number };
 export type ClosedDocument = { documentId: string; threadIds: string[]; nextDocumentId: string | null; cleanupError?: string };
 
@@ -19,10 +21,10 @@ export async function cleanupClosedDocument(directory: string, id: string): Prom
   } catch { return { cleanupError: 'Conversations were deleted, but saved document metadata could not be completely removed from disk.' }; }
 }
 
-export async function closeLibraryDocument(root: string, key: string, id: string): Promise<ClosedDocument> {
+export async function closeLibraryDocument(root: string, key: string, id: string, discardPending = false): Promise<ClosedDocument> {
   const owner = parseOwner(key), directory = join(root, ownerKey(owner));
   const forward = async (instanceId: string): Promise<ClosedDocument> => {
-    const response = await agentFetch(key, `/agent/documents/${encodeURIComponent(id)}/close`, { instanceId }, undefined, directory);
+    const response = await agentFetch(key, `/agent/documents/${encodeURIComponent(id)}/close`, { instanceId, discardPending }, undefined, directory);
     const result = await response.json();
     if (!response.ok) throw new DomainError(response.status === 404 ? 'The original viewer could not close this document. Refresh the list; if it is still present, update that viewer.' : result.error ?? 'The original viewer could not close this document.', response.status);
     return result;
@@ -36,7 +38,7 @@ export async function closeLibraryDocument(root: string, key: string, id: string
     const current = await appStatus(key, directory);
     if (current.state === 'running') return await forward(current.instanceId);
     const result = await updateSavedState(directory, owner, state => {
-      const threadIds = closeDocument(state, id);
+      const threadIds = closeDocument(state, id, discardPending);
       return { documentId: id, threadIds, nextDocumentId: Object.keys(state.documents)[0] ?? null };
     });
     return { ...result, ...await cleanupClosedDocument(directory, id) };
@@ -67,14 +69,18 @@ export async function listLibrary(root: string, includeEmpty = false): Promise<L
       const directory = join(root, entry.name);
       const status = await appStatus(entry.name, directory);
       const url = status.state === 'running' ? (await readRuntime(entry.name, directory)).url : null;
-      const documents = await Promise.all(Object.values(state.documents).map(async document => {
+      const documents: LibraryDocument[] = await Promise.all(Object.values(state.documents).map(async document => {
         const threads = Object.values(state.threads).filter(thread => thread.documentId === document.id);
         const title = document.userTitle ?? document.providedTitle ?? (await readDocument(document.path).catch(() => null))?.heading ?? basename(document.path);
         const lastOpenedAt = await stat(join(directory, 'opened', document.id)).then(stat => stat.mtimeMs).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
-        return { id: document.id, title, lastOpenedAt, path: document.path, threadCount: threads.length, updatedAt: Math.max(0, ...threads.map(thread => thread.messages.at(-1)?.createdAt ?? thread.createdAt ?? 0)) };
+        const path = document.workspace, home = homedir();
+        const workspace = path ? { path, displayPath: path === home ? '~' : path.startsWith(home + sep) ? '~' + path.slice(home.length) : path, branch: document.repoInfo?.branch } : undefined;
+        return { id: document.id, title, lastOpenedAt, path: document.path, workspace, threadCount: threads.length, updatedAt: Math.max(0, ...threads.map(thread => thread.messages.at(-1)?.createdAt ?? 0)) };
       }));
       return { owner: state.owner, ownerKey: entry.name, url, documents: sortDocuments(documents, 'opened') };
     } catch { unavailable++; return null; }
   }));
-  return { sessions: sortSessions(sessions.filter((session): session is LibrarySession => session !== null), 'opened'), unavailable };
+  const available = sessions.filter((session): session is LibrarySession => session !== null);
+  const names = await readSessionNames(available.map(session => session.owner));
+  return { sessions: sortSessions(available.map(session => ({ ...session, sessionName: names.get(session.ownerKey) })), 'opened'), unavailable };
 }

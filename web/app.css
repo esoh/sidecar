@@ -1577,6 +1577,14 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
 .library-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 20px 0; }
 .library-heading h1 { margin: 0; }
 .library-agent-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
-.library-agent-row code { display: block; margin-top: 6px; overflow-wrap: anywhere; }
+.library-agent-identity { display: block; min-width: 0; max-width: 100%; }
+.library-agent-name { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.library-agent-meta { display: flex; flex-wrap: wrap; align-items: center; column-gap: 10px; row-gap: 3px; margin-top: 6px; color: var(--subtle); font-size: 12px; }
+.library-agent-meta .library-agent-branch { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--foreground); }
+.library-agent-meta .library-session-id { white-space: nowrap; }
+.library-agent-context, .library-document .library-agent-context { display: flex; gap: 6px; color: var(--subtle); font-size: 12px; white-space: nowrap; }
+.library-agent-context > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.library-session > .library-owner-header { align-items: stretch; flex-direction: column; }
+.library-owner-header .library-agent-context { margin-top: 4px; }
 .library-agent-row .icon-button { flex-shrink: 0; }
 @media (max-width: 600px) { .library-heading { align-items: start; flex-wrap: wrap; } }
