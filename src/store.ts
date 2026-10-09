@@ -11,7 +11,7 @@ import { isPreparedProposal, isProposal, isProposalWrite, type PreparedProposal,
 export type Owner = { agent: 'codex' | 'claude'; sessionId: string };
 export { isQuote, type Quote } from './quote.ts';
 export type RepoInfo = { display: string; branch?: string };
-export type DocumentRecord = { id: string; path: string; generated: boolean; providedTitle?: string; userTitle?: string; repoInfo?: RepoInfo; workspace?: string };
+export type DocumentRecord = { id: string; path: string; generated: boolean; providedTitle?: string; userTitle?: string; repoInfo?: RepoInfo; workspace?: string; baseBranch?: string };
 export type MessageSelection = { id: string; slug: string; quote: Quote; isVisible: boolean; label?: string; proposalError?: string };
 export type Message = { id: string; role: 'user' | 'agent'; text: string; requestId: string; createdAt: number; selections?: MessageSelection[]; messageQuote?: MessageQuote; fileQuote?: FileQuote; isPinned?: boolean; pinStyle?: PinStyle };
 export type Thread = { id: string; documentId: string; title?: string; createdAt?: number; isResolved: boolean; messages: Message[] };
@@ -49,7 +49,7 @@ export function isRepoInfo(v: unknown): v is RepoInfo {
   return isObject(v) && string(v.display) && v.display.trim().length > 0 && v.display.length <= 512 && (v.branch === undefined || (string(v.branch) && v.branch.length > 0 && v.branch.length <= 512));
 }
 function isDocument(v: unknown): v is DocumentRecord {
-  return isObject(v) && string(v.id) && string(v.path) && isAbsolute(v.path) && typeof v.generated === 'boolean' && optionalString(v.providedTitle) && optionalString(v.userTitle) && (v.repoInfo === undefined || isRepoInfo(v.repoInfo)) && (v.workspace === undefined || (string(v.workspace) && isAbsolute(v.workspace)));
+  return isObject(v) && string(v.id) && string(v.path) && isAbsolute(v.path) && typeof v.generated === 'boolean' && optionalString(v.providedTitle) && optionalString(v.userTitle) && (v.repoInfo === undefined || isRepoInfo(v.repoInfo)) && (v.workspace === undefined || (string(v.workspace) && isAbsolute(v.workspace))) && (v.baseBranch === undefined || isBranchName(v.baseBranch));
 }
 function isMessage(v: unknown): v is Message {
   if (isObject(v) && v.fileQuote !== undefined && (!isFileQuote(v.fileQuote) || v.role !== 'user' || v.messageQuote !== undefined || (Array.isArray(v.selections) && v.selections.length > 0))) return false;
@@ -167,11 +167,22 @@ export function get<T>(items: Record<string,T>, id: string): T {
   if (value === undefined) throw new DomainError('Not found', 404);
   return value;
 }
+// Strict subset of git ref-format rules; names reach git only as argv and may never look like options.
+export function isBranchName(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 200 && /^[A-Za-z0-9_][A-Za-z0-9._/-]*$/.test(value)
+    && !value.includes('..') && !value.includes('//') && !/[./]$/.test(value) && !value.includes('/.') && !/\.lock(\/|$)/.test(value);
+}
+export function setBaseBranch(state: State, documentId: string, baseBranch: string | null): void {
+  const document = get(state.documents, documentId);
+  if (baseBranch === null) { delete document.baseBranch; return; }
+  if (!isBranchName(baseBranch)) throw new DomainError('Invalid base branch name');
+  document.baseBranch = baseBranch;
+}
 export function createState(owner: Owner): State {
   ownerKey(owner);
   return { version: 5, owner: structuredClone(owner), documents: {}, threads: {}, requests: {}, proposals: {}, proposalWrites: {} };
 }
-export function registerDocument(state: State, input: {path: string; title?: string; generated: boolean; repoInfo?: RepoInfo; workspace?: string}): DocumentRecord {
+export function registerDocument(state: State, input: {path: string; title?: string; generated: boolean; repoInfo?: RepoInfo; workspace?: string; baseBranch?: string}): DocumentRecord {
   if (!isAbsolute(input.path)) throw new DomainError('Document path must be absolute');
   if (input.repoInfo !== undefined && !isRepoInfo(input.repoInfo)) throw new DomainError('Invalid repository metadata');
   const path = resolve(input.path);
@@ -184,6 +195,7 @@ export function registerDocument(state: State, input: {path: string; title?: str
   // The badge describes the declared root, so a root without Git metadata clears it.
   else if (input.workspace !== undefined) delete document.repoInfo;
   if (input.workspace !== undefined) document.workspace = input.workspace;
+  if (input.baseBranch !== undefined) { if (!isBranchName(input.baseBranch)) throw new DomainError('Invalid base branch name'); document.baseBranch = input.baseBranch; }
   ensureGeneralThread(state, document.id);
   if (input.title?.trim()) document.providedTitle = input.title.trim();
   return document;

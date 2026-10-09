@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { listFiles, readCode, readPreview, type VaultNode } from '../src/files.ts';
+import { authorizePath, listDirectory, readCode, readPreview, type DirectoryEntry } from '../src/files.ts';
 import { fixture } from './support.ts';
 
 const git = (cwd: string, ...args: string[]) => promisify(execFile)('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', ...args], { cwd });
@@ -20,52 +20,22 @@ async function write(root: string, files: Record<string, string>) {
     await writeFile(join(root, path), text);
   }
 }
-const names = (nodes: VaultNode[]) => nodes.map(node => node.type === 'folder' ? `${node.name}/` : node.name).sort();
+const names = (nodes: DirectoryEntry[]) => nodes.map(node => node.type === 'folder' ? `${node.name}/` : node.name).sort();
 
-test('listing follows Plannotator file types, exclusions and folder-first order', async t => {
+test('listing is one directory deep, follows Plannotator file types and exclusions, folders first', async t => {
   const root = await workspace(t);
   await write(root, {
     'README.md': '# Hi', 'docs/plan.md': '# Plan', 'docs/flow.mmd': 'graph TD; A-->B', 'page.html': '<p>x</p>',
     'config.yaml': 'a: 1', 'src.ts': 'export {}', '.env': 'SECRET=1', '.env.example': 'SECRET=',
     'node_modules/pkg/README.md': '# dep', '.claude/worktrees/x/notes.md': '# nested worktree',
   });
-  const listing = await listFiles(root);
-  assert.equal(listing.root, root);
-  assert.equal(listing.truncated, false);
-  assert.equal(listing.fileLimit, 5000);
-  assert.equal(listing.tree[0].type, 'folder');
-  assert.deepEqual(names(listing.tree), names([
-    { name: 'docs', path: 'docs', type: 'folder' }, { name: '.env.example', path: '.env.example', type: 'file' },
-    { name: 'config.yaml', path: 'config.yaml', type: 'file' }, { name: 'page.html', path: 'page.html', type: 'file' },
-    { name: 'README.md', path: 'README.md', type: 'file' },
-    { name: 'src.ts', path: 'src.ts', type: 'file' },
-  ]));
-  assert.deepEqual(names(listing.tree.find(node => node.name === 'docs')!.children!), ['flow.mmd', 'plan.md']);
-  assert.equal(listing.tree.find(node => node.name === 'docs')!.children!.find(node => node.name === 'plan.md')!.path, 'docs/plan.md');
-});
-
-test('changed files survive the cap and report Git status', async t => {
-  const root = await workspace(t);
-  await git(root, 'init', '-b', 'main');
-  await write(root, { 'a0.md': '# 0', 'a1.md': '# 1', 'a2.md': '# 2', 'a3.md': '# 3' });
-  await git(root, 'add', '.');
-  await git(root, 'commit', '-m', 'initial');
-  await write(root, { 'z-untracked.md': '# new', 'a0.md': '# 0 changed\n\nmore\n' });
-  const listing = await listFiles(root, 3);
-  assert.equal(listing.truncated, true);
-  assert.equal(listing.fileLimit, 3);
-  assert.ok(names(listing.tree).includes('z-untracked.md'));
-  assert.ok(names(listing.tree).includes('a0.md'));
-  assert.equal(listing.workspaceStatus.available, true);
-  assert.ok(Object.keys(listing.workspaceStatus.files).some(path => path.endsWith('z-untracked.md')));
-});
-
-test('a workspace outside Git still lists files', async t => {
-  const root = await workspace(t);
-  await write(root, { 'notes.md': '# Notes' });
-  const listing = await listFiles(root);
-  assert.deepEqual(names(listing.tree), ['notes.md']);
-  assert.equal(listing.workspaceStatus.available, false);
+  const listing = await listDirectory(root);
+  assert.equal(listing.dir, root);
+  assert.equal(listing.entries[0].type, 'folder');
+  assert.deepEqual(names(listing.entries), ['.env.example', 'README.md', 'config.yaml', 'docs/', 'page.html', 'src.ts']);
+  assert.deepEqual(listing.entries.find(entry => entry.name === 'docs'), { name: 'docs', path: join(root, 'docs'), type: 'folder' });
+  assert.deepEqual(names((await listDirectory(join(root, 'docs'))).entries), ['flow.mmd', 'plan.md']);
+  await assert.rejects(listDirectory(join(root, 'missing')), { status: 404 });
 });
 
 test('previews stay inside the workspace and say how to render', async t => {
@@ -96,24 +66,25 @@ test('previews stay inside the workspace and say how to render', async t => {
 
 test('viewer file routes default to the workspace and allow an explicit browsing directory', async t => {
   const root = await workspace(t);
-  await write(root, { 'notes.md': '# Notes' });
+  await write(root, { 'notes.md': '# Notes', 'sub/inner.md': '# Inner' });
   const f = await fixture(t), doc = await f.register();
   assert.equal((await f.view(`/api/files?document=${doc.id}`)).status, 404);
   await f.agent('/agent/documents', { path: doc.path, workspace: root });
-  const listing = await (await f.view(`/api/files?document=${doc.id}&dirPath=${encodeURIComponent('/etc')}`)).json();
-  assert.equal(listing.root, root);
-  assert.deepEqual(names(listing.tree), ['notes.md']);
+  const listing = await (await f.view(`/api/files?document=${doc.id}`)).json();
+  assert.equal(listing.dir, root);
+  assert.deepEqual(names(listing.entries), ['notes.md', 'sub/']);
+  assert.deepEqual(names((await (await f.view(`/api/files?document=${doc.id}&dir=${encodeURIComponent(join(root, 'sub'))}`)).json()).entries), ['inner.md']);
   const outside = await workspace(t);
   await write(outside, { 'nested/app.ts': 'export const outside = true;', 'note.md': '# Outside' });
   const directory = encodeURIComponent(outside);
-  assert.equal((await f.view(`/api/files?document=${doc.id}&directory=${directory}`)).status, 403);
+  assert.equal((await f.view(`/api/files?document=${doc.id}&dir=${directory}`)).status, 403);
   assert.equal((await f.view('/api/files/root', { documentId: doc.id, directory: outside })).status, 200);
-  const browsed = await (await f.view(`/api/files?document=${doc.id}&directory=${directory}`)).json();
-  assert.equal(browsed.root, outside);
-  assert.deepEqual(names(browsed.tree), ['nested/', 'note.md']);
+  const browsed = await (await f.view(`/api/files?document=${doc.id}&dir=${directory}`)).json();
+  assert.equal(browsed.dir, outside);
+  assert.deepEqual(names(browsed.entries), ['nested/', 'note.md']);
   assert.equal((await (await f.view(`/api/files/code?document=${doc.id}&directory=${directory}&path=nested/app.ts`)).json()).contents, 'export const outside = true;');
-  assert.equal((await f.view(`/api/files?document=${doc.id}&directory=relative`)).status, 400);
-  assert.equal((await fetch(`${f.url}/api/files?document=${doc.id}&directory=${directory}`)).status, 403);
+  assert.equal((await f.view(`/api/files?document=${doc.id}&dir=relative`)).status, 400);
+  assert.equal((await fetch(`${f.url}/api/files?document=${doc.id}&dir=${directory}`)).status, 403);
   assert.equal((await (await f.view('/api/state')).json()).documents[doc.id].workspace, root);
   assert.deepEqual(await (await f.view(`/api/files/content?document=${doc.id}&path=notes.md`)).json(), { path: 'notes.md', text: '# Notes', renderAs: 'markdown' });
   assert.equal((await f.view(`/api/files/content?document=${doc.id}&path=${encodeURIComponent('../notes.md')}`)).status, 403);
@@ -123,6 +94,29 @@ test('viewer file routes default to the workspace and allow an explicit browsing
   const gone = await f.view(`/api/files?document=${doc.id}`);
   assert.equal(gone.status, 404);
   assert.match((await gone.json()).error, /workspace directory is unavailable/);
+});
+
+test('authorization is realpath containment in the workspace or a granted root', async t => {
+  const root = await workspace(t), grant = await workspace(t), outside = await workspace(t), sibling = `${root}-sibling`;
+  await write(root, { 'a/b.md': '# B' });
+  await write(outside, { 'secret.md': '# secret' });
+  await mkdir(sibling); t.after(() => rm(sibling, { recursive: true, force: true }));
+  await symlink(outside, join(root, 'link'));
+  await symlink(join(outside, 'secret.md'), join(root, 'escape.md'));
+  const status = (path: string, grants: string[] = []) => authorizePath(root, grants, path).then(() => 200, (error: { status?: number }) => error.status);
+  assert.equal(await status(root), 200);
+  assert.equal(await status(join(root, 'a/b.md')), 200);
+  assert.equal(await status(join(root, 'a/deleted.md')), 200);
+  assert.equal(await status(sibling), 403);
+  assert.equal(await status(outside), 403);
+  assert.equal(await status(join(root, 'link')), 403);
+  assert.equal(await status(join(root, 'link/secret.md')), 403);
+  assert.equal(await status(join(root, 'link/gone.md')), 403);
+  assert.equal(await status(join(root, 'escape.md')), 403);
+  assert.equal(await status(join(root, '..', basename(outside), 'secret.md')), 403);
+  assert.equal(await status(join(grant, 'x.md'), [grant]), 200);
+  assert.equal(await status(join(grant, 'x.md')), 403);
+  assert.equal(await status('relative'), 400);
 });
 
 test('code reads stay inside the workspace and accept line suffixes', async t => {
@@ -159,4 +153,40 @@ test('viewer code route reads the stored workspace', async t => {
   await f.agent('/agent/documents', { path: doc.path, workspace: root });
   assert.deepEqual(await (await f.view(`/api/files/code?document=${doc.id}&path=${encodeURIComponent('src/app.ts:1')}`)).json(), { codeFile: true, filepath: 'src/app.ts', contents: 'export {};\n' });
   assert.equal((await f.view(`/api/files/code?document=${doc.id}&path=${encodeURIComponent('../x.ts')}`)).status, 403);
+});
+
+test('status, diff, branches and base endpoints use the document workspace and base branch', async t => {
+  const root = await workspace(t), outside = await workspace(t);
+  await git(root, 'init', '-b', 'main');
+  await write(root, { 'a.md': '1\n2\n' });
+  await git(root, 'add', '.'); await git(root, 'commit', '-m', 'i');
+  await git(root, 'checkout', '-b', 'feature');
+  await write(root, { 'a.md': '1\n2\n3\n', 'new.md': 'n\n' });
+  await write(outside, { 'x.md': 'x' });
+  const f = await fixture(t), doc = await f.register();
+  const open = await (await f.agent('/agent/documents', { path: doc.path, workspace: root, baseBranch: 'main' })).json();
+  assert.equal(open.baseBranch, 'main');
+  assert.equal((await (await f.view('/api/state')).json()).documents[doc.id].baseBranch, 'main');
+  const query = (route: string, extra = '') => f.view(`/api/files/${route}?document=${doc.id}${extra}`);
+  const uncommitted = await (await query('status', '&mode=uncommitted')).json();
+  assert.equal(uncommitted.comparison.mode, 'uncommitted');
+  assert.deepEqual(Object.keys(uncommitted.files).map(p => p.slice(root.length + 1)).sort(), ['a.md', 'new.md']);
+  const base = await (await query('status', '&mode=base')).json();
+  assert.equal(base.comparison.base, 'main');
+  assert.equal(base.totals.files, 2);
+  assert.equal((await query('status', '&mode=base&base=--bad')).status, 400);
+  assert.equal((await query('status', '&mode=nope')).status, 400);
+  assert.equal((await query('status', `&directory=${encodeURIComponent(outside)}`)).status, 403);
+  assert.deepEqual((await (await query('branches')).json()).branches, ['feature', 'main']);
+  const diff = await (await query('diff', `&mode=base&path=${encodeURIComponent(join(root, 'a.md'))}`)).json();
+  assert.deepEqual(diff, { path: join(root, 'a.md'), old: '1\n2\n', current: '1\n2\n3\n', status: 'modified' });
+  assert.equal((await (await query('diff', `&path=${encodeURIComponent(join(root, 'new.md'))}`)).json()).status, 'added');
+  assert.equal((await query('diff', `&path=${encodeURIComponent(join(outside, 'x.md'))}`)).status, 403);
+  assert.equal((await query('diff', `&path=${encodeURIComponent(join(root, 'missing.md'))}`)).status, 404);
+  assert.equal((await f.view(`/api/documents/${doc.id}/base`, { baseBranch: 'release/2' })).status, 200);
+  assert.equal((await (await f.view('/api/state')).json()).documents[doc.id].baseBranch, 'release/2');
+  assert.equal((await f.view(`/api/documents/${doc.id}/base`, { baseBranch: '-x' })).status, 400);
+  assert.equal((await f.view(`/api/documents/${doc.id}/base`, { baseBranch: null })).status, 200);
+  assert.equal((await (await f.view('/api/state')).json()).documents[doc.id].baseBranch, undefined);
+  assert.equal((await f.agent('/agent/documents', { path: doc.path, workspace: root, baseBranch: '--x' })).status, 400);
 });

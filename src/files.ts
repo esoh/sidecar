@@ -1,6 +1,6 @@
 import { readdir, readFile, realpath, stat } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { filterWorkspaceStatusForDirectory, getWorkspaceStatusForDirectory, getWorkspaceStatusRelativePaths, type WorkspaceStatusPayload } from './workspace-status.ts';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { filterWorkspaceStatusForDirectory, getWorkspaceStatusForDirectory, readComparisonOldText, type ComparisonRequest, type WorkspaceStatusResult } from './workspace-status.ts';
 import { DomainError } from './store.ts';
 
 // File-type predicates copied from @plannotator/core 0.25.7 annotatable.ts (MIT): the package
@@ -26,77 +26,62 @@ export function isFileBrowserExcludedPath(relativePath: string): boolean {
   if (!normalized) return false;
   return normalized.split('/').filter(Boolean).some(part => FILE_BROWSER_EXCLUDED_NAMES.has(part));
 }
-export interface VaultNode { name: string; path: string; type: 'file' | 'folder'; children?: VaultNode[] }
-export function buildFileTree(relativePaths: string[], directories: string[] = []): VaultNode[] {
-  const root: VaultNode[] = [];
-  for (const { filePath, isDirectory } of [...relativePaths.map(filePath => ({ filePath, isDirectory: false })), ...directories.map(filePath => ({ filePath, isDirectory: true }))]) {
-    const parts = filePath.split('/');
-    let current = root, pathSoFar = '';
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i], isFile = i === parts.length - 1 && !isDirectory;
-      pathSoFar = pathSoFar ? `${pathSoFar}/${part}` : part;
-      let node = current.find(n => n.name === part && n.type === (isFile ? 'file' : 'folder'));
-      if (!node) {
-        node = { name: part, path: pathSoFar, type: isFile ? 'file' : 'folder' };
-        if (!isFile) node.children = [];
-        current.push(node);
-      }
-      if (!isFile) current = node.children!;
-    }
-  }
-  const sortNodes = (nodes: VaultNode[]) => {
-    nodes.sort((a, b) => a.type !== b.type ? (a.type === 'folder' ? -1 : 1) : a.name.localeCompare(b.name));
-    for (const node of nodes) if (node.children) sortNodes(node.children);
-  };
-  sortNodes(root);
-  return root;
-}
-
-// Walk, cap and changed-file seeding follow handleFileBrowserFiles in Plannotator
-// packages/server/reference-handlers.ts at 772c620 (MIT).
-const DEFAULT_FILE_LIMIT = 5_000;
+// Listing and changed-file filtering follow handleFileBrowserFiles in Plannotator
+// packages/server/reference-handlers.ts at 772c620 (MIT), but list one directory per request.
 const includeWorkspaceFile = (relativePath: string) =>
   (ANNOTATABLE_DOC_REGEX.test(relativePath) || CODE_FILE_REGEX.test(relativePath)) && !isFileBrowserExcludedPath(relativePath);
-type WalkState = { files: Set<string>; folders: Set<string>; limit: number; truncated: boolean };
-function addFile(state: WalkState, relativePath: string) {
-  if (state.files.has(relativePath)) return;
-  if (state.files.size >= state.limit) { state.truncated = true; return; }
-  state.files.add(relativePath);
+export type DirectoryEntry = { name: string; path: string; type: 'file' | 'folder' };
+export type DirectoryListing = { dir: string; entries: DirectoryEntry[] };
+export async function listDirectory(dir: string): Promise<DirectoryListing> {
+  if (!(await stat(dir).catch(() => null))?.isDirectory())
+    throw new DomainError('The workspace directory is unavailable. Reopen the document from your agent.', 404);
+  const entries: DirectoryEntry[] = [];
+  // Symlinks are neither files nor directories to Dirent, so they are never followed out of the root.
+  for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+    if (entry.isDirectory() && !isFileBrowserExcludedPath(entry.name)) entries.push({ name: entry.name, path: join(dir, entry.name), type: 'folder' });
+    else if (entry.isFile() && includeWorkspaceFile(entry.name)) entries.push({ name: entry.name, path: join(dir, entry.name), type: 'file' });
+  }
+  entries.sort((a, b) => a.type !== b.type ? (a.type === 'folder' ? -1 : 1) : a.name.localeCompare(b.name));
+  return { dir, entries };
 }
-async function walk(dir: string, root: string, state: WalkState): Promise<void> {
-  if (state.truncated) return;
-  let entries;
-  try { entries = await readdir(dir, { withFileTypes: true }); }
-  catch { return; }
-  for (const entry of entries) {
-    if (state.truncated) return;
-    const fullPath = join(dir, entry.name);
-    const relativePath = relative(root, fullPath).replace(/\\/g, '/');
-    if (entry.isDirectory()) {
-      if (!isFileBrowserExcludedPath(relativePath)) {
-        // Parent navigation can reach large trees; bound directories as well as files.
-        if (state.folders.size >= state.limit) { state.truncated = true; return; }
-        state.folders.add(relativePath);
-        await walk(fullPath, root, state);
-      }
-    } else if (entry.isFile() && includeWorkspaceFile(relativePath)) {
-      addFile(state, relativePath);
+export async function readStatus(directory: string, request: ComparisonRequest): Promise<WorkspaceStatusResult> {
+  const status = await getWorkspaceStatusForDirectory(directory, request);
+  return filterWorkspaceStatusForDirectory(status, directory, includeWorkspaceFile);
+}
+export type FileDiffData = { path: string; old: string | null; current: string | null; status?: 'added' | 'deleted' | 'modified' };
+export async function readDiff(root: string, path: string, request: ComparisonRequest): Promise<FileDiffData> {
+  const relativePath = relative(root, path).split(sep).join('/');
+  if (!relativePath || isOutside(root, path) || !includeWorkspaceFile(relativePath)) throw new DomainError('This file type cannot be compared', 415);
+  const info = await stat(path).catch(() => null);
+  if (info && !info.isFile()) throw new DomainError('A regular file is required');
+  if (info && info.size > MAX_ANNOTATABLE_FILE_BYTES) throw new DomainError('File exceeds the 2 MiB preview limit', 413);
+  const current = info ? await readFile(path, 'utf8') : null;
+  const old = await readComparisonOldText(path, request);
+  if (current === null && old === null) throw new DomainError('File not found', 404);
+  return { path, old, current, ...(old === null ? { status: 'added' as const } : current === null ? { status: 'deleted' as const } : old !== current ? { status: 'modified' as const } : {}) };
+}
+// Realpath that tolerates a missing leaf (deleted files) by resolving the nearest existing ancestor.
+async function realpathLoose(path: string): Promise<string> {
+  let existing = path;
+  for (;;) {
+    try { return resolve(await realpath(existing), relative(existing, path)); }
+    catch (error) {
+      const parent = dirname(existing);
+      if (parent === existing || !(error instanceof Error && 'code' in error && (error.code === 'ENOENT' || error.code === 'ENOTDIR'))) throw error;
+      existing = parent;
     }
   }
 }
-export type FileListing = { root: string; tree: VaultNode[]; workspaceStatus: WorkspaceStatusPayload; truncated: boolean; fileLimit: number };
-export async function listFiles(root: string, limit = DEFAULT_FILE_LIMIT): Promise<FileListing> {
-  if (!(await stat(root).catch(() => null))?.isDirectory())
-    throw new DomainError('The workspace directory is unavailable. Reopen the document from your agent.', 404);
-  const state: WalkState = { files: new Set(), folders: new Set(), limit, truncated: false };
-  // Seed changed files first so the cap never hides what the user just touched.
-  const workspaceStatus = filterWorkspaceStatusForDirectory(await getWorkspaceStatusForDirectory(root), root, includeWorkspaceFile);
-  for (const match of getWorkspaceStatusRelativePaths(workspaceStatus, root, includeWorkspaceFile)) {
-    addFile(state, match);
-    if (state.truncated) break;
+// An absolute path is allowed when its real location is inside the real workspace or an explicitly granted root.
+export async function authorizePath(workspace: string, grants: Iterable<string>, candidate: string): Promise<{ path: string; root: string }> {
+  if (!isAbsolute(candidate) || candidate.includes('\0')) throw new DomainError('Expected an absolute path');
+  const real = await realpathLoose(resolve(candidate)).catch(() => { throw new DomainError('Path is unavailable', 404); });
+  if (!(await realpath(workspace).catch(() => null))) throw new DomainError('The workspace directory is unavailable. Reopen the document from your agent.', 404);
+  for (const root of [workspace, ...grants]) {
+    const realRoot = await realpath(root).catch(() => null);
+    if (realRoot && !isOutside(realRoot, real)) return { path: real, root: realRoot };
   }
-  await walk(root, root, state);
-  return { root, tree: buildFileTree([...state.files].sort(), [...state.folders]), workspaceStatus, truncated: state.truncated, fileLimit: limit };
+  throw new DomainError('Open this folder in the file browser first', 403);
 }
 
 export type FilePreviewData = { path: string; text: string; renderAs: 'markdown' | 'html' | 'mermaid' | 'graphviz' };

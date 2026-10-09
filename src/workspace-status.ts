@@ -2,7 +2,8 @@
 import { spawn, spawnSync } from "node:child_process";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { DomainError, isBranchName } from "./store.ts";
 
 import type { WorkspaceFileChange, WorkspaceStatusPayload, GitRepositoryInfo, WorkspaceFileStatus } from '@plannotator/core/workspace-status-types';
 export type { WorkspaceFileChange, WorkspaceStatusPayload, GitRepositoryInfo, WorkspaceFileStatus };
@@ -11,11 +12,25 @@ const TEXT_FILE_MAX_BYTES = 2 * 1024 * 1024;
 const GIT_MAX_BUFFER = 20 * 1024 * 1024;
 const DEFAULT_GIT_TIMEOUT_MS = 30_000;
 type GitResult = { ok: true; stdout: string } | { ok: false; error: string };
+export type ComparisonMode = "uncommitted" | "base";
+export interface WorkspaceComparison {
+	mode: ComparisonMode;
+	base?: string;
+	ref?: string;
+	commit?: string;
+	behind?: number;
+	remoteCheckedAt?: number;
+	remoteError?: string;
+	error?: string;
+}
+export type ComparisonRequest = { mode: ComparisonMode; base?: string; fetch?: boolean };
+export type WorkspaceStatusResult = WorkspaceStatusPayload & { comparison: WorkspaceComparison };
 interface WorkspaceStatusFlight {
-	promise?: Promise<WorkspaceStatusPayload>;
+	promise?: Promise<WorkspaceStatusResult>;
 	rerunRequested: boolean;
 }
 const workspaceStatusFlights = new Map<string, WorkspaceStatusFlight>();
+const COUNTS_NONE = { additions: 0, deletions: 0 };
 
 function getGitTimeoutMs(): number {
 	const timeout = Number.parseInt(process.env.PLANNOTATOR_GIT_TIMEOUT_MS ?? "", 10);
@@ -35,10 +50,11 @@ function runGit(cwd: string, args: string[]): GitResult {
 	return { ok: true, stdout: result.stdout ?? "" };
 }
 
-function runGitAsync(cwd: string, args: string[]): Promise<GitResult> {
+function runGitAsync(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Promise<GitResult> {
 	return new Promise((resolveResult) => {
 		const child = spawn("git", ["--no-optional-locks", "-C", cwd, ...args], {
 			stdio: ["ignore", "pipe", "pipe"],
+			...(env ? { env: { ...process.env, ...env } } : {}),
 		});
 		let stdout = "";
 		let stderr = "";
@@ -89,27 +105,6 @@ function runGitAsync(cwd: string, args: string[]): Promise<GitResult> {
 
 function resolveGitPath(cwd: string, value: string): string {
 	return isAbsolute(value) ? value : resolve(cwd, value);
-}
-
-function addLineCounts(
-	target: Map<string, { additions: number; deletions: number }>,
-	source: Map<string, { additions: number; deletions: number }>,
-): void {
-	for (const [path, counts] of source) {
-		const existing = target.get(path) ?? { additions: 0, deletions: 0 };
-		target.set(path, {
-			additions: existing.additions + counts.additions,
-			deletions: existing.deletions + counts.deletions,
-		});
-	}
-}
-
-function combinedLineCounts(
-	...sources: Array<Map<string, { additions: number; deletions: number }>>
-): Map<string, { additions: number; deletions: number }> {
-	const combined = new Map<string, { additions: number; deletions: number }>();
-	for (const source of sources) addLineCounts(combined, source);
-	return combined;
 }
 
 export function getGitRepositoryInfo(cwd: string): GitRepositoryInfo | null {
@@ -280,27 +275,88 @@ function unavailableWorkspaceStatus(
 	};
 }
 
-async function computeWorkspaceStatusForDirectory(rootPath: string): Promise<WorkspaceStatusPayload> {
+type StatusEntry = { repoRelativePath: string; oldRepoRelativePath?: string; status: WorkspaceFileStatus; staged: boolean; unstaged: boolean };
+
+const NAME_STATUS: Record<string, WorkspaceFileStatus> = { M: "modified", A: "added", D: "deleted", R: "renamed", C: "copied", T: "typechange", U: "conflicted" };
+function parseNameStatus(output: string): StatusEntry[] {
+	const fields = output.split("\0");
+	const result: StatusEntry[] = [];
+	for (let i = 0; i < fields.length;) {
+		const code = fields[i++];
+		if (!code) continue;
+		const copied = code[0] === "R" || code[0] === "C";
+		const oldRepoRelativePath = copied ? fields[i++] : undefined;
+		const repoRelativePath = fields[i++];
+		if (!repoRelativePath) continue;
+		result.push({ repoRelativePath, oldRepoRelativePath, status: NAME_STATUS[code[0]] ?? "modified", staged: false, unstaged: false });
+	}
+	return result;
+}
+
+async function revSha(repoRoot: string, rev: string): Promise<string | undefined> {
+	const result = await runGitAsync(repoRoot, ["rev-parse", "--verify", "--quiet", `${rev}^{commit}`]);
+	return result.ok ? result.stdout.trim() || undefined : undefined;
+}
+
+// Resolve what the working tree is compared against. Base mode uses merge-base(HEAD, base) so commits that exist
+// only on the base never read as our changes; an old merge-base is normal and not an error.
+async function resolveComparison(repo: GitRepositoryInfo, request: ComparisonRequest, fetch: boolean): Promise<{ comparison: WorkspaceComparison; target?: string }> {
+	if (request.mode !== "base") {
+		const commit = await revSha(repo.repoRoot, "HEAD");
+		return { comparison: { mode: "uncommitted", ...(commit ? { commit } : {}) }, target: "HEAD" };
+	}
+	const base = request.base;
+	const comparison: WorkspaceComparison = { mode: "base", ...(base ? { base } : {}) };
+	if (!isBranchName(base)) return { comparison: { ...comparison, error: "invalid-base-branch" } };
+	if (fetch) {
+		const fetched = await runGitAsync(repo.repoRoot, ["fetch", "--no-tags", "origin", base], { GIT_TERMINAL_PROMPT: "0" });
+		if (!fetched.ok) comparison.remoteError = fetched.error;
+	}
+	// FETCH_HEAD is per worktree; a fetch from any worktree refreshes the shared remote refs.
+	const fetchedAt = await Promise.all([...new Set([repo.gitDir, repo.gitCommonDir])].map((dir) => stat(join(dir, "FETCH_HEAD")).then((info) => info.mtimeMs, () => 0)));
+	if (Math.max(...fetchedAt) > 0) comparison.remoteCheckedAt = Math.floor(Math.max(...fetchedAt));
+	let refSha = await revSha(repo.repoRoot, `refs/remotes/origin/${base}`);
+	if (refSha) comparison.ref = `origin/${base}`;
+	else {
+		refSha = await revSha(repo.repoRoot, `refs/heads/${base}`);
+		if (refSha) comparison.ref = base;
+	}
+	if (!refSha) return { comparison: { ...comparison, error: "base-not-found" } };
+	const mergeBase = await runGitAsync(repo.repoRoot, ["merge-base", "HEAD", refSha]);
+	const commit = mergeBase.ok ? mergeBase.stdout.trim() : "";
+	if (!commit) return { comparison: { ...comparison, error: "no-merge-base" } };
+	comparison.commit = commit;
+	const behind = await runGitAsync(repo.repoRoot, ["rev-list", "--count", `HEAD..${refSha}`]);
+	if (behind.ok) comparison.behind = Number.parseInt(behind.stdout, 10) || 0;
+	return { comparison, target: commit };
+}
+
+async function computeWorkspaceStatusForDirectory(rootPath: string, request: ComparisonRequest, fetch: boolean): Promise<WorkspaceStatusResult> {
+	const fail = (error: string, comparison: WorkspaceComparison, repoRoot?: string): WorkspaceStatusResult =>
+		({ ...unavailableWorkspaceStatus(rootPath, error, repoRoot), comparison });
 	const repo = await getGitRepositoryInfoAsync(rootPath);
-	if (!repo) return unavailableWorkspaceStatus(rootPath, "not-a-git-repo");
+	if (!repo) return fail("not-a-git-repo", { mode: request.mode });
+	const { comparison, target } = await resolveComparison(repo, request, fetch);
+	if (!target) return fail(comparison.error ?? "comparison-unavailable", comparison, repo.repoRoot);
 
-	const rootPathspec = relative(repo.repoRoot, rootPath).replace(/\\/g, "/") || ".";
+	const relativeRoot = relative(repo.repoRoot, rootPath).replace(/\\/g, "/");
+	const rootPathspec = relativeRoot ? `:(literal)${relativeRoot}` : ".";
 	const status = await runGitAsync(repo.repoRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", rootPathspec]);
-	if ("error" in status) return unavailableWorkspaceStatus(rootPath, status.error, repo.repoRoot);
+	if (!status.ok) return fail(status.error, comparison, repo.repoRoot);
 
-	const entries = parsePorcelain(status.stdout);
-	const numstat = await runGitAsync(repo.repoRoot, ["diff", "--numstat", "-z", "HEAD", "--", rootPathspec]);
-	const headLineCounts = numstat.ok ? parseNumstat(numstat.stdout) : new Map<string, { additions: number; deletions: number }>();
-	let splitLineCounts: Map<string, { additions: number; deletions: number }> | null = null;
-	if (entries.some((entry) => entry.staged && entry.unstaged)) {
-		const [cached, unstaged] = await Promise.all([
-			runGitAsync(repo.repoRoot, ["diff", "--cached", "--numstat", "-z", "--", rootPathspec]),
-			runGitAsync(repo.repoRoot, ["diff", "--numstat", "-z", "--", rootPathspec]),
-		]);
-		splitLineCounts = combinedLineCounts(
-			cached.ok ? parseNumstat(cached.stdout) : new Map<string, { additions: number; deletions: number }>(),
-			unstaged.ok ? parseNumstat(unstaged.stdout) : new Map<string, { additions: number; deletions: number }>(),
-		);
+	const porcelain = parsePorcelain(status.stdout);
+	// Net counts against the comparison commit: a file with staged and unstaged edits is counted once.
+	const numstat = await runGitAsync(repo.repoRoot, ["diff", "--numstat", "-z", "-M", target, "--", rootPathspec]);
+	const lineCounts = numstat.ok ? parseNumstat(numstat.stdout) : new Map<string, { additions: number; deletions: number }>();
+	let entries: StatusEntry[] = porcelain;
+	if (request.mode === "base") {
+		const names = await runGitAsync(repo.repoRoot, ["diff", "--name-status", "-z", "-M", target, "--", rootPathspec]);
+		if (!names.ok) return fail(names.error, comparison, repo.repoRoot);
+		const flags = new Map(porcelain.map((entry) => [entry.repoRelativePath, entry]));
+		entries = [
+			...parseNameStatus(names.stdout).map((entry) => ({ ...entry, staged: flags.get(entry.repoRelativePath)?.staged ?? false, unstaged: flags.get(entry.repoRelativePath)?.unstaged ?? false })),
+			...porcelain.filter((entry) => entry.status === "untracked"),
+		];
 	}
 
 	const files: Record<string, WorkspaceFileChange> = {};
@@ -311,11 +367,8 @@ async function computeWorkspaceStatusForDirectory(rootPath: string): Promise<Wor
 		const absolutePath = resolve(repo.repoRoot, entry.repoRelativePath);
 		if (!isWithinPath(absolutePath, rootPath)) continue;
 
-		const lineCounts = entry.staged && entry.unstaged && splitLineCounts ? splitLineCounts : headLineCounts;
-		const counts = lineCounts.get(entry.repoRelativePath) ?? { additions: 0, deletions: 0 };
-		const oldCounts = entry.oldRepoRelativePath
-			? lineCounts.get(entry.oldRepoRelativePath) ?? { additions: 0, deletions: 0 }
-			: { additions: 0, deletions: 0 };
+		const counts = lineCounts.get(entry.repoRelativePath) ?? COUNTS_NONE;
+		const oldCounts = entry.oldRepoRelativePath ? lineCounts.get(entry.oldRepoRelativePath) ?? COUNTS_NONE : COUNTS_NONE;
 		const countedAdditions = counts.additions + oldCounts.additions;
 		const additions = (entry.status === "untracked" || entry.status === "added") && countedAdditions === 0
 			? await countTextFileLines(absolutePath)
@@ -349,71 +402,92 @@ async function computeWorkspaceStatusForDirectory(rootPath: string): Promise<Wor
 			additions: totalAdditions,
 			deletions: totalDeletions,
 		},
+		comparison,
 	};
 }
 
-async function runWorkspaceStatusFlight(rootPath: string, flight: WorkspaceStatusFlight): Promise<WorkspaceStatusPayload> {
+async function runWorkspaceStatusFlight(key: string, rootPath: string, request: ComparisonRequest, flight: WorkspaceStatusFlight): Promise<WorkspaceStatusResult> {
 	try {
-		let status: WorkspaceStatusPayload;
+		let status: WorkspaceStatusResult;
+		let fetch = !!request.fetch;
 		do {
 			flight.rerunRequested = false;
-			status = await computeWorkspaceStatusForDirectory(rootPath);
+			status = await computeWorkspaceStatusForDirectory(rootPath, request, fetch);
+			fetch = false;
 		} while (flight.rerunRequested);
 		return status;
 	} finally {
-		if (workspaceStatusFlights.get(rootPath) === flight) {
-			workspaceStatusFlights.delete(rootPath);
+		if (workspaceStatusFlights.get(key) === flight) {
+			workspaceStatusFlights.delete(key);
 		}
 	}
 }
 
-export async function getWorkspaceStatusForDirectory(dirPath: string): Promise<WorkspaceStatusPayload> {
+export async function getWorkspaceStatusForDirectory(dirPath: string, request: ComparisonRequest = { mode: "uncommitted" }): Promise<WorkspaceStatusResult> {
 	let rootPath: string;
 	try {
 		rootPath = await realpath(resolve(dirPath));
 	} catch {
-		return unavailableWorkspaceStatus(resolve(dirPath), "invalid-directory");
+		return { ...unavailableWorkspaceStatus(resolve(dirPath), "invalid-directory"), comparison: { mode: request.mode } };
 	}
 
-	const existing = workspaceStatusFlights.get(rootPath);
+	// The fetch flag is part of the key so a fetching request is never satisfied by a flight that will not fetch.
+	const key = [rootPath, request.mode, request.mode === "base" ? request.base ?? "" : "", request.fetch ? "fetch" : ""].join("\0");
+	const existing = workspaceStatusFlights.get(key);
 	if (existing?.promise) {
 		existing.rerunRequested = true;
 		return existing.promise;
 	}
 
 	const flight: WorkspaceStatusFlight = { rerunRequested: false };
-	const status = runWorkspaceStatusFlight(rootPath, flight);
+	const status = runWorkspaceStatusFlight(key, rootPath, request, flight);
 	flight.promise = status;
-	workspaceStatusFlights.set(rootPath, flight);
+	workspaceStatusFlights.set(key, flight);
 	return status;
 }
 
-export function getWorkspaceStatusRelativePaths(
-	status: WorkspaceStatusPayload,
-	dirPath: string,
-	filter?: (relativePath: string, change: WorkspaceFileChange) => boolean,
-): string[] {
-	let rootPath: string;
-	try {
-		rootPath = realpathSync(resolve(dirPath));
-	} catch {
-		return [];
-	}
-	const paths: string[] = [];
-	for (const change of Object.values(status.files)) {
-		const rel = relative(rootPath, change.path).replace(/\\/g, "/");
-		if (!rel || rel.startsWith("..") || isAbsolute(rel)) continue;
-		if (filter && !filter(rel, change)) continue;
-		paths.push(rel);
-	}
-	return paths;
+// Text of a file at the comparison commit (null when absent there), following a rename to its old path.
+export async function readComparisonOldText(absPath: string, request: { mode: ComparisonMode; base?: string }): Promise<string | null> {
+	let existing = dirname(absPath);
+	while (existing !== dirname(existing) && !(await stat(existing).catch(() => null))?.isDirectory()) existing = dirname(existing);
+	const repo = await getGitRepositoryInfoAsync(existing);
+	if (!repo) return null;
+	const real = resolve(await realpath(existing), relative(existing, absPath));
+	const rel = relative(repo.repoRoot, real).replace(/\\/g, "/");
+	if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null;
+	const { target } = await resolveComparison(repo, request, false);
+	if (!target) return null;
+	const show = async (path: string): Promise<string | null> => {
+		const size = await runGitAsync(repo.repoRoot, ["cat-file", "-s", `${target}:${path}`]);
+		if (!size.ok) return null;
+		if (Number.parseInt(size.stdout, 10) > TEXT_FILE_MAX_BYTES) throw new DomainError("File exceeds the 2 MiB preview limit", 413);
+		const blob = await runGitAsync(repo.repoRoot, ["cat-file", "blob", `${target}:${path}`]);
+		return blob.ok ? blob.stdout : null;
+	};
+	const direct = await show(rel);
+	if (direct !== null) return direct;
+	const names = await runGitAsync(repo.repoRoot, ["diff", "--name-status", "-z", "-M", target]);
+	const renamed = names.ok ? parseNameStatus(names.stdout).find((entry) => entry.repoRelativePath === rel && entry.oldRepoRelativePath) : undefined;
+	return renamed?.oldRepoRelativePath ? show(renamed.oldRepoRelativePath) : null;
 }
 
-export function filterWorkspaceStatusForDirectory(
-	status: WorkspaceStatusPayload,
+// Local heads plus origin branches, as short names.
+export async function listBranches(dirPath: string): Promise<string[]> {
+	const result = await runGitAsync(dirPath, ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes/origin"]);
+	if (!result.ok) return [];
+	const names = new Set<string>();
+	for (const ref of result.stdout.split("\n")) {
+		const name = ref.replace(/^refs\/heads\//, "").replace(/^refs\/remotes\/origin\//, "");
+		if (ref && name !== "HEAD" && isBranchName(name)) names.add(name);
+	}
+	return [...names].sort((a, b) => a.localeCompare(b));
+}
+
+export function filterWorkspaceStatusForDirectory<T extends WorkspaceStatusPayload>(
+	status: T,
 	dirPath: string,
 	filter?: (relativePath: string, change: WorkspaceFileChange) => boolean,
-): WorkspaceStatusPayload {
+): T {
 	if (!status.available) return status;
 	let rootPath = status.rootPath || resolve(dirPath);
 	try {

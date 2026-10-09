@@ -19,8 +19,9 @@ import { saveDocumentVersion } from './snapshots.ts';
 import { readAppVersion } from './version.ts';
 import { readTunnelConfig } from './tunnel-config.ts';
 import { libraryDocument, listLibrary, recordDocumentOpen, closeLibraryDocument, cleanupClosedDocument } from './library.ts';
-import { listFiles, readCode, readPreview } from './files.ts';
-import { claim, createThread, closeDocument, discardEmptyThread, nameThread, pinMessage, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, reanchorSelection, setSelectionVisibility, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput, type ReplyInput } from './store.ts';
+import { authorizePath, listDirectory, readCode, readDiff, readPreview, readStatus } from './files.ts';
+import { listBranches, type ComparisonRequest } from './workspace-status.ts';
+import { claim, createThread, closeDocument, discardEmptyThread, nameThread, pinMessage, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, reanchorSelection, setBaseBranch, isBranchName, setSelectionVisibility, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput, type ReplyInput } from './store.ts';
 import { isPinStyle } from './pin-style.ts';
 import { stopRequest, prepareBatch, requestBatch, setMessageSelectionVisibility, type State } from './store.ts';
 import { isMessageQuote, isFileQuote } from './quote.ts';
@@ -663,17 +664,26 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
         if (isLan) for (const session of library.sessions) session.url = session.ownerKey === ownerKey(owner) ? origin : null;
         json(response, library); return;
       }
-      if (method === 'GET' && (path === '/api/files' || path === '/api/files/content' || path === '/api/files/code')) {
+      if (method === 'GET' && ['/api/files', '/api/files/content', '/api/files/code', '/api/files/status', '/api/files/branches', '/api/files/diff'].includes(path)) {
         const document = get(store.read().documents, target.searchParams.get('document') ?? '');
-        if (!document.workspace) throw new DomainError('This document has no recorded workspace. Reopen it from your agent.', 404);
-        const root = target.searchParams.get('directory') ?? document.workspace;
-        if (!isAbsolute(root) || root.includes('\0')) throw new DomainError('Expected an absolute directory path');
-        if (root !== document.workspace && !browsingRoots.get(document.id)?.has(root))
-          throw new DomainError('Open this folder in the file browser first', 403);
-        const file = target.searchParams.get('path') ?? '';
-        json(response, path === '/api/files' ? await listFiles(root)
-          : path === '/api/files/code' ? await readCode(root, file)
-          : await readPreview(root, file));
+        const workspace = document.workspace;
+        if (!workspace) throw new DomainError('This document has no recorded workspace. Reopen it from your agent.', 404);
+        const param = (key: string, fallback?: string) => target.searchParams.get(key) ?? fallback;
+        const authorize = (key: string, fallback?: string) => authorizePath(workspace, browsingRoots.get(document.id) ?? [], param(key, fallback) ?? '');
+        const comparison = (): ComparisonRequest => {
+          const mode = param('mode', 'uncommitted'), base = param('base', document.baseBranch);
+          if (mode !== 'uncommitted' && mode !== 'base') throw new DomainError('Expected mode uncommitted or base');
+          if (mode === 'base' && !isBranchName(base)) throw new DomainError('Invalid base branch name');
+          return { mode, ...(mode === 'base' ? { base } : {}), fetch: param('fetch') === '1' };
+        };
+        if (path === '/api/files') json(response, await listDirectory((await authorize('dir', workspace)).path));
+        else if (path === '/api/files/status') json(response, await readStatus((await authorize('directory', workspace)).path, comparison()));
+        else if (path === '/api/files/branches') json(response, { branches: await listBranches((await authorize('directory', workspace)).path) });
+        else if (path === '/api/files/diff') { const file = await authorize('path'); json(response, await readDiff(file.root, file.path, comparison())); }
+        else {
+          const root = (await authorize('directory', workspace)).path, file = param('path', '') ?? '';
+          json(response, path === '/api/files/code' ? await readCode(root, file) : await readPreview(root, file));
+        }
         return;
       }
       const libraryRead = path.match(/^\/api\/library\/([^/]+)\/documents\/([^/]+)$/);
@@ -794,6 +804,12 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
       const acceptProposals = path.match(/^\/api\/threads\/([^/]+)\/messages\/([^/]+)\/proposals\/accept$/);
       if (method === 'POST' && acceptProposals) {
         json(response, await proposalService.acceptReply(acceptProposals[1], acceptProposals[2])); return;
+      }
+      const documentBase = path.match(/^\/api\/documents\/([^/]+)\/base$/);
+      if (method === 'POST' && documentBase) {
+        const baseBranch = body.baseBranch === null ? null : text(body, 'baseBranch');
+        await store.update(state => setBaseBranch(state, documentBase[1], baseBranch));
+        changed(); json(response, { ok: true, baseBranch }); return;
       }
       if (method === 'POST' && path === '/api/files/root') {
         // Only explicit local viewer actions call this; previews/hover discovery cannot grant access.
@@ -938,7 +954,7 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
         }
         const canonical = await realpath(text(body, 'path'));
         await readDocument(canonical);
-        const document = await store.update(state => registerDocument(state, { path: canonical, title: optionalText(body, 'title'), generated: body.generated === undefined ? false : boolean(body, 'generated'), repoInfo, workspace }));
+        const document = await store.update(state => registerDocument(state, { path: canonical, title: optionalText(body, 'title'), generated: body.generated === undefined ? false : boolean(body, 'generated'), repoInfo, workspace, baseBranch: optionalText(body, 'baseBranch') }));
         if (closed) throw new DomainError('Sidecar stopped while opening the document. Open it again from your agent.', 503);
         await refresh(document); changed(); json(response, { ...document, title: title(document) }); return;
       }
