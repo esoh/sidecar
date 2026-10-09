@@ -23,10 +23,11 @@ import { resolveWorkspaceLink, splitLineSuffix } from './links.ts';
 import { setDocPreviewFetcher } from '@plannotator/ui/components/InlineMarkdown';
 import { DocumentLibrary } from './DocumentLibrary.tsx';
 import { SettingsProvider, TextSettings } from './TextSettings.tsx';
-import { PinnedWindows } from './PinnedWindows.tsx';
+import { PinnedWindows, changesWindowId } from './PinnedWindows.tsx';
 import { DocumentHeader } from './DocumentHeader.tsx';
 import { OriginalDocument } from './OriginalDocument.tsx';
 import { FilesPanel } from './FilesPanel.tsx';
+import { useComparison, type WorkspaceFileChange } from './useComparison.ts';
 import { isAnnotatableDocPath } from '@plannotator/core/annotatable';
 import type { OpenFile } from './FilePreview.tsx';
 import type { FileQuote } from '../src/quote.ts';
@@ -115,9 +116,11 @@ function App() {
   const [visibleRoot, setVisibleRoot] = useState<string | null>(null);
   const [fileReveal, setFileReveal] = useState<{ path: string; id: number } | null>(null);
   const rootVisit = useRef(0);
-  useEffect(() => { rootVisit.current++; setVisibleRoot(null); setFileReveal(null); }, [documentId, current?.workspace]);
+  const [changesScope, setChangesScope] = useState<string | null>(null);
+  useEffect(() => { rootVisit.current++; setVisibleRoot(null); setFileReveal(null); setChangesScope(null); }, [documentId, current?.workspace]);
   const browserRoot = visibleRoot ?? current?.workspace;
   const [files, setFiles] = useState<OpenFile[]>([]);
+  const comparison = useComparison(documentId, current?.workspace, current?.baseBranch, !!current?.workspace && (isFilesShown || !!changesScope || files.length > 0));
   const fileThread = useRef<Promise<Thread> | null>(null);
   const fileSelectionVisit = useRef(0);
   useEffect(() => { fileThread.current = null; }, [activeThreadId]);
@@ -246,7 +249,8 @@ function App() {
     } catch (reason) { if (visit === rootVisit.current) setError(errorText(reason)); }
   }, [allowRoot]);
   function revealFile(path: string) {
-    const root = browserRoot && insideRoot(path, browserRoot) ? browserRoot : path.slice(0, path.lastIndexOf('/')) || '/';
+    const root = browserRoot && insideRoot(path, browserRoot) ? browserRoot
+      : current?.workspace && insideRoot(path, current.workspace) ? current.workspace : path.slice(0, path.lastIndexOf('/')) || '/';
     void changeVisibleRoot(root, path);
   }
   const openAbsoluteFile = useCallback(async (absolutePath: string, kind?: OpenFile['kind']) => {
@@ -258,6 +262,15 @@ function App() {
       openPreview(path.slice(sourceRoot.replace(/\/$/, '').length + 1), undefined, kind ?? (isAnnotatableDocPath(path) ? 'doc' : 'code'), root);
     } catch (reason) { setError(errorText(reason)); }
   }, [browserRoot, current?.workspace, allowRoot, openPreview]);
+  // The Changed files window is a singleton: asking again retargets its scope and raises it.
+  const openChanges = useCallback((scope: string) => {
+    setChangesScope(scope);
+    setOpenPins(previous => [...previous, changesWindowId]);
+  }, []);
+  const openChange = useCallback((change: WorkspaceFileChange) => {
+    void openAbsoluteFile(change.path);
+    revealFile(change.path);
+  }, [openAbsoluteFile, revealFile]);
   const workspaceRoot = useRef<string | undefined>(undefined);
   workspaceRoot.current = current?.workspace;
   const resolveLink = (kind: 'doc' | 'code', target: string, baseDir?: string) => {
@@ -843,7 +856,7 @@ function App() {
         {isFilesShown && current?.workspace && (
           <>
             <FilesPanel key={`${documentId}:${browserRoot}`} documentId={documentId} root={browserRoot ?? current.workspace} workspace={current.workspace}
-              activePath={previewPath} reveal={fileReveal} onSelect={openAbsoluteFile} onRootChange={changeVisibleRoot} />
+              activePath={previewPath} reveal={fileReveal} comparison={comparison} onSelect={openAbsoluteFile} onRootChange={changeVisibleRoot} onOpenChanges={openChanges} />
             <ResizeHandle
               {...filesResize.handleProps}
               className="files-resize"
@@ -905,7 +918,7 @@ function App() {
             </article>
           </div>
         </main>
-        <PinnedWindows key={documentId} workspace={workspace} threads={threads} files={files} root={current?.workspace} documentId={documentId} onQuoteFile={quoteFile} onRevealFile={revealFile} openRequests={openPins} onOpened={ids => setOpenPins(previous => previous.filter(id => !ids.includes(id)))} onCloseFile={id => {
+        <PinnedWindows key={documentId} workspace={workspace} threads={threads} files={files} root={current?.workspace} documentId={documentId} comparison={comparison} changesScope={changesScope} onCloseChanges={() => setChangesScope(null)} onOpenChange={openChange} onQuoteFile={quoteFile} onRevealFile={revealFile} openRequests={openPins} onOpened={ids => setOpenPins(previous => previous.filter(id => !ids.includes(id)))} onCloseFile={id => {
           setFiles(previous => previous.filter(file => file.id !== id));
           setPreviewPath(previous => `file:${previous}` === id ? null : previous);
         }} {...selectionActions} onGoToMessage={goToMessage} />

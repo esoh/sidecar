@@ -3448,9 +3448,9 @@ test('file roots navigate, reset, and reveal a nested file without losing drafts
   await expect(selected).toBeFocused();
   await expect(selected).toHaveClass(/active/);
   await expect(selected).toBeInViewport();
-  await expect(panel.getByRole('button', { name: 'Go to parent folder' })).toBeInViewport();
-  await panel.getByRole('button', { name: 'Filter files', exact: true }).click();
+  await expect(panel.getByRole('button', { name: 'Go to parent folder' })).toBeVisible();
   await panel.getByRole('searchbox', { name: 'Filter files' }).fill('no match');
+  await expect(panel).toContainText('Folders that are not expanded are not searched');
   await file.getByRole('button', { name: 'Show in file browser' }).click();
   await expect(selected).toBeFocused();
   await panel.getByRole('button', { name: 'Go to parent folder' }).click();
@@ -3460,7 +3460,9 @@ test('file roots navigate, reset, and reveal a nested file without losing drafts
   await panel.getByRole('textbox', { name: 'Visible root' }).fill(`${root}/src`);
   await panel.getByRole('textbox', { name: 'Visible root' }).press('Enter');
   await expect(panel.getByRole('button', { name: 'Change visible root' })).toHaveText(`${root}/src`);
-  await panel.getByRole('button', { name: 'Reset visible root', exact: true }).click();
+  await expect(panel.getByRole('button', { name: 'Up' })).toHaveCount(0);
+  await panel.getByRole('button', { name: 'Change visible root' }).click();
+  await panel.getByRole('button', { name: 'Reset to workspace root', exact: true }).click();
   await expect(panel.getByRole('button', { name: 'Change visible root' })).toHaveText(root);
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep my draft');
   expect((await state()).documents[doc.id].workspace).toBe(root);
@@ -3541,16 +3543,11 @@ test('typing a draft does not traverse an unchanged file tree', async ({ page })
     Object.defineProperty(window, 'fileTreeReads', { get: () => reads });
     Response.prototype.json = async function () {
       const data = await json.call(this);
-      if (new URL(this.url).pathname === '/api/files' && Array.isArray(data.tree)) {
-        type FileNode = { name: string; children?: FileNode[] };
-        const observe = (nodes: FileNode[]) => {
-          for (const node of nodes) {
-            const name = node.name;
-            Object.defineProperty(node, 'name', { get: () => { reads++; return name; }, enumerable: true });
-            if (node.children) observe(node.children);
-          }
-        };
-        observe(data.tree);
+      if (new URL(this.url).pathname === '/api/files' && Array.isArray(data.entries)) {
+        for (const node of data.entries as { name: string }[]) {
+          const name = node.name;
+          Object.defineProperty(node, 'name', { get: () => { reads++; return name; }, enumerable: true });
+        }
       }
       return data;
     };
@@ -3563,7 +3560,7 @@ test('typing a draft does not traverse an unchanged file tree', async ({ page })
   await input.pressSequentially('closed tree ');
   await page.getByRole('button', { name: 'Show files' }).click();
   const panel = page.getByRole('complementary', { name: 'Files' });
-  await expect(panel.locator('.file-tree-item')).toHaveCount(1000);
+  await expect(panel.locator('.file-tree-item')).toHaveCount(1001); // plus the parent-folder row
   const reads = await page.evaluate(() => Reflect.get(window, 'fileTreeReads'));
   expect(reads).toBeGreaterThan(0);
   await input.pressSequentially('opened tree ');
@@ -3593,6 +3590,8 @@ test('files panel previews workspace files read-only and keeps drafts', async ({
   await f.agent('/agent/documents', { path: doc.path, workspace: root });
   await page.getByRole('button', { name: 'Show files' }).click();
   const panel = page.getByRole('complementary', { name: 'Files' });
+  await expect(panel.getByTitle('docs/plan.md', { exact: true })).toHaveCount(0);
+  await panel.getByRole('button', { name: 'docs', exact: true }).click();
   await expect(panel.getByTitle('docs/plan.md', { exact: true })).toBeVisible();
   await expect(panel.getByTitle('page.html', { exact: true })).toBeVisible();
   await expect(panel.getByTitle('src.ts', { exact: true })).toBeVisible();
@@ -3662,7 +3661,7 @@ test('files panel handles empty workspaces, its own document and conversation na
   await page.goto(`${f.url}/?document=${doc.id}`);
   await page.getByRole('button', { name: 'Show files' }).click();
   const panel = page.getByRole('complementary', { name: 'Files' });
-  await expect(panel).toContainText('No previewable files in this workspace.');
+  await expect(panel).toContainText('No previewable files in this folder.');
   await expect(panel).not.toContainText('Settings');
 
   // A new declaration re-roots the open panel through the live state update.
@@ -4011,4 +4010,173 @@ test('compact interrupted replies retain progress and Stop state', { tag: '@manu
   expect((await state()).requests[request.id].status).toBe('stopped');
   await page.reload(); await expect(page.getByText('Stopped', { exact: true })).toBeVisible();
   await expect(page.getByRole('log')).not.toContainText('[[sc');
+});
+
+async function gitWorkspace() {
+  const { execFile } = await import('node:child_process'), { promisify } = await import('node:util');
+  const git = (cwd: string, ...args: string[]) => promisify(execFile)('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', ...args], { cwd });
+  const paragraphs = (word: string) => Array.from({ length: 14 }, (_, i) => `Paragraph ${i + 1} about ${word} stays the same.`).join('\n\n');
+  const spec = `# Spec\n\n${paragraphs('specs')}\n`;
+  const root = await filesWorkspace({
+    'docs/spec.md': spec, 'src/a.ts': 'export const one = 1;\nexport const two = 2;\nexport const three = 3;\n',
+    'src/sub/b.ts': 'export const b = 1;\n', 'other/x.md': '# Other\n',
+  });
+  await git(root, 'init', '-b', 'main'); await git(root, 'add', '-A'); await git(root, 'commit', '-m', 'initial');
+  await writeFile(join(root, 'docs/spec.md'), spec.replace('Paragraph 5 about specs stays the same.', 'Paragraph 5 about **requirements** changed here.').replace('Paragraph 11 about specs stays the same.', 'Paragraph 11 was rewritten.'));
+  await writeFile(join(root, 'src/a.ts'), 'export const one = 1;\nexport const two = 20;\nexport const three = 3;\nexport const four = 4;\n');
+  await writeFile(join(root, 'docs/new.md'), '# New file\n\nFresh content.\n');
+  return { root, git };
+}
+
+test('explorer loads folders lazily, keeps expansion across roots, and lists changed files in one window', async ({ page }) => {
+  const { root } = await gitWorkspace();
+  const doc = await f.register('main.md', '# Main\n');
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  const listed: string[] = [];
+  page.on('request', request => { const url = new URL(request.url()); if (url.pathname === '/api/files') listed.push(url.searchParams.get('dir')!); });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Show files' }).click();
+  const panel = page.getByRole('complementary', { name: 'Files' });
+  // Folders with changes open themselves; the rest stay unloaded until asked.
+  await expect(panel.getByTitle('docs/spec.md', { exact: true })).toBeVisible();
+  await expect(panel.getByTitle('src/a.ts', { exact: true })).toBeVisible();
+  await expect(panel.getByTitle('other/x.md', { exact: true })).toHaveCount(0);
+  expect(listed).not.toContain(`${root}/other`);
+  await expect(panel.getByRole('button', { name: '3 changed +' })).toBeVisible();
+  await expect(panel.getByRole('button', { name: '2 changed files in docs' })).toBeVisible();
+  // An explicit choice wins over auto-expansion and survives a change of root.
+  await panel.getByRole('button', { name: 'docs', exact: true }).click();
+  await expect(panel.getByTitle('docs/spec.md', { exact: true })).toHaveCount(0);
+  await panel.getByRole('button', { name: 'other', exact: true }).click();
+  await expect(panel.getByTitle('other/x.md', { exact: true })).toBeVisible();
+  await panel.getByRole('button', { name: 'Go to parent folder' }).click();
+  await expect(panel.getByRole('button', { name: 'Change visible root' })).not.toHaveText(root);
+  await panel.getByRole('button', { name: 'Change visible root' }).click();
+  await panel.getByRole('button', { name: 'Reset to workspace root' }).click();
+  await expect(panel.getByRole('button', { name: 'Change visible root' })).toHaveText(root);
+  await expect(panel.getByTitle('other/x.md', { exact: true })).toBeVisible();
+  await expect(panel.getByTitle('docs/spec.md', { exact: true })).toHaveCount(0);
+  expect(listed.filter(dir => dir === `${root}/other`)).toHaveLength(1);
+
+  const changes = page.getByRole('dialog', { name: 'Changed files', exact: true });
+  await panel.getByRole('button', { name: '3 changed +' }).click();
+  await expect(changes.getByRole('button', { name: /docs\/spec\.md/ })).toBeVisible();
+  await expect(changes.getByRole('button', { name: /docs\/new\.md/ })).toBeVisible();
+  await expect(changes.getByRole('button', { name: /src\/a\.ts/ })).toBeVisible();
+  // Another scope retargets the same window.
+  await panel.getByRole('button', { name: '1 changed file in src' }).click();
+  await expect(page.getByRole('dialog', { name: 'Changed files', exact: true })).toHaveCount(1);
+  await expect(changes.getByRole('button', { name: /a\.ts/ })).toBeVisible();
+  await expect(changes.getByRole('button', { name: /spec\.md/ })).toHaveCount(0);
+  // Opening a listed file opens it, reveals it in the explorer, and leaves the list open.
+  await changes.getByRole('button', { name: /a\.ts/ }).click();
+  await expect(page.getByRole('dialog', { name: 'File: src/a.ts', exact: true })).toBeVisible();
+  await expect(panel.getByTitle('src/a.ts', { exact: true })).toBeFocused();
+  await expect(changes).toBeVisible();
+  await page.getByRole('button', { name: 'Close changed files window' }).click();
+  await expect(changes).toHaveCount(0);
+});
+
+test('Show diff defaults on for changed files and line quotes only come from the current file', async ({ page }) => {
+  const { root } = await gitWorkspace();
+  const doc = await f.register('main.md', '# Main\n');
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Show files' }).click();
+  const panel = page.getByRole('complementary', { name: 'Files' });
+  await panel.getByTitle('src/a.ts', { exact: true }).click();
+  const file = page.getByRole('dialog', { name: 'File: src/a.ts', exact: true });
+  await expect(file.getByRole('checkbox', { name: 'Show diff' })).toBeChecked();
+  await expect(file.locator('[data-line-type="change-deletion"][data-line]')).toContainText('two = 2;');
+  await file.locator('[data-line-type="change-deletion"][data-column-number="2"]').click();
+  await expect(page.locator('.draft-selection')).toHaveCount(0);
+  await file.locator('[data-line-type="change-addition"][data-column-number="2"]').click();
+  await expect(page.locator('.draft-selection .quote-excerpt')).toHaveText('export const two = 20;');
+  // Dragging across deleted and current lines keeps only current-file lines.
+  await file.locator('[data-line-type="context"][data-column-number="1"]').click();
+  await expect(page.locator('.draft-selection .quote-excerpt')).toHaveText('export const one = 1;');
+  await file.getByRole('checkbox', { name: 'Show diff' }).uncheck();
+  await expect(file.locator('pre code')).toContainText('two = 20;');
+  await panel.getByRole('button', { name: 'sub', exact: true }).click();
+  await panel.getByTitle('src/sub/b.ts', { exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'File: src/sub/b.ts', exact: true }).getByRole('checkbox', { name: 'Show diff' })).not.toBeChecked();
+});
+
+test('Markdown diff marks words, folds unchanged blocks, navigates changes, and quotes only current text', async ({ page }) => {
+  const { root } = await gitWorkspace();
+  const doc = await f.register('main.md', '# Main\n');
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Show files' }).click();
+  await page.getByRole('complementary', { name: 'Files' }).getByTitle('docs/spec.md', { exact: true }).click();
+  const file = page.getByRole('dialog', { name: 'File: docs/spec.md', exact: true });
+  await expect(file.locator('del.plan-diff-word-removed').first()).toContainText('specs');
+  await expect(file.locator('ins.plan-diff-word-added').first()).toContainText('requirements');
+  await expect(file.locator('.plan-diff-added, .plan-diff-modified')).toHaveCount(2);
+  const folds = file.getByRole('button', { name: /unchanged blocks/ });
+  await expect(folds).toHaveCount(2);
+  await expect(file).not.toContainText('Paragraph 2 about specs');
+  await folds.first().click();
+  await expect(file).toContainText('Paragraph 2 about specs');
+  await expect(folds).toHaveCount(1);
+  // Navigation by buttons and by n / p while the window has focus.
+  await expect(file.getByRole('status', { name: 'Change position' })).toHaveText('0/2');
+  await file.getByRole('button', { name: 'Next change' }).click();
+  await expect(file.getByRole('status', { name: 'Change position' })).toHaveText('1/2');
+  await expect(file.locator('.md-diff-unit.is-current')).toContainText('requirements');
+  await file.focus();
+  await page.keyboard.press('n');
+  await expect(file.getByRole('status', { name: 'Change position' })).toHaveText('2/2');
+  await expect(file.locator('.md-diff-unit.is-current')).toContainText('rewritten');
+  await page.keyboard.press('p');
+  await expect(file.getByRole('status', { name: 'Change position' })).toHaveText('1/2');
+  // A selection across removed words quotes only the current text.
+  await file.locator('.md-diff-unit.is-current').evaluate(unit => {
+    const range = document.createRange(), article = unit.closest('article')!;
+    range.selectNodeContents(unit);
+    getSelection()!.removeAllRanges(); getSelection()!.addRange(range);
+    article.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  });
+  const quote = page.locator('.draft-selection .quote-excerpt');
+  await expect(quote).toContainText('requirements');
+  await expect(quote).not.toContainText('specs');
+  await file.getByRole('button', { name: 'Source', exact: true }).click();
+  await expect(file.locator('diffs-container')).toBeVisible();
+});
+
+test('base comparison excludes base-only commits, persists on the document, and reports freshness', async ({ page }) => {
+  const { root, git } = await gitWorkspace();
+  await git(root, 'checkout', '-b', 'feature'); await git(root, 'add', '-A'); await git(root, 'commit', '-m', 'feature work');
+  await git(root, 'checkout', 'main'); await writeFile(join(root, 'other/x.md'), '# Other changed on main\n');
+  await git(root, 'commit', '-am', 'main moves'); await git(root, 'checkout', 'feature');
+  const doc = await f.register('main.md', '# Main\n');
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Show files' }).click();
+  const panel = page.getByRole('complementary', { name: 'Files' });
+  await expect(panel.getByRole('button', { name: /^Uncommitted/ })).toBeVisible();
+  await expect(panel.getByRole('button', { name: /changed \+/ })).toHaveCount(0);
+  await panel.getByRole('button', { name: /^Uncommitted/ }).click();
+  const popover = panel.getByRole('dialog', { name: 'Comparison' });
+  await page.keyboard.press('Escape');
+  await expect(popover).toHaveCount(0);
+  await panel.getByRole('button', { name: /^Uncommitted/ }).click();
+  await popover.getByRole('radio', { name: 'Base branch' }).check();
+  await expect(panel).toContainText('Choose a base branch');
+  await popover.getByRole('combobox', { name: 'Base branch' }).fill('main');
+  await popover.getByRole('button', { name: 'Set', exact: true }).click();
+  await expect(panel.getByRole('button', { name: 'vs main ▾' })).toBeVisible();
+  await expect(panel.getByRole('button', { name: '3 changed +' })).toBeVisible();
+  await expect(popover).toContainText('1 base commit not incorporated');
+  await expect(popover).toContainText('Compared with main at');
+  await expect.poll(async () => (await state()).documents[doc.id].baseBranch).toBe('main');
+  await page.mouse.click(700, 400);
+  await expect(popover).toHaveCount(0);
+  await panel.getByRole('button', { name: '3 changed +' }).click();
+  const changes = page.getByRole('dialog', { name: 'Changed files', exact: true });
+  await expect(changes.getByRole('button', { name: /docs\/spec\.md/ })).toBeVisible();
+  await expect(changes).not.toContainText('x.md');
+  await page.reload();
+  // The panel stays open across reloads; the document's base branch selects the comparison again.
+  await expect(page.getByRole('complementary', { name: 'Files' }).getByRole('button', { name: 'vs main ▾' })).toBeVisible();
 });

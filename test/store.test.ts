@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rename, rm, writeFile, chmod, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createState, registerDocument, submit, claim, reply, resolveThread, setTitle, openStore, readSavedState } from '../src/store.ts';
+import { createState, registerDocument, submit, claim, reply, resolveThread, setTitle, setBaseBranch, openStore, readSavedState } from '../src/store.ts';
 
 for (const order of ['combined', 'older-first'] as const) test(`mid-turn receipts preserve immutable batches: ${order}`, () => {
   const { state, input } = setup(), a = submit(state, input);
@@ -397,4 +397,19 @@ test('v2 migration preserves each message selection, visibility, and version wit
   assert.equal((await openStore(directory, owner)).read().threads[thread.id].title, 'Edited after rollback');
   assert.equal(await readFile(join(directory, 'state.v2.backup.json'), 'utf8'), raw);
   assert.equal(await readFile(join(directory, `state.v2.${createHash('sha256').update(newer).digest('hex')}.backup.json`), 'utf8'), newer);
+});
+
+test('base branch round-trips, is kept when omitted, can be cleared, and rejects option-like names', () => {
+  const state = createState({ agent: 'claude', sessionId: '11111111-1111-4111-8111-111111111111' });
+  const input = { path: '/tmp/a.md', generated: false };
+  const doc = registerDocument(state, { ...input, baseBranch: 'release/1.x' });
+  assert.equal(registerDocument(state, input).baseBranch, 'release/1.x');
+  assert.equal(readSavedState(JSON.parse(JSON.stringify(state))).documents[doc.id]!.baseBranch, 'release/1.x');
+  for (const bad of ['-x', '--upload-pack=x', 'a..b', 'a b', 'a/', '/a', 'a.lock', '']) {
+    assert.throws(() => registerDocument(state, { ...input, baseBranch: bad }), /Invalid base branch/, bad);
+    assert.throws(() => setBaseBranch(state, doc.id, bad), /Invalid base branch/, bad);
+  }
+  setBaseBranch(state, doc.id, null);
+  assert.equal(state.documents[doc.id]!.baseBranch, undefined);
+  assert.throws(() => readSavedState({ ...JSON.parse(JSON.stringify(state)), documents: { [doc.id]: { ...doc, baseBranch: '-x' } } }));
 });
