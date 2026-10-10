@@ -664,7 +664,7 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
         if (isLan) for (const session of library.sessions) session.url = session.ownerKey === ownerKey(owner) ? origin : null;
         json(response, library); return;
       }
-      if (method === 'GET' && ['/api/files', '/api/files/content', '/api/files/code', '/api/files/status', '/api/files/branches', '/api/files/diff'].includes(path)) {
+      if (method === 'GET' && ['/api/files', '/api/files/content', '/api/files/html', '/api/files/code', '/api/files/status', '/api/files/branches', '/api/files/diff'].includes(path)) {
         const document = get(store.read().documents, target.searchParams.get('document') ?? '');
         const workspace = document.workspace;
         if (!workspace) throw new DomainError('This document has no recorded workspace. Reopen it from your agent.', 404);
@@ -682,7 +682,17 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
         else if (path === '/api/files/diff') { const file = await authorize('path'); json(response, await readDiff(file.root, file.path, comparison())); }
         else {
           const root = (await authorize('directory', workspace)).path, file = param('path', '') ?? '';
-          json(response, path === '/api/files/code' ? await readCode(root, file) : await readPreview(root, file));
+          if (path === '/api/files/html') {
+            const preview = await readPreview(root, file);
+            if (preview.renderAs !== 'html') throw new DomainError('An HTML file is required', 415);
+            const scripts = param('scripts') === '1';
+            // Header sandbox also protects a preview opened outside its iframe.
+            // Trusted HTML only: CSP blocks resources, not self-navigation to another URL.
+            response.setHeader('Content-Security-Policy', `default-src 'none'; script-src ${scripts ? "'unsafe-inline'" : "'none'"}; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox${scripts ? ' allow-scripts' : ''};`);
+            response.setHeader('Content-Type', 'text/html; charset=utf-8');
+            response.setHeader('Referrer-Policy', 'no-referrer');
+            sendBody(response, preview.text);
+          } else json(response, path === '/api/files/code' ? await readCode(root, file) : await readPreview(root, file));
         }
         return;
       }

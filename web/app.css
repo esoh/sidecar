@@ -1349,6 +1349,12 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
 .reference-grip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .reference-titlebar > button:not(.reference-grip) { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; flex: 0 0 auto; }
 .reference-titlebar .sidecar-icon, .dock-header .sidecar-icon { width: 14px; height: 14px; flex-shrink: 0; }
+/* Window zoom controls stay outside the scaled content and retain fixed hit targets. */
+.window-zoom { display: flex; align-items: center; flex: 0 0 auto; gap: 0; }
+.window-zoom button { display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 26px; padding: 0 3px; font-size: 12px; color: var(--subtle); }
+.window-zoom .window-zoom-reset { min-width: 40px; font-size: 10px; font-variant-numeric: tabular-nums; }
+.window-zoom button:disabled { opacity: 0.5; cursor: default; }
+.window-zoom button:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
 .reference-body { padding: 14px 16px; flex: 1; min-height: 0; overflow: auto; overflow-wrap: anywhere; }
 .reference-body .message { margin: 0; }
 .reference-body .message.user .message-bubble { width: 100%; max-width: 100%; margin: 0; padding: 0; background: none; border: 0; }
