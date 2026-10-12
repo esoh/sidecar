@@ -8,7 +8,7 @@ import { type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile, writeFile, realpath, rm, stat } from 'node:fs/promises';
 import { basename, join, dirname, relative, isAbsolute, extname } from 'node:path';
 import { notifyCodex } from './agent.ts';
-import { reconcileCodexQueue } from './codex-queue.ts';
+import { CodexControlUnavailableError, reconcileCodexQueue } from './codex-queue.ts';
 import { observeCodex, readCodexControl, resetCodexSession, type CodexObserver, type NativeResetResult, type NativeControl } from './codex-stream.ts';
 import { ReplyStream, ThreadReplyRouter, isStreamEvent, findReplyBlocks } from './stream.ts';
 import { parseReply } from './reply-metadata.ts';
@@ -424,8 +424,8 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
       const notification = await prepareNotification(request.id, true);
       if ('claimStatus' in notification && notification.claimStatus !== 'claimed') return;
       if (closed) return;
-      await deliverCodex(request.id, notification);
       connectionError = null;
+      await deliverCodex(request.id, notification);
     } catch (error) {
       if (!closed && store.read().requests[request.id]) {
         // A failed queue command may already have delivered. Do not automatically execute it twice.
@@ -480,11 +480,11 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
         if (turnId && startRequestId) await store.update(state => { if (state.requests[startRequestId]) markAccepted(state, startRequestId, turnId); });
         nativeCleanedVersion = cleanupVersion;
         for (const requestId of cancelRequestIds) pendingNativeCleanup.delete(requestId);
-        if (connectionError?.startsWith('Codex accepted')) { connectionError = null; changed(); }
-      } catch {
+        if (connectionError?.startsWith('Codex accepted') || connectionError?.startsWith('This session is not loaded')) { connectionError = null; changed(); }
+      } catch (error) {
         // Delivery already succeeded. Never submit the message again because the
         // subsequent start/check failed or raced with another native turn.
-        if (!closed) { connectionError = 'Codex accepted the message, but its queue could not be started. Reconnect the agent or try Reset.'; changed(); }
+        if (!closed) { connectionError = error instanceof CodexControlUnavailableError ? error.message : 'Codex accepted the message, but its queue could not be started. Reconnect the agent or try Reset.'; changed(); }
       }
     })();
     try { await nativeQueueWork; } finally { nativeQueueWork = undefined; }

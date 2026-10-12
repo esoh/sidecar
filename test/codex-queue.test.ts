@@ -277,3 +277,29 @@ test('confirmed document cleanup ignores late Codex output without interrupting 
   assert.equal(saved.stream, null); assert.deepEqual(saved.streams, []);
   assert.ok(!n.state.methods.includes('turn/interrupt'));
 });
+
+test('embedded Codex delivery is retained once with a control-specific diagnostic and complete-reply fallback', async t => {
+  const { n, post, read, doc, events } = await delivery(t);
+  n.state.status = 'notLoaded';
+  const request = await (await post('/api/questions', { documentId: doc.id, text: 'Embedded question', clientMessageId: 'embedded' })).json();
+  await waitFor(async () => !!(await read()).connectionError, 'missing unavailable-control diagnostic');
+  const saved = await read();
+  assert.match(saved.connectionError, /not loaded in the shared Codex daemon/);
+  assert.doesNotMatch(saved.connectionError, /try Reset/i);
+  assert.ok(saved.requests[request.id].acceptedAt);
+  const delivered = await events();
+  assert.equal(delivered.length, 1);
+  assert.match(delivered[0].stream.error, /Streaming unavailable/);
+  assert.deepEqual(n.state.starts, []); assert.deepEqual(n.state.deletes, []);
+  assert.ok(!n.state.methods.includes('thread/resume'));
+  assert.equal((await post('/agent/replies', { requestId: request.id, documentId: doc.id, threadId: request.threadId, text: 'Saved without streaming' })).status, 200);
+  assert.equal((await read()).requests[request.id].answer.text, 'Saved without streaming');
+  await delay(1100);
+  assert.equal((await events()).length, 1, 'completed work must not be re-enqueued');
+  assert.deepEqual(n.state.starts, []); assert.deepEqual(n.state.deletes, []);
+  n.state.status = 'idle';
+  await waitFor(async () => (await read()).connectionError === null, 'control warning did not clear after reconnect');
+  assert.equal((await events()).length, 1);
+  assert.deepEqual(n.state.starts, [], 'reconnecting must not replay a completed request');
+  assert.equal((await read()).requests[request.id].answer.text, 'Saved without streaming');
+});

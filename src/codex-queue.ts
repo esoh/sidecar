@@ -4,6 +4,10 @@ import { join } from 'node:path';
 import WebSocket from 'ws';
 import { isObject } from './store.ts';
 
+export class CodexControlUnavailableError extends Error {
+  constructor() { super('This session is not loaded in the shared Codex daemon. Native queue delivery may still work, but streaming and Stop are unavailable. Command-line -c overrides can select an embedded backend; reconnect the original session through the shared daemon at a safe stopping point.'); }
+}
+
 // A successful `codex queue` only enqueues. Idle sessions need an explicit start,
 // and Reset must withdraw cancelled submissions before releasing the next one.
 export async function reconcileCodexQueue(threadId: string, options: { cancelRequestIds?: string[]; startRequestId?: string; canStart?: () => boolean; agentIds?: AgentIds }, signal: AbortSignal, socketPath = join(process.env.CODEX_HOME ?? homedir() + '/.codex', 'app-server-control/app-server-control.sock')): Promise<string | undefined> {
@@ -33,6 +37,7 @@ export async function reconcileCodexQueue(threadId: string, options: { cancelReq
   });
   const status = async () => {
     const result = await request('thread/read', { threadId, includeTurns: false });
+    if (isObject(result) && isObject(result.thread) && result.thread.id === threadId && isObject(result.thread.status) && result.thread.status.type === 'notLoaded') throw new CodexControlUnavailableError();
     if (!isObject(result) || !isObject(result.thread) || result.thread.id !== threadId || !isObject(result.thread.status) || !['idle', 'active'].includes(String(result.thread.status.type)))
       throw new Error('The original Codex session is not available. Reconnect it before Reset.');
     return result.thread.status.type;
