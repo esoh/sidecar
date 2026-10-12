@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState, type ReactNode, type RefObj
 import { api, errorText } from './api.ts';
 import { Icon } from './conversations.tsx';
 import { FileTree } from './FileTree.tsx';
-import type { Comparison } from './useComparison.ts';
+import { matchesCategory, type Comparison } from './useComparison.ts';
 
 // Own lazy explorer over Sidecar's document-scoped listing; row styling follows Plannotator's file
 // browser (MIT), see THIRD_PARTY_NOTICES.md. Draft edits in the viewer must not re-render the tree.
@@ -85,7 +85,7 @@ export const FilesPanel = memo(function FilesPanel({ documentId, root, workspace
   const chip = useRef<HTMLButtonElement>(null), rootButton = useRef<HTMLButtonElement>(null);
   const { mode, base, status } = comparison;
   const prefix = `${root.replace(/\/$/, '')}/`;
-  const changes = useMemo(() => status?.available ? Object.values(status.files).filter(change => change.path.startsWith(prefix)) : [], [status, prefix]);
+  const changes = useMemo(() => status?.available ? Object.values(status.files).filter(change => change.path.startsWith(prefix) && matchesCategory(change, comparison.category)) : [], [status, prefix, comparison.category]);
   const closePopover = useMemo(() => () => setPopover(null), []);
   const needsBase = mode === 'base' && !base;
   return (
@@ -107,7 +107,7 @@ export const FilesPanel = memo(function FilesPanel({ documentId, root, workspace
       {status && !status.available && status.error && status.error !== 'not-a-git-repo' && !needsBase && <p className="files-empty">Changes unavailable: {status.error}</p>}
       {status?.comparison.error && <p className="files-empty" role="alert">{comparisonErrors[status.comparison.error] ?? status.comparison.error}</p>}
       <div className="files-tree">
-        <FileTree key={documentId} documentId={documentId} root={root} changes={changes} activePath={activePath} reveal={reveal} refreshNonce={refreshNonce} onSelect={onSelect} onRootChange={onRootChange} onOpenChanges={onOpenChanges} />
+        <FileTree key={documentId} documentId={documentId} root={root} changes={changes} category={comparison.category} onCategoryChange={comparison.setCategory} activePath={activePath} reveal={reveal} refreshNonce={refreshNonce} onSelect={onSelect} onRootChange={onRootChange} onOpenChanges={onOpenChanges} />
       </div>
     </aside>
   );

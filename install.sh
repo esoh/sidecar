@@ -9,9 +9,9 @@ sidecar_repository=${SIDECAR_REPOSITORY:-https://github.com/esoh/sidecar.git}
 sidecar_ref=${SIDECAR_REF:-main}
 
 for tool in git node pnpm; do
-  command -v "$tool" >/dev/null || { echo "Sidecar requires $tool (Node 22+ and pnpm 11+)." >&2; exit 1; }
+  command -v "$tool" >/dev/null || { echo "Sidecar requires $tool (Node 22.5+ and pnpm 11+)." >&2; exit 1; }
 done
-node -e 'if (Number(process.versions.node.split(".")[0]) < 22) { console.error("Sidecar requires Node 22+"); process.exit(1); }'
+node -e 'if (Number(process.versions.node.split(".")[0]) < 22 || (Number(process.versions.node.split(".")[0]) === 22 && Number(process.versions.node.split(".")[1]) < 5)) { console.error("Sidecar requires Node 22.5+"); process.exit(1); }'
 case "$sidecar_install_dir:$sidecar_bin_dir" in /*:/*) ;; *) echo 'Install and bin directories must be absolute paths.' >&2; exit 1 ;; esac
 mkdir -p "$sidecar_install_dir/releases" "$sidecar_bin_dir"
 sidecar_target="$sidecar_install_dir/current/scripts/sidecar"

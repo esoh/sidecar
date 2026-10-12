@@ -1,0 +1,50 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { mkdir, mkdtemp, realpath, readdir, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { isTestFile, parseTestFileRules, readTestFileRules, writeTestFileRules } from '../src/test-file-rules.ts';
+import { getWorkspaceStatusForDirectory, getGitRepositoryInfoAsync } from '../src/workspace-status.ts';
+import { fixture } from './support.ts';
+
+test('language-independent defaults and explicit exclusion precedence', () => {
+  for (const path of ['tests/data.json', 'src/__tests__/a.ts', 'src/a.spec.ts', 'a.test.js', 'test_auth.py', 'pkg/auth_test.go', 'spec/auth_spec.rb', 'src/test/java/Auth.java', 'src/AuthTest.java', 'src/AuthTests.cs', 'Tests/AuthTests.swift', '__snapshots__/a.snap', 'src\\__tests__\\a.ts']) assert.equal(isTestFile(path), true, path);
+  for (const path of ['src/auth.ts', 'docs/specification.md', 'src/contest.go', 'README.md', 'src/lib.rs']) assert.equal(isTestFile(path), false, path);
+  assert.equal(isTestFile('src/a.spec.ts', { exclude: ['**/*.spec.*'] }), false);
+  assert.equal(isTestFile('integration/a.check.ts', { include: ['integration/**/*.check.*'] }), true);
+  assert.equal(isTestFile('tests/a.ts', { include: ['**/*.ts'], exclude: ['tests/**'] }), false);
+  assert.throws(() => parseTestFileRules({ exclude: 'bad' }));
+  assert.throws(() => parseTestFileRules({ include: [''] }));
+  assert.throws(() => parseTestFileRules({ typo: [] }));
+});
+
+test('local settings share common Git identity, stay isolated and refresh both comparison modes', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'sidecar-test-rules-')));
+  const previous = process.env.SIDECAR_CONFIG; process.env.SIDECAR_CONFIG = join(root, 'config', 'config.json');
+  t.after(async () => { if (previous === undefined) delete process.env.SIDECAR_CONFIG; else process.env.SIDECAR_CONFIG = previous; await rm(root, { recursive: true, force: true }); });
+  const repo = join(root, 'repo'), worktree = join(root, 'worktree'); await mkdir(repo);
+  const git = (...args: string[]) => promisify(execFile)('git', ['-C', repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', ...args]);
+  await git('init', '-b', 'main'); await writeFile(join(repo, 'api.spec.ts'), 'one\n'); await git('add', '.'); await git('commit', '-m', 'initial'); await git('worktree', 'add', '-b', 'feature', worktree);
+  await writeFile(join(repo, 'api.spec.ts'), 'two\n'); await writeFile(join(worktree, 'api.spec.ts'), 'three\n');
+  const a = (await getGitRepositoryInfoAsync(repo))!, b = (await getGitRepositoryInfoAsync(worktree))!;
+  assert.equal(a.gitCommonDir, b.gitCommonDir);
+  assert.equal((await getWorkspaceStatusForDirectory(repo)).files[join(repo, 'api.spec.ts')].isTest, true);
+  await writeTestFileRules(a.gitCommonDir, { exclude: ['**/*.spec.*'] });
+  assert.deepEqual(await readTestFileRules(b.gitCommonDir), { exclude: ['**/*.spec.*'] });
+  for (const mode of ['uncommitted', 'base'] as const) assert.equal((await getWorkspaceStatusForDirectory(worktree, { mode, base: 'main' })).files[join(worktree, 'api.spec.ts')].isTest, false);
+  const other = join(root, 'other.git'); await mkdir(other); assert.deepEqual(await readTestFileRules(other), {});
+  assert.deepEqual((await readdir(repo)).sort(), ['.git', 'api.spec.ts']);
+  const f = await fixture(t); const doc = await f.register(); await f.agent('/agent/documents', { path: doc.path, workspace: repo });
+  const endpoint = `/api/files/test-rules?document=${doc.id}&directory=${encodeURIComponent(repo)}`;
+  assert.equal((await fetch(f.url + endpoint)).status, 403);
+  assert.equal((await f.view(endpoint, { exclude: ['**/*.spec.*'], include: [] })).status, 200);
+  assert.equal((await f.view(endpoint, { exclude: 42 })).status, 400);
+  assert.equal((await f.view(`/api/files/test-rules?document=${doc.id}&directory=${encodeURIComponent(root)}`)).status, 403);
+  assert.deepEqual((await (await f.view(endpoint)).json()).testFiles.exclude, ['**/*.spec.*']);
+  await f.view(endpoint, {});
+  assert.equal((await getWorkspaceStatusForDirectory(repo)).files[join(repo, 'api.spec.ts')].isTest, true);
+  const settingsDir = join(root, 'config/repositories'); const [name] = await readdir(settingsDir); await writeFile(join(settingsDir, name), '{broken');
+  const invalid = await getWorkspaceStatusForDirectory(repo); assert.equal(invalid.available, true); assert.match(invalid.testRulesError!, /Invalid JSON/);
+});

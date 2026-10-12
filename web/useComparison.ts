@@ -3,11 +3,14 @@ import { api, errorText } from './api.ts';
 import type { WorkspaceComparison, WorkspaceFileChange, WorkspaceStatusResult } from '../src/workspace-status.ts';
 
 export type { WorkspaceComparison, WorkspaceFileChange, WorkspaceStatusResult };
+export type ChangeCategory = 'all' | 'source' | 'tests';
+export const matchesCategory = (change: WorkspaceFileChange, category: ChangeCategory) => category === 'all' || !!change.isTest === (category === 'tests');
 export type CompareMode = 'uncommitted' | 'base';
 export type Comparison = {
   mode: CompareMode; base: string | undefined; status: WorkspaceStatusResult | null; isLoading: boolean; error: string;
   /** Changes whenever status was re-read; file windows refetch their diff on it. */
   revision: number;
+  category: ChangeCategory; setCategory: (category: ChangeCategory) => void;
   refresh: (remote?: boolean) => void; setMode: (mode: CompareMode) => void; setBase: (name: string | null) => Promise<void>;
 };
 
@@ -20,6 +23,8 @@ export function useComparison(documentId: string, workspace: string | undefined,
   const [stored, setStored] = useState<CompareMode | null>(() => {
     try { const value = localStorage.getItem(storageKey(documentId)); return value === 'base' || value === 'uncommitted' ? value : null; } catch { return null; }
   });
+  const [category, setCategory] = useState<ChangeCategory>('all');
+  useEffect(() => { setCategory('all'); }, [documentId]);
   const [localBase, setLocalBase] = useState<string | null | undefined>(undefined);
   useEffect(() => { setLocalBase(undefined); }, [baseBranch, documentId]);
   const base = (localBase === undefined ? baseBranch : localBase) ?? undefined;
@@ -51,5 +56,5 @@ export function useComparison(documentId: string, workspace: string | undefined,
     setLocalBase(name);
   }, [documentId]);
   // Stable identity: memoized panels and windows re-render only when the comparison itself changes.
-  return useMemo(() => ({ mode, base, status, isLoading, error, revision, refresh, setMode, setBase }), [mode, base, status, isLoading, error, revision, refresh, setMode, setBase]);
+  return useMemo(() => ({ mode, base, status, isLoading, error, revision, refresh, setMode, setBase, category, setCategory }), [mode, base, status, isLoading, error, revision, refresh, setMode, setBase, category]);
 }

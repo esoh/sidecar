@@ -5,8 +5,10 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { DomainError, isBranchName } from "./store.ts";
 
-import type { WorkspaceFileChange, WorkspaceStatusPayload, GitRepositoryInfo, WorkspaceFileStatus } from '@plannotator/core/workspace-status-types';
-export type { WorkspaceFileChange, WorkspaceStatusPayload, GitRepositoryInfo, WorkspaceFileStatus };
+import { isTestFile, readTestFileRules } from "./test-file-rules.ts";
+import type { WorkspaceFileChange as BaseWorkspaceFileChange, WorkspaceStatusPayload, GitRepositoryInfo, WorkspaceFileStatus } from '@plannotator/core/workspace-status-types';
+export type { WorkspaceStatusPayload, GitRepositoryInfo, WorkspaceFileStatus };
+export type WorkspaceFileChange = BaseWorkspaceFileChange & { isTest?: boolean };
 
 const TEXT_FILE_MAX_BYTES = 2 * 1024 * 1024;
 const GIT_MAX_BUFFER = 20 * 1024 * 1024;
@@ -24,7 +26,7 @@ export interface WorkspaceComparison {
 	error?: string;
 }
 export type ComparisonRequest = { mode: ComparisonMode; base?: string; fetch?: boolean };
-export type WorkspaceStatusResult = WorkspaceStatusPayload & { comparison: WorkspaceComparison };
+export type WorkspaceStatusResult = WorkspaceStatusPayload & { files: Record<string, WorkspaceFileChange>; comparison: WorkspaceComparison; testRulesError?: string };
 interface WorkspaceStatusFlight {
 	promise?: Promise<WorkspaceStatusResult>;
 	rerunRequested: boolean;
@@ -134,7 +136,7 @@ export function getGitRepositoryInfo(cwd: string): GitRepositoryInfo | null {
 	};
 }
 
-async function getGitRepositoryInfoAsync(cwd: string): Promise<GitRepositoryInfo | null> {
+export async function getGitRepositoryInfoAsync(cwd: string): Promise<GitRepositoryInfo | null> {
 	const topLevel = await runGitAsync(cwd, ["rev-parse", "--show-toplevel"]);
 	if (!topLevel.ok) return null;
 	const rawRepoRoot = topLevel.stdout.trim();
@@ -359,6 +361,10 @@ async function computeWorkspaceStatusForDirectory(rootPath: string, request: Com
 		];
 	}
 
+	let rules = {};
+	let testRulesError: string | undefined;
+	try { rules = await readTestFileRules(repo.gitCommonDir); }
+	catch (error) { testRulesError = error instanceof Error ? error.message : "Cannot read test file rules"; }
 	const files: Record<string, WorkspaceFileChange> = {};
 	let totalAdditions = 0;
 	let totalDeletions = 0;
@@ -379,6 +385,7 @@ async function computeWorkspaceStatusForDirectory(rootPath: string, request: Com
 			: undefined;
 
 		files[absolutePath] = {
+			isTest: isTestFile(entry.repoRelativePath, rules),
 			path: absolutePath,
 			repoRelativePath: entry.repoRelativePath,
 			oldPath,
@@ -396,6 +403,7 @@ async function computeWorkspaceStatusForDirectory(rootPath: string, request: Com
 		available: true,
 		rootPath,
 		repoRoot: repo.repoRoot,
+		...(testRulesError ? { testRulesError } : {}),
 		files,
 		totals: {
 			files: Object.keys(files).length,
