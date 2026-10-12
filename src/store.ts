@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename, unlink } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -59,20 +59,11 @@ function isMessage(v: unknown): v is Message {
 function isMessageFields(v: unknown): v is Record<string, unknown> & { id: string } {
   return isObject(v) && string(v.id) && (v.role === 'user' || v.role === 'agent') && string(v.text) && string(v.requestId) && number(v.createdAt) && (v.isPinned === undefined || typeof v.isPinned === 'boolean') && (v.pinStyle === undefined || isPinStyle(v.pinStyle));
 }
-type OldMessage = Omit<Message, 'selections'> & { quote?: Quote };
-type OldThread = Omit<Thread, 'messages'> & { messages: OldMessage[] };
-type LegacyThread = OldThread & { scope: 'passage' | 'document'; quote?: Quote };
 function isThreadFields(v: unknown): v is Thread {
   return isObject(v) && string(v.id) && string(v.documentId) && optionalString(v.title) && (v.createdAt === undefined || number(v.createdAt)) && typeof v.isResolved === 'boolean' && Array.isArray(v.messages) && v.messages.every(isMessage);
 }
 function isThread(v: unknown): v is Thread {
   return isThreadFields(v) && !('scope' in v) && !('quote' in v);
-}
-function isLegacyThread(v: unknown): v is LegacyThread {
-  return isOldThread(v) && 'scope' in v && (v.scope === 'passage' || v.scope === 'document') && ((v.scope === 'passage' && 'quote' in v && isQuote(v.quote)) || (v.scope === 'document' && !('quote' in v))) && v.messages.every(message => message.quote === undefined);
-}
-function isOldThread(v: unknown): v is OldThread {
-  return isObject(v) && string(v.id) && string(v.documentId) && optionalString(v.title) && (v.createdAt === undefined || number(v.createdAt)) && typeof v.isResolved === 'boolean' && Array.isArray(v.messages) && v.messages.every(m => isMessageFields(m) && !('selections' in m) && (m.quote === undefined || (m.role === 'user' && isQuote(m.quote))));
 }
 function isRequest(v: unknown): v is RequestRecord {
   if (isObject(v) && (v.covers !== undefined && (!Array.isArray(v.covers) || !v.covers.every(string) || new Set(v.covers).size !== v.covers.length) || !optionalString(v.answeredBy) || !optionalString(v.nativeTurnId) || v.handoff !== undefined && !['prepared', 'sending', 'accepted', 'uncertain'].includes(String(v.handoff)))) return false;
@@ -88,32 +79,10 @@ function records<T extends {id: string}>(v: unknown, check: (v: unknown) => v is
 export function isState(v: unknown): v is State {
   return isObject(v) && v.version === 5 && isOwner(v.owner) && records(v.documents, isDocument) && records(v.threads, isThread) && records(v.requests, isRequest) && records(v.proposals, isProposal) && records(v.proposalWrites, isProposalWrite);
 }
-type LegacyState = Omit<State, 'version' | 'threads' | 'proposals' | 'proposalWrites'> & { version: 1; threads: Record<string, LegacyThread> };
-function isLegacyState(v: unknown): v is LegacyState {
-  return isObject(v) && v.version === 1 && isOwner(v.owner) && records(v.documents, isDocument) && records(v.threads, isLegacyThread) && records(v.requests, isRequest);
-}
 export function readSavedState(value: unknown): State {
-  let state: State;
-  if (isLegacyState(value)) {
-    const threads: Record<string, Thread> = {};
-    for (const thread of Object.values(value.threads)) {
-      const { scope, quote, ...plain } = structuredClone(thread);
-      if (quote) {
-        const first = plain.messages.find(message => message.role === 'user');
-        if (!first) throw new Error('Legacy selection has no user message; the existing file was preserved');
-        first.quote = quote;
-      }
-      threads[thread.id] = migrateSelections(plain);
-    }
-    state = { version: 5, owner: structuredClone(value.owner), documents: structuredClone(value.documents), requests: structuredClone(value.requests), threads, proposals: {}, proposalWrites: {} };
-  } else if (isObject(value) && value.version === 2 && isOwner(value.owner) && records(value.documents, isDocument) && records(value.threads, isOldThread) && records(value.requests, isRequest)) {
-    state = { version: 5, owner: structuredClone(value.owner), documents: structuredClone(value.documents), requests: structuredClone(value.requests), threads: Object.fromEntries(Object.entries(value.threads).map(([id, thread]) => [id, migrateSelections(thread)])), proposals: {}, proposalWrites: {} };
-  } else if (isObject(value) && value.version === 3 && isOwner(value.owner) && records(value.documents, isDocument) && records(value.threads, isThread) && records(value.requests, isRequest)) {
-    state = { version: 5, owner: structuredClone(value.owner), documents: structuredClone(value.documents), requests: structuredClone(value.requests), threads: structuredClone(value.threads), proposals: {}, proposalWrites: {} };
-  } else if (isObject(value) && value.version === 4 && isState({ ...value, version: 5 })) {
-    return readSavedState({ ...value, version: 5 });
-  } else if (isState(value)) state = structuredClone(value);
-  else throw new Error('Malformed Sidecar state; the existing file was preserved');
+  if (isObject(value) && value.version !== 5) throw new Error('Unsupported Sidecar state version; expected version 5. The existing file was preserved.');
+  if (!isState(value)) throw new Error('Malformed Sidecar state; the existing file was preserved');
+  const state = structuredClone(value);
   const selectionIds = new Set<string>();
   for (const thread of Object.values(state.threads)) {
     get(state.documents, thread.documentId);
@@ -156,10 +125,6 @@ export function readSavedState(value: unknown): State {
     }
   }
   return state;
-}
-function migrateSelections(thread: OldThread): Thread {
-  const copy = structuredClone(thread);
-  return { ...copy, messages: copy.messages.map(({ quote, ...message }) => ({ ...message, ...(quote ? { selections: [{ id: message.id, slug: 'selection-1', quote, isVisible: !thread.isResolved }] } : {}) })) };
 }
 export function get<T>(items: Record<string,T>, id: string): T {
   if (!Object.hasOwn(items, id)) throw new DomainError('Not found', 404);
@@ -414,7 +379,6 @@ export async function openStore(directory: string, owner: Owner): Promise<Store>
     const value: unknown = JSON.parse(raw);
     const parsed = readSavedState(value);
     if (ownerKey(parsed.owner) !== ownerKey(owner)) throw new Error('State belongs to another owner');
-    await backupSavedState(directory, owner, raw);
     for (const request of Object.values(parsed.requests)) if (request.status === 'claimed') {
       request.status = 'uncertain';
       // A handoff may already have reached the agent. Restart never repeats it.
@@ -443,27 +407,6 @@ export async function openStore(directory: string, owner: Owner): Promise<Store>
   };
 }
 
-async function backupSavedState(directory: string, owner: Owner, raw: string): Promise<void> {
-  const value: unknown = JSON.parse(raw);
-  if (isObject(value) && (value.version === 1 || value.version === 2 || value.version === 3 || value.version === 4)) {
-    const backup = join(directory, `state.v${value.version}.backup.json`);
-    try { await writeFile(backup, raw, { flag: 'wx', mode: 0o600 }); }
-    catch (error) {
-      if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
-      const savedRaw = await readFile(backup, 'utf8'), saved: unknown = JSON.parse(savedRaw);
-      if (!isObject(saved) || saved.version !== value.version || ownerKey(readSavedState(saved).owner) !== ownerKey(owner)) throw new Error('Invalid migration backup; the existing state was preserved');
-      if (savedRaw !== raw) {
-        const exactBackup = join(directory, `state.v${value.version}.${createHash('sha256').update(raw).digest('hex')}.backup.json`);
-        try { await writeFile(exactBackup, raw, { flag: 'wx', mode: 0o600 }); }
-        catch (error) {
-          if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
-          if (await readFile(exactBackup, 'utf8') !== raw) throw new Error('Migration backup differs; the existing state was preserved');
-        }
-      }
-    }
-  }
-}
-
 async function persistState(directory: string, next: State): Promise<void> {
   const path = join(directory, 'state.json');
   const temporary = join(directory, `state-${randomUUID()}.tmp`);
@@ -482,7 +425,6 @@ export async function updateSavedState<T>(directory: string, owner: Owner, chang
   const state = readSavedState(JSON.parse(raw));
   if (ownerKey(state.owner) !== ownerKey(owner)) throw new DomainError('Saved Sidecar session is unavailable', 404);
   const result = change(state);
-  await backupSavedState(directory, owner, raw);
   await persistState(directory, state);
   return result;
 }
