@@ -4,7 +4,7 @@ A local Markdown viewer for questions and revisions in your existing Codex or Cl
 
 ## Install (macOS / Linux)
 
-Sidecar has two parts: the local `sidecar` app and a native plugin for each coding agent. Install the app first. It requires **Node 22+, pnpm 11+, and Git**; the installer installs the app's locked production dependencies, without needing a development checkout.
+Sidecar has two parts: the local `sidecar` app and a native plugin for each coding agent. Install the app first. It requires **Node 22.5+, pnpm 11+, and Git**; the installer installs the app's locked production dependencies, without needing a development checkout.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/esoh/sidecar/main/install.sh | bash
@@ -55,7 +55,7 @@ The installer prepares each Git revision in `~/.local/share/sidecar/releases/` a
 
 ## Development
 
-Node 22+ and pnpm 11+. Run `pnpm install`, `pnpm test`, and `pnpm typecheck`. Development commands do not install anything globally. The shared [Sidecar skill](.agents/skills/sidecar/SKILL.md) is also linked from `.claude/skills/sidecar`. To run a development checkout instead of the installed app, substitute `pnpm --dir /absolute/sidecar sidecar COMMAND` for `sidecar COMMAND`. The native hooks use the installed command.
+Node 22.5+ and pnpm 11+. Run `pnpm install`, `pnpm test`, and `pnpm typecheck`. Development commands do not install anything globally. The shared [Sidecar skill](.agents/skills/sidecar/SKILL.md) is also linked from `.claude/skills/sidecar`. To run a development checkout instead of the installed app, substitute `pnpm --dir /absolute/sidecar sidecar COMMAND` for `sidecar COMMAND`. The native hooks use the installed command.
 
 ## Use from an agent
 
@@ -305,3 +305,15 @@ Saved state upgrades to version 5 on the owning app's next startup, retaining an
 A truncated native notification can recover its active reply markers with `sidecar request REQUEST_ID --owner KEY`; this reuses the reserved reply stream and does not reset progress or replay the request.
 
 A normal native turn ending after progress alone leaves its request pending for a later answer, including background delegation. It does not trigger “resend the existing answer” recovery. An unfinished final or failed save retains bounded recovery; a confirmed interrupt retains Stopped semantics and partial output. Native input reservation is serialized across parallel tools; an ambiguous submission is retained for explicit reconciliation rather than replayed.
+
+### Group changed files by tests
+
+In the **Changed files** window, choose **Group by: Tests** to split the list into collapsible **Source & other files** and **Tests** sections, each with a file count and line totals. **None** keeps the flat list. This applies to both uncommitted and base-branch comparisons.
+
+The settings gear beside Group by opens **Test file settings**. Enter one repository-relative glob per line. Includes extend the default test conventions; exclusions always win, including over custom includes. For example, excluding `**/*.spec.*` moves those files into Source & other files. Empty lists restore the defaults. Save refreshes the current comparison; other viewers use the new rules when their comparison refreshes.
+
+Rules are machine-local JSON files under `~/.config/sidecar/repositories/`, keyed by a SHA-256 of the canonical common Git directory. Linked worktrees share them; separate clones do not. `XDG_CONFIG_HOME` is respected; when `SIDECAR_CONFIG` is set, the `repositories` directory lives beside that config file. No files or ignore rules are added to your repository. Atomic saves replace the current rules; if two windows save simultaneously, the last save wins. Moving a repository changes its settings identity.
+
+Defaults recognize `test`, `tests`, `Test`, `Tests`, `__tests__`, `spec`, and `specs` directories; `__fixtures__` and `__snapshots__`; `*.test.*`, `*.spec.*`, `test_*.py`, `*_test.*`, `*_spec.rb`; Java/Kotlin/C# `Test*`, `*Test`, `*Tests`; and Swift `*Tests.swift`. Matching is case-sensitive, uses forward-slash paths and Node glob syntax. This is a filename convention, not a language parser: files containing inline tests are not split into categories. Invalid saved rules show a warning and use defaults without hiding file changes.
+
+The explorer’s All / S / T dropdown filters change counts, diff markers and the changed-files window to all files, source and other files, or tests. Files remain browsable; grouping is independent of this filter. The filter defaults to All for each document visit.

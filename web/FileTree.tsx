@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react';
 import { api, errorText } from './api.ts';
-import type { WorkspaceFileChange } from './useComparison.ts';
+import type { ChangeCategory, WorkspaceFileChange } from './useComparison.ts';
+
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem } from '@plannotator/ui/components/ui/dropdown-menu';
 
 // Lazy tree over Sidecar's directory listing, styled with Plannotator's file-tree classes (MIT);
 // see THIRD_PARTY_NOTICES.md. Listings and explicit expand/collapse choices are cached per document
@@ -31,7 +33,8 @@ export const Counts = ({ additions, deletions }: { additions: number; deletions:
   {additions > 0 && <span className="additions">+{additions}</span>}{deletions > 0 && <span className="deletions">-{deletions}</span>}
 </>;
 
-export function FileTree({ documentId, root, changes, activePath, reveal, refreshNonce, onSelect, onRootChange, onOpenChanges }: {
+export function FileTree({ documentId, root, changes, category, onCategoryChange, activePath, reveal, refreshNonce, onSelect, onRootChange, onOpenChanges }: {
+  category: ChangeCategory; onCategoryChange: (category: ChangeCategory) => void;
   documentId: string; root: string; changes: WorkspaceFileChange[]; activePath: string | null;
   reveal: { path: string; id: number } | null; refreshNonce: number;
   onSelect: (absolutePath: string) => void; onRootChange: (path: string) => void; onOpenChanges: (scope: string) => void;
@@ -130,9 +133,18 @@ export function FileTree({ documentId, root, changes, activePath, reveal, refres
   }, [reveal]);
   return (
     <div className="ft" ref={container}>
-      {total.files > 0 && <button className="file-tree-status-summary ft-summary" title="Show changed files" onClick={() => onOpenChanges(root)}>
-        <span>{total.files} changed</span><span className="ft-summary-counts"><Counts additions={total.additions} deletions={total.deletions} /></span>
-      </button>}
+      <div className="ft-summary-row"><button className="ft-summary-open" aria-label={`${total.files} changed${total.additions ? ` +${total.additions}` : ""}${total.deletions ? ` -${total.deletions}` : ""}`} title="Show changed files" onClick={() => onOpenChanges(root)}>
+        <span>{total.files} changed</span>
+      </button>
+        <DropdownMenu><DropdownMenuTrigger className="ft-category" aria-label="Filter changed files" title={category === 'all' ? 'All files' : category === 'source' ? 'Source & other files only' : 'Tests only'}>{category === 'all' ? 'All' : category === 'source' ? 'S' : 'T'} ▾</DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="thread-filter-menu"><DropdownMenuRadioGroup value={category} onValueChange={value => { if (value === 'all' || value === 'source' || value === 'tests') onCategoryChange(value); }}>
+            <DropdownMenuRadioItem closeOnClick value="all">All files</DropdownMenuRadioItem>
+            <DropdownMenuRadioItem closeOnClick value="source">Source &amp; other files</DropdownMenuRadioItem>
+            <DropdownMenuRadioItem closeOnClick value="tests">Tests</DropdownMenuRadioItem>
+          </DropdownMenuRadioGroup></DropdownMenuContent>
+        </DropdownMenu>
+        <span className="ft-summary-counts"><Counts additions={total.additions} deletions={total.deletions} /></span>
+      </div>
       <div className="ft-filter"><input type="search" aria-label="Filter files" placeholder="Filter" autoComplete="off" spellCheck={false} value={filter} onChange={event => setFilter(event.target.value)} onKeyDown={event => { if (event.key === 'Escape' && filter) { event.stopPropagation(); setFilter(''); } }} /></div>
       <div className="py-1 px-1">
         {root !== '/' && tokens.length === 0 && <button className="file-tree-item w-full text-left" aria-label="Go to parent folder" title={parentOf(root)} style={{ paddingLeft: 8 + 15 }} onClick={() => onRootChange(parentOf(root))}><FolderIcon /><span>..</span></button>}

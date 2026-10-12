@@ -214,7 +214,7 @@ export function PinnedWindows({ workspace, threads, files, root, documentId, com
   const renderContent = (id: string, prefix: string) => {
     const entry = find(id);
     if (entry?.kind === 'file') return <FilePreview key={entry.id} {...entry.file} documentId={documentId} root={entry.file.root ?? root} comparison={comparison} onQuoteFile={onQuoteFile} onRevealFile={onRevealFile} onSetScripts={enabled => onSetFileScripts(entry.id, enabled)} />;
-    if (entry?.kind === 'changes') return <ChangedFiles scope={entry.scope} comparison={comparison} onOpenFile={onOpenChange} />;
+    if (entry?.kind === 'changes') return <ChangedFiles documentId={documentId} scope={entry.scope} comparison={comparison} onOpenFile={onOpenChange} />;
     return entry && <div className={`message ${entry.message.role}`}><MessageContent {...contentProps} {...entry} documentId={documentId} prefix={prefix} onGoToMessage={onGoToMessage} /></div>;
   };
 

@@ -20,7 +20,8 @@ import { readAppVersion } from './version.ts';
 import { readTunnelConfig } from './tunnel-config.ts';
 import { libraryDocument, listLibrary, recordDocumentOpen, closeLibraryDocument, cleanupClosedDocument } from './library.ts';
 import { authorizePath, listDirectory, readCode, readDiff, readPreview, readStatus } from './files.ts';
-import { listBranches, type ComparisonRequest } from './workspace-status.ts';
+import { readTestFileRules, writeTestFileRules } from './test-file-rules.ts';
+import { getGitRepositoryInfoAsync, listBranches, type ComparisonRequest } from './workspace-status.ts';
 import { claim, createThread, closeDocument, discardEmptyThread, nameThread, pinMessage, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, reanchorSelection, setBaseBranch, isBranchName, setSelectionVisibility, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput, type ReplyInput } from './store.ts';
 import { isPinStyle } from './pin-style.ts';
 import { stopRequest, prepareBatch, requestBatch, setMessageSelectionVisibility, type State } from './store.ts';
@@ -663,6 +664,15 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
         // Other owners have their own opt-in listener; never send a phone to its own localhost.
         if (isLan) for (const session of library.sessions) session.url = session.ownerKey === ownerKey(owner) ? origin : null;
         json(response, library); return;
+      }
+      if (['GET', 'POST'].includes(method) && path === '/api/files/test-rules') {
+        const document = get(store.read().documents, target.searchParams.get('document') ?? '');
+        if (!document.workspace) throw new DomainError('This document has no recorded workspace.', 404);
+        const directory = (await authorizePath(document.workspace, browsingRoots.get(document.id) ?? [], target.searchParams.get('directory') ?? document.workspace)).path;
+        const repo = await getGitRepositoryInfoAsync(directory);
+        if (!repo) throw new DomainError('Test file rules require a Git repository.', 404);
+        const testFiles = method === 'POST' ? await writeTestFileRules(repo.gitCommonDir, await bodyOf(request)) : await readTestFileRules(repo.gitCommonDir);
+        json(response, { testFiles }); return;
       }
       if (method === 'GET' && ['/api/files', '/api/files/content', '/api/files/html', '/api/files/code', '/api/files/status', '/api/files/branches', '/api/files/diff'].includes(path)) {
         const document = get(store.read().documents, target.searchParams.get('document') ?? '');
