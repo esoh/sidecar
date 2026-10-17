@@ -84,7 +84,7 @@ test('phone access enables from settings and sends conversations over plain LAN 
   await phone.getByRole('button', { name: 'Unlock', exact: true }).click();
   expect(await phone.evaluate(() => window.isSecureContext)).toBe(false);
   expect(await phone.evaluate(() => typeof crypto.randomUUID)).toBe('undefined');
-  await phone.getByRole('group', { name: 'Document and chat' }).getByRole('button', { name: 'Chat', exact: true }).click();
+  await phone.getByRole('button', { name: 'Show conversations', exact: true }).click();
   await expect(phone.getByLabel('Message', { exact: true })).toBeVisible();
   const input = phone.getByLabel('Message', { exact: true });
   await input.fill('Can you read this from my phone?'); await input.press('Enter');
@@ -97,7 +97,7 @@ test('phone access enables from settings and sends conversations over plain LAN 
   await expect(input).toHaveValue('');
   await answer('Second thread works too.');
   await expect(phone.getByText('Second thread works too.', { exact: true })).toBeVisible();
-  await phone.getByRole('group', { name: 'Document and chat' }).getByRole('button', { name: 'Document', exact: true }).click();
+  await phone.getByRole('button', { name: 'Hide conversations', exact: true }).click();
   await phone.getByRole('button', { name: 'Copy file', exact: true }).click();
   await expect(phone.getByRole('button', { name: 'Copied!', exact: true })).toBeVisible();
   await phone.getByRole('button', { name: 'Settings', exact: true }).click();
@@ -109,7 +109,7 @@ test('phone access enables from settings and sends conversations over plain LAN 
   await expect(phone.getByLabel('Passphrase', { exact: true })).toBeVisible();
   await phone.getByLabel('Passphrase', { exact: true }).fill('my new home phrase');
   await phone.getByRole('button', { name: 'Unlock', exact: true }).click();
-  await expect(phone.getByRole('group', { name: 'Document and chat' }).getByRole('button', { name: 'Chat', exact: true })).toBeVisible();
+  await expect(phone.getByRole('button', { name: 'Show conversations', exact: true })).toBeVisible();
   await setting.click();
   await expect(setting).not.toBeChecked();
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
@@ -1049,7 +1049,7 @@ test('pin list condenses, tabs reorder, and single-window mode keeps the latest 
   await expect(floating).toHaveCount(1);
   await expect(floating).toContainText('First question');
   await page.setViewportSize({ width: 360, height: 420 });
-  await page.getByRole('group', { name: 'Document and chat' }).getByRole('button', { name: 'Document', exact: true }).click();
+  await page.getByRole('button', { name: 'Hide conversations', exact: true }).click();
   await expect.poll(async () => {
     const rect = await floating.boundingBox();
     return !!rect && rect.x === 0 && rect.width === 360 && rect.y >= 0 && rect.y + rect.height <= 420;
@@ -1621,7 +1621,7 @@ test('composer stays in a narrow viewport and cancels without submitting', async
   await expect(composer).toHaveCount(0);
   expect(Object.keys((await state()).requests)).toHaveLength(0);
   await expect(page.locator('#document mark')).toHaveCount(0);
-  await page.getByRole('group', { name: 'Document and chat' }).getByRole('button', { name: 'Chat', exact: true }).click();
+  await page.getByRole('button', { name: 'Show conversations', exact: true }).click();
   await page.getByLabel('Message', { exact: true }).fill('A general question');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect(page.locator('#threads').getByText('A general question', { exact: true })).toBeVisible();
@@ -1666,10 +1666,10 @@ test('opening and closing a passage composer preserves page layout and the gener
   for (const width of [900, 375]) {
     await page.setViewportSize({ width, height: 600 });
     await page.goto(`${f.url}/?document=${a.id}`);
-    if (width < 850) await page.getByRole('group', { name: 'Document and chat' }).getByRole('button', { name: 'Chat', exact: true }).click();
+    if (width < 850) await page.getByRole('button', { name: 'Show conversations', exact: true }).click();
     const general = page.locator('#threads');
     await general.getByLabel('Message', { exact: true }).fill('Keep this general draft');
-    if (width < 850) await page.getByRole('group', { name: 'Document and chat' }).getByRole('button', { name: 'Document', exact: true }).click();
+    if (width < 850) await page.getByRole('button', { name: 'Hide conversations', exact: true }).click();
     await page.locator('#document p').last().scrollIntoViewIfNeeded();
     const layout = () => page.evaluate(() => ({
       scrollY: document.querySelector('.canvas')!.scrollTop,
@@ -2489,7 +2489,7 @@ test('Plannotator resize handle saves width and restores it after collapse', asy
   await page.mouse.click(reopened.x + 3, reopened.y + 100);
   await expect(panel).toBeHidden();
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.getByRole('group', { name: 'Document and chat' }).getByRole('button', { name: 'Chat', exact: true }).click();
+  await page.getByRole('button', { name: 'Show conversations', exact: true }).click();
   await expect(page.locator('.sidebar-resize')).toBeHidden();
   expect((await panel.boundingBox())!.width).toBeLessThanOrEqual(390);
 });
@@ -3115,7 +3115,7 @@ test('document badges, copy and brightness preserve text anchors and controls', 
   expect(await glyphColor()).toBe(original);
   await brightness.press('Escape');
   await page.setViewportSize({ width: 600, height: 800 });
-  await page.getByRole('group', { name: 'Document and chat' }).getByRole('button', { name: 'Document', exact: true }).click();
+  await page.getByRole('button', { name: 'Hide conversations', exact: true }).click();
   const badgeBox = (await page.locator('.document-tools').boundingBox())!;
   expect((await page.locator('#document h2').boundingBox())!.y).toBeGreaterThan(badgeBox.y + badgeBox.height);
 });
@@ -3531,7 +3531,7 @@ test('file windows share the dock with pinned replies and reopen without duplica
   await expect(dock).toHaveCount(0);
   await expect(first).toBeVisible();
   await page.setViewportSize({ width: 360, height: 420 });
-  await page.getByRole('group', { name: 'Document and chat' }).getByRole('button', { name: 'Document', exact: true }).click();
+  await page.getByRole('button', { name: 'Hide conversations', exact: true }).click();
   await expect.poll(async () => {
     const rect = await first.boundingBox();
     return !!rect && rect.x >= 0 && rect.x + rect.width <= 360 && rect.y >= 0 && rect.y + rect.height <= 420;
@@ -4325,14 +4325,67 @@ test('opening a hidden sidebar carries the new passage into the existing draft',
 test.describe('mobile document and chat', () => {
   test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 
+  test('uses the app bar for switching and a compact growing mobile composer', async ({ page }, testInfo) => {
+    const doc = await f.register();
+    await page.goto(`${f.url}/?document=${doc.id}`);
+    const toggle = page.locator('.topbar .conversation-toggle');
+    await expect(toggle).toBeVisible();
+    const bar = (await page.locator('.topbar').boundingBox())!;
+    expect((await page.locator('.layout').boundingBox())!.y).toBe(bar.y + bar.height);
+    await toggle.tap();
+    const input = page.getByLabel('Message', { exact: true });
+    const send = page.getByRole('button', { name: 'Send message', exact: true });
+    const compact = (await input.boundingBox())!;
+    expect(compact.height).toBeLessThanOrEqual(32);
+    expect((await send.boundingBox())!.x).toBeGreaterThanOrEqual(compact.x + compact.width);
+    expect((await page.locator('.sidebar .composer').boundingBox())!.height).toBeLessThanOrEqual(78);
+    await input.fill('First line\nSecond line\nThird line');
+    expect((await input.boundingBox())!.height).toBeGreaterThan(compact.height * 2);
+    await input.fill('');
+    expect((await input.boundingBox())!.height).toBe(compact.height);
+    await page.screenshot({ path: testInfo.outputPath('compact-mobile-chat.png') });
+    await page.setViewportSize({ width: 320, height: 568 });
+    await expect(toggle).toBeInViewport();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+  });
+
+  test('reads keyboard viewport geometry after resize event dispatch', async ({ page }) => {
+    const doc = await f.register();
+    await page.goto(`${f.url}/?document=${doc.id}`);
+    await expect(page.locator('#document')).toBeVisible();
+    // WebKit can dispatch the event before its viewport metrics reflect the resize.
+    await page.evaluate(() => {
+      window.visualViewport!.dispatchEvent(new Event('resize'));
+      Object.defineProperties(window.visualViewport!, {
+        height: { value: 390, configurable: true },
+        offsetTop: { value: 50, configurable: true },
+      });
+    });
+    await expect.poll(async () => {
+      const box = (await page.locator('.viewer').boundingBox())!;
+      return [box.y, box.height];
+    }).toEqual([50, 390]);
+    await page.evaluate(() => {
+      window.visualViewport!.dispatchEvent(new Event('resize'));
+      Object.defineProperties(window.visualViewport!, {
+        height: { value: 844, configurable: true },
+        offsetTop: { value: 0, configurable: true },
+      });
+    });
+    await expect.poll(async () => {
+      const box = (await page.locator('.viewer').boundingBox())!;
+      return [box.y, box.height];
+    }).toEqual([0, 844]);
+  });
+
   test('switches full-width views and retains native selections and drafts', async ({ page }, testInfo) => {
     const doc = await f.register('phone.md', '# Phone review\n\nFirst passage.\n\nSecond passage.\n');
     await page.goto(`${f.url}/?document=${doc.id}`);
-    const nav = page.getByRole('group', { name: 'Document and chat' });
-    const documentButton = nav.getByRole('button', { name: 'Document', exact: true });
-    const chatButton = nav.getByRole('button', { name: 'Chat', exact: true });
+    const toggle = page.locator('.conversation-toggle');
+    const documentButton = page.getByRole('button', { name: 'Hide conversations', exact: true });
+    const chatButton = page.getByRole('button', { name: 'Show conversations', exact: true });
     const message = page.getByLabel('Message', { exact: true });
-    await expect(documentButton).toHaveAttribute('aria-pressed', 'true');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
     await expect(page.locator('#document')).toBeVisible();
     await chatButton.tap();
     await expect(page.locator('#document')).toBeHidden();
@@ -4365,9 +4418,9 @@ test.describe('mobile document and chat', () => {
   test('annotation navigation returns to the document and keeps both scroll positions', async ({ page }, testInfo) => {
     const doc = await f.register('long-phone.md', '# Phone review\n\n' + 'Room to read and scroll.\n\n'.repeat(30) + 'Target passage.\n');
     await page.goto(`${f.url}/?document=${doc.id}`);
-    const nav = page.getByRole('group', { name: 'Document and chat' });
-    const chat = nav.getByRole('button', { name: 'Chat', exact: true });
-    const documentButton = nav.getByRole('button', { name: 'Document', exact: true });
+    const toggle = page.locator('.conversation-toggle');
+    const chat = page.getByRole('button', { name: 'Show conversations', exact: true });
+    const documentButton = page.getByRole('button', { name: 'Hide conversations', exact: true });
     await chat.tap();
     const message = page.getByLabel('Message', { exact: true });
     await message.fill('Where is the target?'); await message.press('Enter');
@@ -4378,7 +4431,7 @@ test.describe('mobile document and chat', () => {
     await message.fill('Keep my next question');
     const logTop = await log.evaluate(node => node.scrollTop);
     await log.getByRole('link', { name: 'target', exact: true }).tap();
-    await expect(documentButton).toHaveAttribute('aria-pressed', 'true');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
     await expect(page.locator('#document mark')).toBeInViewport();
     const canvas = page.locator('.document-workspace > .canvas');
     await expect.poll(() => canvas.evaluate(node => node.scrollTop)).toBeGreaterThan(500);
@@ -4401,8 +4454,8 @@ test.describe('mobile document and chat', () => {
     await expect(async () => {
       const box = (await page.getByRole('button', { name: 'Send message', exact: true }).boundingBox())!;
       expect(box.y + box.height).toBeLessThanOrEqual(440);
-      expect((await nav.boundingBox())!.y).toBeGreaterThanOrEqual(50);
-      expect((await message.boundingBox())!.height).toBeGreaterThan(30);
+      expect((await toggle.boundingBox())!.y).toBeGreaterThanOrEqual(50);
+      expect((await message.boundingBox())!.height).toBeGreaterThanOrEqual(24);
     }).toPass();
     expect(parseFloat(await message.evaluate(node => getComputedStyle(node).fontSize))).toBeGreaterThanOrEqual(16);
     await page.screenshot({ path: testInfo.outputPath('mobile-keyboard.png') });
@@ -4411,27 +4464,27 @@ test.describe('mobile document and chat', () => {
   test('selection from the thread list creates a draft while Comment still starts its own thread', async ({ page }) => {
     const doc = await f.register();
     await page.goto(`${f.url}/?document=${doc.id}`);
-    const nav = page.getByRole('group', { name: 'Document and chat' });
-    await nav.getByRole('button', { name: 'Chat', exact: true }).tap();
+    const toggle = page.locator('.conversation-toggle');
+    await page.getByRole('button', { name: 'Show conversations', exact: true }).tap();
     await page.getByRole('button', { name: 'Threads', exact: true }).tap();
-    await nav.getByRole('button', { name: 'Document', exact: true }).tap();
+    await page.getByRole('button', { name: 'Hide conversations', exact: true }).tap();
     await select(page, 'world', 'touchend');
     await page.route('**/api/threads', route => route.fulfill({ status: 503, json: { error: 'Try again' } }), { times: 1 });
-    await nav.getByRole('button', { name: 'Chat', exact: true }).tap();
+    await page.getByRole('button', { name: 'Show conversations', exact: true }).tap();
     await expect(page.getByRole('alert')).toContainText('Try again');
     await expect(page.locator('#document mark[data-pending]')).toHaveText('world');
-    await nav.getByRole('button', { name: 'Chat', exact: true }).tap();
+    await page.getByRole('button', { name: 'Show conversations', exact: true }).tap();
     await expect(page.locator('.draft-selection')).toContainText('world');
     await expect(page.getByRole('alert')).toHaveCount(0);
     const draftThread = await page.locator('#threads').getAttribute('data-active-thread');
-    await nav.getByRole('button', { name: 'Document', exact: true }).tap();
+    await page.getByRole('button', { name: 'Hide conversations', exact: true }).tap();
     await page.getByRole('button', { name: 'Comment', exact: true }).tap();
     await page.getByLabel('Comment', { exact: true }).fill('New passage thread');
     await page.getByRole('button', { name: 'Send comment', exact: true }).tap();
     await expect(page.getByRole('log')).toContainText('New passage thread');
     expect((await lastRequest()).threadId).not.toBe(draftThread);
     expect((await lastRequest()).quote.exact).toBe('world');
-    await expect(nav.getByRole('button', { name: 'Chat', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
   });
   test('overlapping annotations keep their thread chooser in the document view', async ({ page }) => {
     const doc = await f.register();
@@ -4444,14 +4497,14 @@ test.describe('mobile document and chat', () => {
     await expect(page.getByRole('log')).toContainText('First question');
     const first = await lastRequest();
     const second = await (await f.view('/api/questions', { documentId: doc.id, text: 'Second question', clientMessageId: 'mobile-overlap', quote: first.quote })).json();
-    const nav = page.getByRole('group', { name: 'Document and chat' });
-    await nav.getByRole('button', { name: 'Document', exact: true }).tap();
+    const toggle = page.locator('.conversation-toggle');
+    await page.getByRole('button', { name: 'Hide conversations', exact: true }).tap();
     await page.locator('#document mark').tap();
-    await expect(nav.getByRole('button', { name: 'Document', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
     await expect(page.getByRole('button', { name: 'Unnamed First question', exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Unnamed Second question', exact: true }).tap();
     await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', second.threadId);
-    await expect(nav.getByRole('button', { name: 'Chat', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
   });
 
   test('file links and pinned replies open visibly from Chat and keep its draft', async ({ page }) => {
@@ -4459,24 +4512,24 @@ test.describe('mobile document and chat', () => {
     const doc = await f.register();
     await f.agent('/agent/documents', { path: doc.path, workspace: root });
     await page.goto(`${f.url}/?document=${doc.id}`);
-    const nav = page.getByRole('group', { name: 'Document and chat' });
-    await nav.getByRole('button', { name: 'Chat', exact: true }).tap();
+    const toggle = page.locator('.conversation-toggle');
+    await page.getByRole('button', { name: 'Show conversations', exact: true }).tap();
     const input = page.getByLabel('Message', { exact: true });
     await input.fill('Show the notes'); await input.press('Enter');
     await expect(input).toHaveValue('');
     await answer(`See [notes](${root}/notes.md).`);
     await input.fill('Keep my draft');
     await page.getByRole('log').getByRole('link', { name: 'notes', exact: true }).tap();
-    await expect(nav.getByRole('button', { name: 'Document', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
     const file = page.getByRole('dialog', { name: 'File: notes.md', exact: true });
     await expect(file.getByRole('heading', { name: 'Linked notes' })).toBeVisible();
-    await nav.getByRole('button', { name: 'Chat', exact: true }).tap();
+    await page.getByRole('button', { name: 'Show conversations', exact: true }).tap();
     await expect(file).toBeHidden();
     await expect(input).toHaveValue('Keep my draft');
     await page.locator('.messages .message.agent').getByRole('button', { name: 'Pin message', exact: true }).tap();
     await expect(page.getByRole('dialog', { name: 'Pinned message', exact: true })).toBeVisible();
-    await expect(nav.getByRole('button', { name: 'Document', exact: true })).toHaveAttribute('aria-pressed', 'true');
-    await nav.getByRole('button', { name: 'Chat', exact: true }).tap();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await page.getByRole('button', { name: 'Show conversations', exact: true }).tap();
     await expect(input).toHaveValue('Keep my draft');
   });
 
