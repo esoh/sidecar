@@ -197,15 +197,16 @@ export const MarkdownDocument = memo(function MarkdownDocument({
         const path = href.trim();
         // Plannotator misses document links with line suffixes and padded code links.
         // Normalize those cases without changing saved Markdown or external links.
-        const [documentPath, line] = splitLineSuffix(path.replace(/#.*$/, ''));
+        const [documentPath, line] = splitLineSuffix(path);
         const isLocal = !/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(documentPath) || /^file:\/\//i.test(documentPath);
         const isHtml = !path.startsWith('#') && /\.html?(?:#.*)?$/i.test(path);
-        const isDocumentLine = !!line && hasLinkedDocExtension(documentPath);
+        const isDocument = hasLinkedDocExtension(documentPath);
+        const isLineLink = !!line && (isDocument || isCodeFilePath(documentPath));
         // Saved annotations keep their article-level thread/overlap navigation.
         const isHighlight = event.target.closest('#document mark.annotation-highlight');
-        if (openLink && isLocal && !isHighlight && (isHtml || isDocumentLine || (href !== path && isCodeFilePath(path)))) {
+        if (openLink && isLocal && !isHighlight && (isHtml || isLineLink || (href !== path && isCodeFilePath(path)))) {
           event.preventDefault(); event.stopPropagation();
-          openLink(isHtml || isDocumentLine ? 'doc' : 'code', isHtml ? path : isDocumentLine ? documentPath : path.replace(/#.*$/, ''), linkBase);
+          openLink(isHtml || isDocument ? 'doc' : 'code', path, linkBase);
           return;
         }
         if (anchorPrefix || !href.startsWith('#')) return;

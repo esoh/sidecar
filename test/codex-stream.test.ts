@@ -148,7 +148,11 @@ test('simultaneous stream startup shares one observer and closes it with the app
   const sidecar = await startServer({ owner, directory, stateRoot: directory });
   const token = await readFile(join(directory, 'agent-token'), 'utf8');
   const cookie = (await fetch(sidecar.url)).headers.get('set-cookie')!.split(';')[0];
-  const post = async (path: string, body: unknown) => fetch(sidecar.url + path, { method: 'POST', headers: { 'X-Sidecar-Token': token, Cookie: cookie, Origin: sidecar.url, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const post = async (path: string, body: unknown) => {
+    const response = await fetch(sidecar.url + path, { method: 'POST', headers: { 'X-Sidecar-Token': token, Cookie: cookie, Origin: sidecar.url, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    assert.equal(response.status, 200, path);
+    return response;
+  };
   try {
     const file = join(root, 'a.md'); await writeFile(file, '# Test\n' + 'x'.repeat(60000));
     const doc = await (await post('/agent/documents', { path: file })).json();
@@ -158,14 +162,17 @@ test('simultaneous stream startup shares one observer and closes it with the app
       const req = await (await post('/api/questions', { documentId: doc.id, text: 'Hello '.repeat(10000), clientMessageId: 'q' + i })).json();
       routes.push({ requestId: req.id, documentId: doc.id, threadId: req.threadId });
     }
-    await post(`/agent/requests/${routes[0].requestId}/claim`, {});
+    for (const route of routes) await post(`/agent/requests/${route.requestId}/claim`, {});
     const first = post('/agent/streams', routes[0]);
-    while (!resumes[0]) await delay(5);
-    await post('/agent/replies', { ...routes[0], text: 'Fallback' });
-    await post(`/agent/requests/${routes[1].requestId}/claim`, {});
+    for (let i = 0; i < 100 && !resumes[0]; i++) await delay(5);
+    assert.ok(resumes[0], 'Observer did not reach the startup handshake');
     const second = post('/agent/streams', routes[1]);
-    resumes[0](); assert.equal((await second).status, 200);
-    assert.equal((await first).status, 200);
+    // Reply saves share the capture queue with startup; release the handshake before awaiting one.
+    resumes[0]();
+    await Promise.all([first, second]);
+    await post('/agent/replies', { ...routes[0], text: 'Fallback' });
+    await post('/agent/streams', routes[1]);
+    assert.equal(resumes.length, 1, 'Completing one request must retain the shared observer');
     await delay(20);
     assert.equal(ws.clients.size, 1);
     await sidecar.close();

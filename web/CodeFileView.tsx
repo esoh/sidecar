@@ -1,11 +1,13 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { File } from '@pierre/diffs/react';
 import type { SelectedLineRange } from '@pierre/diffs';
+import type { FileLineRange } from './links.ts';
 import type { FileQuote } from '../src/quote.ts';
 
 // Pierre renderer/options and shadow-selection handling adapted from Plannotator's
 // CodeFilePopout.tsx (MIT). Sidecar keeps its own window/dock and reply composer.
-export function CodeFileView({ path, contents, onQuote }: {
+export function CodeFileView({ path, contents, onQuote, lineRange, revision = 0 }: {
+  lineRange?: FileLineRange; revision?: number;
   path: string; contents: string; onQuote: (quote: Pick<FileQuote, 'exact' | 'startLine' | 'endLine'>) => void;
 }) {
   const root = useRef<HTMLDivElement>(null);
@@ -28,6 +30,28 @@ export function CodeFileView({ path, contents, onQuote }: {
     setSelectedLines(range);
     onQuoteRef.current({ exact, startLine, endLine });
   }, [contents]);
+  const lastReveal = useRef('');
+  const paintReference = useCallback((node: HTMLElement) => {
+    const rows = node.shadowRoot?.querySelectorAll<HTMLElement>('[data-line]');
+    if (!rows) return;
+    const key = lineRange ? `${revision}:${lineRange.start}:${lineRange.end}` : '';
+    for (const row of rows) {
+      const line = Number(row.dataset.line);
+      row.toggleAttribute('data-file-reference', !!lineRange && line >= lineRange.start && line <= lineRange.end);
+    }
+    if (!key) { lastReveal.current = ''; return; }
+    if (lastReveal.current === key) return;
+    const target = node.shadowRoot?.querySelector<HTMLElement>(`[data-line="${lineRange?.start}"]`);
+    const scroller = node.closest<HTMLElement>('.reference-body');
+    if (!target || !scroller) return;
+    lastReveal.current = key;
+    requestAnimationFrame(() => {
+      if (!target.isConnected) return;
+      const box = scroller.getBoundingClientRect(), scale = box.height / scroller.offsetHeight;
+      const toolbar = scroller.querySelector('.file-preview-path')?.getBoundingClientRect().height ?? 0;
+      scroller.scrollTop += (target.getBoundingClientRect().top - box.top - toolbar - 24) / (scale || 1);
+    });
+  }, [lineRange, revision]);
   function capture() {
     const shadow = root.current?.querySelector('diffs-container')?.shadowRoot;
     const local = shadow && 'getSelection' in shadow && typeof shadow.getSelection === 'function' ? shadow.getSelection() : null;
@@ -56,7 +80,9 @@ export function CodeFileView({ path, contents, onQuote }: {
     <File file={file} selectedLines={selectedLines} options={{
       themeType: 'dark', overflow: 'scroll', disableFileHeader: true, enableLineSelection: true,
       onLineSelectionEnd: quoteLines,
+      onPostRender: paintReference,
       unsafeCSS: `:host { color-scheme: dark; --diffs-font-family: 'Geist Mono Variable', monospace; }
+        [data-file-reference] { background: color-mix(in srgb, oklch(0.75 0.18 280 / 0.3) var(--sidecar-highlight-intensity, 100%), transparent); }
         :host, [data-file], [data-code], [data-column-number] {
           --diffs-bg: ${bg}; --diffs-fg: ${fg}; --diffs-dark-bg: ${bg}; --diffs-dark: ${fg};
         }`,
