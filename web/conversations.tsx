@@ -198,6 +198,7 @@ export function QuestionForm({
       <div className="composer-box">
         <textarea
           ref={input}
+          rows={1}
           aria-label={floating ? 'Comment' : 'Message'}
           placeholder="Ask a question or request a change…"
           required

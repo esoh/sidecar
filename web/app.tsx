@@ -42,7 +42,7 @@ type Content = { html: string; markdown: string; version: string };
 const insideRoot = (path: string, root: string) => path.startsWith(`${root.replace(/\/$/, '')}/`);
 
 function keepsAttachment(target: EventTarget | null) {
-  return target instanceof Element && !!target.closest('.sidebar .composer, .sidebar-header, .thread-row, .sidebar-toggle, .mobile-view-switch, .files-edge-toggle, .files-panel, .file-preview');
+  return target instanceof Element && !!target.closest('.sidebar .composer, .sidebar-header, .thread-row, .sidebar-toggle, .files-edge-toggle, .files-panel, .file-preview');
 }
 
 function App() {
@@ -99,20 +99,25 @@ function App() {
   const [isSidebarShown, setSidebarShown] = useState(() => innerWidth > 850);
   useLayoutEffect(() => {
     const viewport = window.visualViewport;
+    let frame = 0;
     const update = () => {
+      frame = 0;
       // Mobile keyboards resize the visual viewport without resizing the page.
       if (!viewer.current || (viewport && viewport.scale !== 1)) return;
       viewer.current.style.setProperty('--mobile-height', `${viewport?.height ?? innerHeight}px`);
       viewer.current.style.setProperty('--mobile-top', `${viewport?.offsetTop ?? 0}px`);
     };
+    // WebKit can dispatch viewport events before updating the reported geometry.
+    const schedule = () => { if (!frame) frame = requestAnimationFrame(update); };
     update();
-    window.addEventListener('resize', update);
-    viewport?.addEventListener('resize', update);
-    viewport?.addEventListener('scroll', update);
+    window.addEventListener('resize', schedule);
+    viewport?.addEventListener('resize', schedule);
+    viewport?.addEventListener('scroll', schedule);
     return () => {
-      window.removeEventListener('resize', update);
-      viewport?.removeEventListener('resize', update);
-      viewport?.removeEventListener('scroll', update);
+      cancelAnimationFrame(frame);
+      window.removeEventListener('resize', schedule);
+      viewport?.removeEventListener('resize', schedule);
+      viewport?.removeEventListener('scroll', schedule);
     };
   }, []);
   const panelResize = useResizablePanel({
@@ -868,6 +873,7 @@ function App() {
           onClick={() => isSidebarShown ? setSidebarShown(false) : showConversations()}
         >
           <Icon name="panel" />
+          <span>{isSidebarShown ? 'Document' : 'Chat'}</span>
         </button>
         {current && (
           <button className="sidebar-toggle" aria-label="Close document" title="Close document" disabled={isClosing} onClick={() => { void closeCurrentDocument(); }}>
@@ -875,10 +881,6 @@ function App() {
           </button>
         )}
       </header>
-      <div className="mobile-view-switch" role="group" aria-label="Document and chat">
-        <button aria-pressed={!isSidebarShown} aria-controls="document-workspace" onClick={() => setSidebarShown(false)}>Document</button>
-        <button aria-pressed={isSidebarShown} aria-controls="conversation-sidebar" onPointerDown={() => { if (!isSidebarShown) captureSelection(); }} onClick={showConversations}>Chat</button>
-      </div>
       {current?.workspace && <button
         className="files-edge-toggle"
         aria-label={isFilesShown ? 'Hide files' : 'Show files'} title={isFilesShown ? 'Hide files' : 'Show files'}

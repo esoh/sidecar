@@ -116,7 +116,7 @@ body {
   padding: 3px 7px;
   border-radius: 4px;
 }
-.mobile-view-switch { display: none; }
+.conversation-toggle > span { display: none; }
 .layout {
   height: calc(100dvh - 49px);
   display: grid;
@@ -562,28 +562,9 @@ body {
     flex-direction: column;
   }
   .viewer > .topbar { flex-shrink: 0; }
-  .topbar .brand > span, .topbar .separator, .conversation-toggle { display: none; }
-  .mobile-view-switch {
-    display: flex;
-    flex-shrink: 0;
-    height: 44px;
-    background: var(--card);
-    border-bottom: 1px solid var(--line);
-  }
-  .mobile-view-switch button {
-    flex: 1;
-    border: 0;
-    border-bottom: 2px solid transparent;
-    border-radius: 0;
-    background: transparent;
-    color: var(--subtle);
-    font-family: inherit;
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-  }
-  .mobile-view-switch button[aria-pressed='true'] { color: var(--primary); border-bottom-color: var(--primary); }
-  .mobile-view-switch button:focus-visible { outline: 2px solid var(--primary); outline-offset: -3px; }
+  .topbar .brand, .topbar .separator, .conversation-toggle > svg { display: none; }
+  .viewer .topbar .conversation-toggle { width: auto; padding: 0 8px; font-size: 12px; }
+  .conversation-toggle > span { display: inline; }
   .viewer > .layout {
     position: relative;
     flex: 1;
@@ -1703,7 +1684,7 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
 
 @media (max-width: 850px) {
   .viewer[data-chat-open='true'] > .files-edge-toggle { display: none; }
-  .viewer > .files-edge-toggle { position: absolute; top: 101px; }
+  .viewer > .files-edge-toggle { position: absolute; top: 57px; }
   .viewer .files-panel { position: absolute; top: 0; bottom: 0; }
   .viewer .app-error { flex-shrink: 0; margin: 0; max-height: 64px; overflow: auto; }
   .sidebar-header { padding: 0 10px; }
@@ -1712,10 +1693,17 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
   .composer :is(.send-button, .cancel-button) { min-width: 44px; min-height: 44px; }
   .sidebar .message-actions { height: auto; }
   .sidebar .message-actions button { min-width: 36px; min-height: 36px; }
-  .sidebar .composer { padding: 10px 12px max(10px, env(safe-area-inset-bottom)); }
+  .sidebar .composer { padding: 6px 10px max(6px, env(safe-area-inset-bottom)); }
+  .composer-box { display: flex; align-items: flex-end; gap: 8px; padding: 4px 8px; }
+  .composer-actions { flex-shrink: 0; margin-top: 0; }
   .sidebar .messages { padding: 14px 12px; overscroll-behavior: contain; }
   .sidebar .composer textarea, .comment-popover .composer textarea {
     font-size: max(16px, calc(12px * var(--sidecar-conversation-scale, 1)));
+    flex: 1;
+    min-width: 0;
+    min-height: 24px;
+    line-height: 1.5;
+    align-self: center;
     max-height: min(160px, calc(var(--mobile-height, 100dvh) * .25));
   }
 }
