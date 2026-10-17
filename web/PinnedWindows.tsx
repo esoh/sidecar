@@ -30,9 +30,10 @@ function clampWindow(value: WindowPosition): WindowPosition {
   return { ...value, width, height, x: Math.max(margin, Math.min(value.x, innerWidth - width - margin)), y: Math.max(margin, Math.min(value.y, innerHeight - height - margin)) };
 }
 
-export function PinnedWindows({ workspace, threads, files, root, documentId, comparison, changesScope, openRequests, onOpened, onCloseFile, onSetFileScripts, onCloseChanges, onOpenChange, onQuoteFile, onRevealFile, onGoToMessage, ...contentProps }: {
+export function PinnedWindows({ workspace, threads, files, root, documentId, comparison, changesScope, openRequests, onOpened, onCloseFile, onSetFileScripts, onSetLineRangeVisible, onCloseChanges, onOpenChange, onQuoteFile, onRevealFile, onGoToMessage, ...contentProps }: {
   workspace: RefObject<HTMLDivElement | null>; threads: Thread[]; documentId: string;
   files: OpenFile[]; root?: string; onCloseFile: (id: string) => void; onSetFileScripts: (id: string, enabled: boolean) => void;
+  onSetLineRangeVisible: (id: string, visible: boolean) => void;
   comparison: Comparison; changesScope: string | null; onCloseChanges: () => void; onOpenChange: (change: WorkspaceFileChange) => void;
   onQuoteFile: (quote: FileQuote) => void;
   onRevealFile: (path: string) => void;
@@ -213,7 +214,7 @@ export function PinnedWindows({ workspace, threads, files, root, documentId, com
   };
   const renderContent = (id: string, prefix: string) => {
     const entry = find(id);
-    if (entry?.kind === 'file') return <FilePreview key={entry.id} {...entry.file} documentId={documentId} root={entry.file.root ?? root} comparison={comparison} onQuoteFile={onQuoteFile} onRevealFile={onRevealFile} onSetScripts={enabled => onSetFileScripts(entry.id, enabled)} />;
+    if (entry?.kind === 'file') return <FilePreview key={entry.id} {...entry.file} documentId={documentId} root={entry.file.root ?? root} comparison={comparison} onQuoteFile={onQuoteFile} onRevealFile={onRevealFile} onSetLineRangeVisible={visible => onSetLineRangeVisible(entry.id, visible)} onSetScripts={enabled => onSetFileScripts(entry.id, enabled)} />;
     if (entry?.kind === 'changes') return <ChangedFiles documentId={documentId} scope={entry.scope} comparison={comparison} onOpenFile={onOpenChange} />;
     return entry && <div className={`message ${entry.message.role}`}><MessageContent {...contentProps} {...entry} documentId={documentId} prefix={prefix} onGoToMessage={onGoToMessage} /></div>;
   };

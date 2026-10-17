@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import { guideLanguageForPath } from '@plannotator/core/guide-format';
 import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
 import type { CodeFileData, FileDiffData, FilePreviewData } from '../src/files.ts';
@@ -10,6 +10,7 @@ import { excludedSelection, selectionText } from './selection.ts';
 import { CodeFileView } from './CodeFileView.tsx';
 import { CodeDiff } from './CodeDiff.tsx';
 import { MarkdownDiff } from './MarkdownDiff.tsx';
+import type { FileLineRange } from './links.ts';
 import type { Comparison } from './useComparison.ts';
 
 // Source previews use the same fenced blocks as Plannotator's documents.
@@ -18,10 +19,11 @@ function fenced(language: string, text: string) {
   return `${fence}${language}\n${text}\n${fence}\n`;
 }
 
-export type OpenFile = { id: string; path: string; root?: string; kind: 'doc' | 'code'; refusal?: string; fragment?: string; areScriptsEnabled?: boolean; revision: number };
+export type OpenFile = { id: string; path: string; root?: string; kind: 'doc' | 'code'; refusal?: string; fragment?: string; lineRange?: FileLineRange; isLineRangeVisible?: boolean; areScriptsEnabled?: boolean; revision: number };
 
-export function FilePreview({ documentId, root, path, kind, refusal, revision, fragment, areScriptsEnabled = false, comparison, onQuoteFile, onRevealFile, onSetScripts }: {
+export function FilePreview({ documentId, root, path, kind, refusal, revision, fragment, lineRange, isLineRangeVisible = true, onSetLineRangeVisible, areScriptsEnabled = false, comparison, onQuoteFile, onRevealFile, onSetScripts }: {
   documentId: string; root?: string; comparison: Comparison; onQuoteFile: (quote: FileQuote) => void;
+  onSetLineRangeVisible: (visible: boolean) => void;
   onRevealFile: (path: string) => void; onSetScripts: (enabled: boolean) => void;
 } & OpenFile) {
   const anchorPrefix = useId();
@@ -32,9 +34,10 @@ export function FilePreview({ documentId, root, path, kind, refusal, revision, f
   const { status, mode, base, revision: comparisonRevision } = comparison;
   const change = absolute && status?.available ? status.files[absolute] : undefined;
   const canDiff = !!absolute && !refusal && !!status?.available && (mode === 'uncommitted' || !!base);
-  // Changed files open on their diff; anything else opens as the plain preview until the reader asks.
+  // Line references open current source; otherwise changed files default to their diff.
   const [showDiff, setShowDiff] = useState<boolean | null>(null);
-  const diffOn = canDiff && (showDiff ?? !!change);
+  useEffect(() => { if (lineRange) setShowDiff(false); }, [revision, lineRange]);
+  const diffOn = canDiff && (showDiff ?? (!lineRange && !!change));
   const [diff, setDiff] = useState<FileDiffData | null>(null), [diffError, setDiffError] = useState('');
   const isDeleted = change?.status === 'deleted';
   useEffect(() => {
@@ -56,7 +59,10 @@ export function FilePreview({ documentId, root, path, kind, refusal, revision, f
       }, (reason) => { if (!stopped) setError(errorText(reason)); });
     return () => { stopped = true; };
   }, [documentId, root, path, kind, refusal, revision, isDeleted]);
-  const isSource = kind === 'code' || /\.(jsonc?|json5|ya?ml)$/i.test(path);
+  const isSource = !!lineRange || kind === 'code' || /\.(jsonc?|json5|ya?ml)$/i.test(path);
+  const lineCount = useMemo(() => preview?.text.split('\n').length ?? 0, [preview?.text]);
+  const hasLineRange = !!lineRange && !!preview && !isDeleted && !error && lineRange.end <= lineCount;
+  const shownRange = hasLineRange && isLineRangeVisible && !diffOn ? lineRange : undefined;
   const sourceLanguage = preview && isSource ? guideLanguageForPath(path) ?? 'text' : undefined;
   const renderAs = preview?.renderAs ?? (/\.html?$/i.test(path) ? 'html' : /\.mmd$/i.test(path) ? 'mermaid' : /\.(dot|gv)$/i.test(path) ? 'graphviz' : 'markdown');
   const markdown = preview && (sourceLanguage ? null
@@ -99,7 +105,7 @@ export function FilePreview({ documentId, root, path, kind, refusal, revision, f
   ) : !preview ? (
     <p role="status">Loading file…</p>
   ) : sourceLanguage ? (
-    <CodeFileView path={path} contents={preview.text} onQuote={quote => root && onQuoteFile({ path: `${root.replace(/\/$/, '')}/${preview.path}`, kind, ...quote })} />
+    <CodeFileView path={path} contents={preview.text} lineRange={shownRange} revision={revision} onQuote={quote => root && onQuoteFile({ path: `${root.replace(/\/$/, '')}/${preview.path}`, kind, ...quote })} />
   ) : markdown === null ? (
     // A separate response keeps inline-script permission out of the main viewer's CSP.
     <iframe key={`${areScriptsEnabled}:${revision}:${fragment ?? ''}`} className="file-preview-frame" title={`Preview of ${path}`} sandbox={areScriptsEnabled ? 'allow-scripts' : ''} referrerPolicy="no-referrer"
@@ -112,12 +118,17 @@ export function FilePreview({ documentId, root, path, kind, refusal, revision, f
   );
   return (
     <section className="file-preview" aria-label="File preview">
-      <div className="file-preview-path">
+      <div className={`file-preview-path${lineRange ? " has-line-reference" : ""}`}>
         <button className="file-reveal" title="Show in file browser" aria-label="Show in file browser" onClick={() => root && onRevealFile(`${root.replace(/\/$/, '')}/${path}`)}><code>{path}</code></button>
+        {lineRange && <div className="file-line-reference">
+          <code>{lineRange.start === lineRange.end ? `Line ${lineRange.start}` : `Lines ${lineRange.start}–${lineRange.end}`}</code>
+          <button className="selection-visibility" aria-label={shownRange ? 'Hide referenced lines' : 'Show referenced lines'} aria-pressed={!!shownRange} disabled={!hasLineRange} onClick={() => { if (!shownRange) setShowDiff(false); onSetLineRangeVisible(!shownRange); }}>{shownRange ? 'Hide' : 'Show'}</button>
+        </div>}
         {canDiff && <label className="file-diff-toggle"><input type="checkbox" checked={diffOn} onChange={event => setShowDiff(event.target.checked)} />Show diff</label>}
         {renderAs === 'html' && !isSource && !diffOn && <label className="file-diff-toggle" title="Only enable for trusted HTML. Blocks external resources and viewer access, but scripts can navigate their own frame."><input type="checkbox" checked={areScriptsEnabled} onChange={event => onSetScripts(event.target.checked)} />Run scripts</label>}
         <span>Read-only</span>
       </div>
+      {lineRange && preview && !hasLineRange && <p role="status">The referenced lines are outside this file ({lineCount} lines).</p>}
       {!diffOn ? plain : diff ? diffView : diffError ? <><p role="alert">Diff unavailable: {diffError}</p>{plain}</> : <p role="status">Loading diff…</p>}
     </section>
   );

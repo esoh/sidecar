@@ -5,16 +5,51 @@ import { isObject } from './store.ts';
 import type { StreamEvent } from './stream.ts';
 
 const defaultSocketPath = () => join(process.env.CODEX_HOME ?? homedir() + '/.codex', 'app-server-control/app-server-control.sock');
+// shortcut: native completion events can still contain full turns; use bounded events when Codex supports them.
+const streamMaxPayload = 64 * 1024 * 1024;
+function socketFailure(reason: unknown, fallback: string): Error {
+  return new Error(reason === 1009 || (isObject(reason) && reason.code === 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH')
+    ? 'Codex message exceeded Sidecar’s message-size limit. The native session may still be running.' : fallback);
+}
+async function readTurnAnswer(request: (method: string, params: unknown) => Promise<unknown>, threadId: string, turn: Record<string, unknown>): Promise<string | undefined> {
+  if (turn.itemsView !== 'notLoaded' && turn.itemsView !== 'summary') {
+    const last = Array.isArray(turn.items) ? turn.items.filter(item => isObject(item) && item.type === 'agentMessage').at(-1) : undefined;
+    return isObject(last) && typeof last.text === 'string' ? last.text : undefined;
+  }
+  if (typeof turn.id !== 'string') throw new Error('Could not identify the Codex turn for answer recovery.');
+  let cursor: string | undefined;
+  const seen = new Set<string>();
+  do {
+    const page = await request('thread/items/list', { threadId, turnId: turn.id, limit: 10, sortDirection: 'desc', ...(cursor ? { cursor } : {}) });
+    if (!isObject(page) || !Array.isArray(page.data)) throw new Error('Could not read the Codex answer.');
+    for (const entry of page.data) {
+      if (!isObject(entry) || entry.turnId !== turn.id || !isObject(entry.item)) throw new Error('Codex answer recovery returned a different or invalid turn.');
+    }
+    const last = page.data.find(entry => entry.item.type === 'agentMessage');
+    if (last) {
+      if (typeof last.item.text !== 'string') throw new Error('Could not read the Codex answer text.');
+      return last.item.text;
+    }
+    if (page.nextCursor === null) return undefined;
+    if (typeof page.nextCursor !== 'string' || !page.nextCursor || seen.has(page.nextCursor)) throw new Error('Codex answer recovery returned an invalid cursor.');
+    cursor = page.nextCursor; seen.add(cursor);
+  } while (cursor);
+}
 export type CodexObserver = (() => void) & { canInterrupt(turnId: string): boolean; interrupt(turnId: string): Promise<void>; steer(turnId: string, event: Record<string, unknown>, clientMessageId: string): Promise<'accepted' | 'not-active'> };
 
 export async function observeCodex(threadId: string, onEvent: (event: StreamEvent) => void, onFailure: (message: string) => void, socketPath = defaultSocketPath(), prefixes?: readonly string[], onTurnEnd?: (turnId: string, status: string, answer?: string) => void): Promise<CodexObserver> {
-  const socket = new WebSocket(`ws+unix://${socketPath}:/`, { maxPayload: 2 * 1024 * 1024, handshakeTimeout: 5000 });
+  const socket = new WebSocket(`ws+unix://${socketPath}:/`, { maxPayload: streamMaxPayload, handshakeTimeout: 5000 });
   let stopped = false, ready = false, nextId = 0;
   const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   let message: { id: string; turnId: string; index: number; text: string; ignored?: boolean } | undefined;
   let replyTurnId: string | undefined;
-  function stop() { stopped = true; socket.terminate(); for (const call of pending.values()) { clearTimeout(call.timer); call.reject(new Error('Codex observer closed')); } pending.clear(); }
-  function failed() { if (!stopped) { if (ready) onFailure('Codex stream disconnected. Send a complete reply to recover.'); stop(); } }
+  function stop(error = new Error('Codex observer closed')) { stopped = true; socket.terminate(); for (const call of pending.values()) { clearTimeout(call.timer); call.reject(error); } pending.clear(); }
+  function failed(reason?: unknown) {
+    if (stopped) return;
+    const error = socketFailure(reason, 'Codex stream disconnected. Send a complete reply to recover.');
+    if (ready) onFailure(error.message);
+    stop(error);
+  }
   socket.on('error', failed); socket.on('close', failed);
   socket.on('message', bytes => {
     try {
@@ -31,8 +66,10 @@ export async function observeCodex(threadId: string, onEvent: (event: StreamEven
       if (value.method === 'turn/completed' && isObject(p.turn) && typeof p.turn.id === 'string') {
         if (onTurnEnd || replyTurnId === p.turn.id) {
           if (replyTurnId === p.turn.id) replyTurnId = undefined;
-          const last = Array.isArray(p.turn.items) ? p.turn.items.filter(item => isObject(item) && item.type === 'agentMessage').at(-1) : undefined;
-          if (onTurnEnd) onTurnEnd(p.turn.id, String(p.turn.status), isObject(last) && typeof last.text === 'string' ? last.text : undefined);
+          const turnId = p.turn.id, status = String(p.turn.status);
+          if (onTurnEnd) void readTurnAnswer(request, threadId, p.turn).then(answer => {
+            if (!stopped) onTurnEnd(turnId, status, answer);
+          }).catch(error => { if (!stopped) { onFailure(`Could not recover the completed Codex answer: ${error.message}`); stop(); } });
           else onFailure('Agent turn ended before the reply was finalized.');
         }
         return;
@@ -61,6 +98,7 @@ export async function observeCodex(threadId: string, onEvent: (event: StreamEven
   });
   function request(method: string, params: unknown): Promise<unknown> {
     return new Promise((resolve, reject) => {
+      if (stopped || socket.readyState !== WebSocket.OPEN) { reject(new Error('Codex observer closed')); return; }
       const id = ++nextId;
       const timer = setTimeout(() => { pending.delete(id); reject(new Error('Codex observer timed out')); }, 5000);
       pending.set(id, { resolve, reject, timer });
@@ -85,7 +123,7 @@ export async function observeCodex(threadId: string, onEvent: (event: StreamEven
       if (!isObject(read) || !isObject(read.thread) || read.thread.id !== threadId || !isObject(read.thread.status)) throw new Error('Could not verify the original Codex session');
       if (read.thread.status.type === 'idle') return 'not-active';
       if (read.thread.status.type !== 'active') throw new Error('The original Codex session is not available');
-      const page = await request('thread/turns/list', { threadId, limit: 1, sortDirection: 'desc', itemsView: 'full' });
+      const page = await request('thread/turns/list', { threadId, limit: 1, sortDirection: 'desc', itemsView: 'notLoaded' });
       if (!isObject(page) || !Array.isArray(page.data)) throw new Error('Could not identify the active Codex turn');
       const turn = page.data[0];
       if (!isObject(turn) || turn.id !== turnId || turn.status !== 'inProgress') return 'not-active';
@@ -137,7 +175,7 @@ export async function readCodexControl(threadId: string, signal: AbortSignal, so
         if (status.type === 'active') {
           const waiting = Array.isArray(status.activeFlags) && status.activeFlags.some(flag => flag === 'waitingOnApproval' || flag === 'waitingOnUserInput');
           activity = waiting ? 'waiting' : 'busy';
-          if (includeTurn) socket.send(JSON.stringify({ id: 3, method: 'thread/turns/list', params: { threadId, limit: 1, sortDirection: 'desc', itemsView: 'full' } }));
+          if (includeTurn) socket.send(JSON.stringify({ id: 3, method: 'thread/turns/list', params: { threadId, limit: 1, sortDirection: 'desc', itemsView: 'notLoaded' } }));
           else finish(activity);
         } else finish(status.type === 'idle' ? 'idle' : status.type === 'notLoaded' ? 'disconnected' : 'unknown');
       } catch { finish('unknown'); }
@@ -150,20 +188,18 @@ export type NativeResetResult = { turnId?: string; answer?: string };
 // Explicit user Reset may interrupt any work, but never loads a replacement
 // session or follows a changing turn ID. A native end event is the acknowledgement.
 export async function resetCodexSession(threadId: string, signal: AbortSignal, socketPath = defaultSocketPath(), expectedTurnId?: string): Promise<NativeResetResult> {
-  const socket = new WebSocket(`ws+unix://${socketPath}:/`, { maxPayload: 2 * 1024 * 1024, handshakeTimeout: 5000 });
+  const socket = new WebSocket(`ws+unix://${socketPath}:/`, { maxPayload: streamMaxPayload, handshakeTimeout: 5000 });
   let nextId = 0;
   const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
-  const ended = new Map<string, NativeResetResult>();
-  let target: string | undefined, resolveEnd: ((result: NativeResetResult) => void) | undefined, rejectEnd: ((error: Error) => void) | undefined;
-  const fail = () => {
-    const error = new Error('Could not verify the attached Codex session. Reconnect it and try Reset again.');
+  const ended = new Map<string, Record<string, unknown>>();
+  let target: string | undefined, resolveEnd: ((turn: Record<string, unknown>) => void) | undefined, rejectEnd: ((error: Error) => void) | undefined;
+  const fail = (reason?: unknown) => {
+    const error = socketFailure(reason, 'Could not verify the attached Codex session. Reconnect it and try Reset again.');
     for (const call of pending.values()) call.reject(error);
     pending.clear(); rejectEnd?.(error); socket.terminate();
   };
-  const resultFor = (turn: Record<string, unknown>): NativeResetResult => {
-    const last = Array.isArray(turn.items) ? turn.items.filter(item => isObject(item) && item.type === 'agentMessage').at(-1) : undefined;
-    return { turnId: typeof turn.id === 'string' ? turn.id : undefined, answer: isObject(last) && typeof last.text === 'string' ? last.text : undefined };
-  };
+  const resultFor = async (turn: Record<string, unknown>): Promise<NativeResetResult> =>
+    ({ turnId: typeof turn.id === 'string' ? turn.id : undefined, answer: await readTurnAnswer(request, threadId, turn) });
   socket.on('error', fail); socket.on('close', fail); signal.addEventListener('abort', fail, { once: true });
   socket.on('message', bytes => {
     try {
@@ -177,8 +213,8 @@ export async function resetCodexSession(threadId: string, signal: AbortSignal, s
       } else if (value.method === 'turn/completed' && isObject(value.params) && value.params.threadId === threadId && isObject(value.params.turn)) {
         const turn = value.params.turn;
         if (typeof turn.id !== 'string' || !['completed', 'interrupted', 'failed'].includes(String(turn.status))) return;
-        const result = resultFor(turn); ended.set(turn.id, result);
-        if (target === turn.id) resolveEnd?.(result);
+        ended.set(turn.id, turn);
+        if (target === turn.id) resolveEnd?.(turn);
       }
     } catch { fail(); }
   });
@@ -203,21 +239,22 @@ export async function resetCodexSession(threadId: string, signal: AbortSignal, s
       const resumed = await request('thread/resume', { threadId, excludeTurns: true });
       if (!isObject(resumed) || !isObject(resumed.thread) || resumed.thread.id !== threadId) throw new Error('Codex session identity changed.');
     }
-    const page = await request('thread/turns/list', { threadId, limit: 1, sortDirection: 'desc', itemsView: 'full' });
+    const page = await request('thread/turns/list', { threadId, limit: 1, sortDirection: 'desc', itemsView: 'notLoaded' });
     if (!isObject(page) || !Array.isArray(page.data)) throw new Error('Could not verify the latest Codex turn.');
     const turn = page.data[0];
     if (expectedTurnId && (!isObject(turn) || turn.id !== expectedTurnId)) throw new Error('The active Codex turn changed. Stop was not sent.');
     if (status === 'idle' || !isObject(turn) || turn.status !== 'inProgress') {
+      const result = isObject(turn) ? await resultFor(turn) : {};
       if (await readStatus() !== 'idle') throw new Error('Codex started another turn. Try Reset again.');
-      return isObject(turn) ? resultFor(turn) : {};
+      return result;
     }
     if (typeof turn.id !== 'string') throw new Error('Could not identify the active Codex turn.');
     target = turn.id;
-    if (ended.has(target)) return ended.get(target)!;
-    const completed = new Promise<NativeResetResult>((resolve, reject) => { resolveEnd = resolve; rejectEnd = reject; });
+    if (ended.has(target)) return await resultFor(ended.get(target)!);
+    const completed = new Promise<Record<string, unknown>>((resolve, reject) => { resolveEnd = resolve; rejectEnd = reject; });
     // Install the end listener before the RPC: completion may precede its reply.
     await Promise.all([request('turn/interrupt', { threadId, turnId: target }), completed]);
-    return await completed;
+    return await resultFor(await completed);
   } finally {
     signal.removeEventListener('abort', fail); socket.removeListener('close', fail); socket.removeListener('error', fail);
     socket.on('error', () => {}); socket.terminate();

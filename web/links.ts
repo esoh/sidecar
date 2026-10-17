@@ -18,7 +18,17 @@ export function resolveWorkspaceLink(target: string, root: string, baseDir = roo
   return absolute.startsWith(`${root}/`) ? { path: absolute.slice(root.length + 1) } : { outside: absolute };
 }
 
+export type FileLineRange = { start: number; end: number };
+
 export function splitLineSuffix(target: string): [string, string] {
-  const match = target.match(/:\d+(?:-\d+)?$/);
+  const match = target.match(/(?::\d+(?:-\d+)?(?:#.*)?|#L\d+(?:-L?\d+)?)$/);
   return match ? [target.slice(0, match.index), match[0]] : [target, ''];
+}
+
+export function fileLineRange(suffix: string): FileLineRange | undefined {
+  const match = suffix.match(/^(?::(\d+)(?:-(\d+))?(?:#.*)?|#L(\d+)(?:-L?(\d+))?)$/);
+  if (!match) return;
+  const start = Number(match[1] ?? match[3]), end = Number(match[2] ?? match[4] ?? start);
+  if (![start, end].every(value => Number.isSafeInteger(value) && value > 0)) return;
+  return { start: Math.min(start, end), end: Math.max(start, end) };
 }

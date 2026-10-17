@@ -19,7 +19,7 @@ import { useQuestionDrafts, forgetDocument, type QuestionDraft, type QuestionDra
 import { quoteIssue, quoteRange, selectionText, selectionSentence, excludedSelection } from './selection.ts';
 import { revealRange } from './reveal-target.ts';
 import { MarkdownDocument, WorkspaceLinks, type OpenWorkspaceLink } from './MarkdownDocument.tsx';
-import { resolveWorkspaceLink, splitLineSuffix } from './links.ts';
+import { resolveWorkspaceLink, splitLineSuffix, fileLineRange, type FileLineRange } from './links.ts';
 import { setDocPreviewFetcher } from '@plannotator/ui/components/InlineMarkdown';
 import { DocumentLibrary } from './DocumentLibrary.tsx';
 import { SettingsProvider, TextSettings } from './TextSettings.tsx';
@@ -42,7 +42,7 @@ type Content = { html: string; markdown: string; version: string };
 const insideRoot = (path: string, root: string) => path.startsWith(`${root.replace(/\/$/, '')}/`);
 
 function keepsAttachment(target: EventTarget | null) {
-  return target instanceof Element && !!target.closest('.sidebar .composer, .sidebar-header, .thread-row, .sidebar-toggle, .files-edge-toggle, .files-panel, .file-preview');
+  return target instanceof Element && !!target.closest('.sidebar .composer, .sidebar-header, .thread-row, .sidebar-toggle, .mobile-view-switch, .files-edge-toggle, .files-panel, .file-preview');
 }
 
 function App() {
@@ -58,6 +58,7 @@ function App() {
   const [choices, setChoices] = useState<{ ids: string[]; rect: DOMRect } | null>(null);
   const article = useRef<HTMLElement>(null),
     workspace = useRef<HTMLDivElement>(null),
+    viewer = useRef<HTMLDivElement>(null),
     composer = useRef<HTMLElement>(null),
     toolbar = useRef<HTMLDivElement>(null);
   const painted = useRef(new Map<string, string>());
@@ -96,6 +97,24 @@ function App() {
   const selectedMessages = threads.flatMap(thread => thread.messages.flatMap(message => (message.selections ?? []).map(selection => ({ thread, message, selection }))));
   const originalMessage = selectedMessages.find(({ thread, selection }) => thread.id === activeThreadId && selection.id === originalMessageId)?.selection;
   const [isSidebarShown, setSidebarShown] = useState(() => innerWidth > 850);
+  useLayoutEffect(() => {
+    const viewport = window.visualViewport;
+    const update = () => {
+      // Mobile keyboards resize the visual viewport without resizing the page.
+      if (!viewer.current || (viewport && viewport.scale !== 1)) return;
+      viewer.current.style.setProperty('--mobile-height', `${viewport?.height ?? innerHeight}px`);
+      viewer.current.style.setProperty('--mobile-top', `${viewport?.offsetTop ?? 0}px`);
+    };
+    update();
+    window.addEventListener('resize', update);
+    viewport?.addEventListener('resize', update);
+    viewport?.addEventListener('scroll', update);
+    return () => {
+      window.removeEventListener('resize', update);
+      viewport?.removeEventListener('resize', update);
+      viewport?.removeEventListener('scroll', update);
+    };
+  }, []);
   const panelResize = useResizablePanel({
     storageKey: 'sidecar-panel-width',
     defaultWidth: innerWidth >= 1500 ? 410 : 365,
@@ -219,7 +238,7 @@ function App() {
     setComposing(false);
     setChoices(null);
   }, []);
-  const openPreview = useCallback((path: string, refusal?: string, kind: OpenFile['kind'] = 'doc', root = current?.workspace, fragment?: string) => {
+  const openPreview = useCallback((path: string, refusal?: string, kind: OpenFile['kind'] = 'doc', root = current?.workspace, fragment?: string, lineRange?: FileLineRange) => {
     // Keep passage drafts; file windows cannot attach selections to the main document.
     clearPendingSelection();
     window.getSelection()?.removeAllRanges();
@@ -228,11 +247,11 @@ function App() {
     const id = `file:${absolutePath}`;
     setFiles(previous => {
       const existing = previous.find(file => file.id === id);
-      const file = { id, path, root, kind, refusal, fragment, areScriptsEnabled: existing?.areScriptsEnabled, revision: (existing?.revision ?? 0) + 1 };
+      const file = { id, path, root, kind, refusal, fragment, lineRange, isLineRangeVisible: true, areScriptsEnabled: existing?.areScriptsEnabled, revision: (existing?.revision ?? 0) + 1 };
       return existing ? previous.map(value => value.id === id ? file : value) : [...previous, file];
     });
     setOpenPins(previous => [...previous, id]);
-    if (innerWidth <= 850) setFilesShown(false);
+    if (innerWidth <= 850) { setFilesShown(false); setSidebarShown(false); }
   }, [clearPendingSelection, current?.workspace]);
   const allowRoot = useCallback(async (directory: string) => {
     if (directory === current?.workspace) return directory;
@@ -253,13 +272,13 @@ function App() {
       : current?.workspace && insideRoot(path, current.workspace) ? current.workspace : path.slice(0, path.lastIndexOf('/')) || '/';
     void changeVisibleRoot(root, path);
   }
-  const openAbsoluteFile = useCallback(async (absolutePath: string, kind?: OpenFile['kind'], fragment?: string) => {
+  const openAbsoluteFile = useCallback(async (absolutePath: string, kind?: OpenFile['kind'], fragment?: string, lineRange?: FileLineRange) => {
     const path = absolutePath.replace(/^\/\/+/, '/');
     const sourceRoot = browserRoot && insideRoot(path, browserRoot) ? browserRoot
       : current?.workspace && insideRoot(path, current.workspace) ? current.workspace : path.slice(0, path.lastIndexOf('/')) || '/';
     try {
       const root = await allowRoot(sourceRoot);
-      openPreview(path.slice(sourceRoot.replace(/\/$/, '').length + 1), undefined, kind ?? (isAnnotatableDocPath(path) ? 'doc' : 'code'), root, fragment);
+      openPreview(path.slice(sourceRoot.replace(/\/$/, '').length + 1), undefined, kind ?? (isAnnotatableDocPath(path) ? 'doc' : 'code'), root, fragment, lineRange);
     } catch (reason) { setError(errorText(reason)); }
   }, [browserRoot, current?.workspace, allowRoot, openPreview]);
   // The Changed files window is a singleton: asking again retargets its scope and raises it.
@@ -281,21 +300,23 @@ function App() {
   };
   const handleLink = useRef<OpenWorkspaceLink>(() => undefined);
   handleLink.current = (kind, target, baseDir) => {
-    const html = kind === 'doc' ? target.match(/^([^#]*\.html?)(#.*)$/i) : null;
-    const [file] = kind === 'code' ? splitLineSuffix(target) : [html ? html[1] : target];
+    const [source, suffix] = splitLineSuffix(target);
+    const html = !suffix && kind === 'doc' ? source.match(/^([^#]*\.html?)(#.*)$/i) : null;
+    const file = html ? html[1] : source;
+    const lineRange = fileLineRange(suffix);
     const resolved = resolveLink(kind, file, baseDir);
     if (!resolved) openPreview(file, 'This document has no recorded workspace. Reopen it from your agent.');
-    else void openAbsoluteFile('outside' in resolved ? resolved.outside : `${workspaceRoot.current}/${resolved.path}`, kind, html?.[2]);
+    else void openAbsoluteFile('outside' in resolved ? resolved.outside : `${workspaceRoot.current}/${resolved.path}`, kind, html?.[2], lineRange);
   };
   // Stable identity so memoized documents and messages do not re-render on every state tick.
   const openLink = useCallback<OpenWorkspaceLink>((...args) => handleLink.current(...args), []);
   useEffect(() => {
     // Plannotator's hover preview for `path:line` code references reads Sidecar's code route.
     setDocPreviewFetcher(async (candidate) => {
-      const [file, line] = splitLineSuffix(candidate);
+      const [file] = splitLineSuffix(candidate);
       const resolved = resolveLink('code', file);
       if (!resolved || 'outside' in resolved) return null;
-      const response = await fetch(viewerPath(`/api/files/code?document=${encodeURIComponent(documentId)}&path=${encodeURIComponent(resolved.path + line)}`));
+      const response = await fetch(viewerPath(`/api/files/code?document=${encodeURIComponent(documentId)}&path=${encodeURIComponent(resolved.path)}`));
       if (!response.ok) return null;
       const data = await response.json() as { contents: string; filepath: string };
       return { contents: data.contents, filepath: data.filepath };
@@ -526,6 +547,7 @@ function App() {
     const shortcut = (event: KeyboardEvent) => {
       if (
         event.defaultPrevented ||
+        (innerWidth <= 850 && isSidebarShown) ||
         event.isComposing ||
         event.ctrlKey ||
         event.metaKey ||
@@ -564,7 +586,7 @@ function App() {
       window.removeEventListener('keydown', shortcut);
       document.removeEventListener('copy', copy);
     };
-  }, [selection, composing, choices, openComment]);
+  }, [selection, composing, choices, openComment, isSidebarShown]);
   // Plannotator dismisses the quick menu and pending highlight on an outside press.
   useEffect(() => {
     if (!selection || composing) return;
@@ -661,6 +683,7 @@ function App() {
     }
     setComposing(false);
     setChoices(null);
+    return quote;
   }
   function openMessage(id: string) {
     const selected = selectedMessages.find(({ selection }) => selection.id === id);
@@ -677,7 +700,7 @@ function App() {
     const ids = [...new Set([painter.getIdByDom(mark), ...painter.getExtraIdByDom(mark)])].filter((id) =>
       selectedMessages.some(({ selection }) => selection.id === id),
     );
-    if (ids.length) setSidebarShown(true);
+    if (ids.length && innerWidth > 850) setSidebarShown(true);
     if (ids.length === 1) {
       clearSelection();
       if (!proposalReview.open(ids[0], mark)) openMessage(ids[0]);
@@ -689,9 +712,9 @@ function App() {
     return ids.length > 0;
   }
   const passageIssue = (quote: Quote) => documentError ? 'Document unavailable' : quoteIssue(documentText, quote, content.version);
-  async function quoteFile(fileQuote: FileQuote) {
+  async function attachToConversation(attachment: { fileQuote: FileQuote } | { quote: Quote }) {
     const visit = ++fileSelectionVisit.current;
-    clearPendingSelection();
+    if ('fileQuote' in attachment) clearPendingSelection();
     ignoreClick.current = true;
     requestAnimationFrame(() => { ignoreClick.current = false; });
     try {
@@ -703,10 +726,18 @@ function App() {
         target = thread.id;
       }
       if (visit !== fileSelectionVisit.current) return;
-      const { quote, messageQuote, ...draft } = drafts.get(target) ?? { text: '', retry: null };
-      drafts.set(target, { ...draft, fileQuote });
+      const { quote, messageQuote, fileQuote, ...draft } = drafts.get(target) ?? { text: '', retry: null };
+      drafts.set(target, { ...draft, ...attachment });
       if (activeThreadId !== target || !isSidebarShown) openThread(target);
+      else if ('quote' in attachment) setSelection(attachment.quote);
+      setError('');
     } catch (reason) { fileThread.current = null; setError(errorText(reason)); }
+  }
+  function showConversations() {
+    if (isSidebarShown) return;
+    const pending = captureSelection() ?? selection;
+    if (pending && !composing) void attachToConversation({ quote: pending });
+    else setSidebarShown(true);
   }
   const selectionActions = {
     onOpenFileQuote: (quote: FileQuote) => openLink(quote.kind, quote.path),
@@ -801,10 +832,11 @@ function App() {
     <WorkspaceLinks.Provider value={openLink}>
       <ProposalReviewContext.Provider value={proposalReview.context}>
       {proposalReview.popover}
+      <div className="viewer" ref={viewer} data-chat-open={isSidebarShown}>
       <header className="topbar">
         <div className="brand">
           <Icon name="logo" />
-          Sidecar
+          <span>Sidecar</span>
         </div>
         <span className="separator" />
         {current && <TitleForm key={documentId} id={documentId} title={current.title} />}
@@ -827,12 +859,13 @@ function App() {
         <AgentStatus state={state} connected={connected} />
         <TextSettings version={state?.appVersion} />
         <button
-          className="sidebar-toggle"
+          className="sidebar-toggle conversation-toggle"
           aria-label={isSidebarShown ? 'Hide conversations' : 'Show conversations'}
           title={isSidebarShown ? 'Hide conversations' : 'Show conversations'}
           aria-expanded={isSidebarShown}
           aria-controls="conversation-sidebar"
-          onClick={() => setSidebarShown((shown) => !shown)}
+          onPointerDown={() => { if (!isSidebarShown) captureSelection(); }}
+          onClick={() => isSidebarShown ? setSidebarShown(false) : showConversations()}
         >
           <Icon name="panel" />
         </button>
@@ -842,6 +875,10 @@ function App() {
           </button>
         )}
       </header>
+      <div className="mobile-view-switch" role="group" aria-label="Document and chat">
+        <button aria-pressed={!isSidebarShown} aria-controls="document-workspace" onClick={() => setSidebarShown(false)}>Document</button>
+        <button aria-pressed={isSidebarShown} aria-controls="conversation-sidebar" onPointerDown={() => { if (!isSidebarShown) captureSelection(); }} onClick={showConversations}>Chat</button>
+      </div>
       {current?.workspace && <button
         className="files-edge-toggle"
         aria-label={isFilesShown ? 'Hide files' : 'Show files'} title={isFilesShown ? 'Hide files' : 'Show files'}
@@ -868,7 +905,7 @@ function App() {
             />
           </>
         )}
-        <div className="document-workspace" ref={workspace}>
+        <div className="document-workspace" id="document-workspace" ref={workspace}>
         <main className="canvas">
           <div className="reading-width">
             {originalMessage?.quote && activeThreadId && (
@@ -919,7 +956,7 @@ function App() {
             </article>
           </div>
         </main>
-        <PinnedWindows key={documentId} workspace={workspace} threads={threads} files={files} onSetFileScripts={(id, enabled) => setFiles(previous => previous.map(file => file.id === id ? { ...file, areScriptsEnabled: enabled } : file))} root={current?.workspace} documentId={documentId} comparison={comparison} changesScope={changesScope} onCloseChanges={() => setChangesScope(null)} onOpenChange={openChange} onQuoteFile={quoteFile} onRevealFile={revealFile} openRequests={openPins} onOpened={ids => setOpenPins(previous => previous.filter(id => !ids.includes(id)))} onCloseFile={id => {
+        <PinnedWindows key={documentId} workspace={workspace} threads={threads} files={files} onSetLineRangeVisible={(id, visible) => setFiles(previous => previous.map(file => file.id === id ? { ...file, isLineRangeVisible: visible } : file))} onSetFileScripts={(id, enabled) => setFiles(previous => previous.map(file => file.id === id ? { ...file, areScriptsEnabled: enabled } : file))} root={current?.workspace} documentId={documentId} comparison={comparison} changesScope={changesScope} onCloseChanges={() => setChangesScope(null)} onOpenChange={openChange} onQuoteFile={fileQuote => attachToConversation({ fileQuote })} onRevealFile={revealFile} openRequests={openPins} onOpened={ids => setOpenPins(previous => previous.filter(id => !ids.includes(id)))} onCloseFile={id => {
           setFiles(previous => previous.filter(file => file.id !== id));
           setPreviewPath(previous => `file:${previous}` === id ? null : previous);
         }} {...selectionActions} onGoToMessage={goToMessage} />
@@ -958,17 +995,21 @@ function App() {
           activeMessageId={selectedMessages.find(({ selection }) => selection.id === activeMessageId)?.message.id ?? null}
           messageVisit={messageVisit}
           onMessageSent={request => setSentRequestId(request.id)}
-          onOpenPin={id => setOpenPins(previous => [...previous.filter(value => value !== id), id])}
+          onOpenPin={id => {
+            setOpenPins(previous => [...previous.filter(value => value !== id), id]);
+            if (innerWidth <= 850) setSidebarShown(false);
+          }}
           onGoToMessage={goToMessage}
           messageJump={messageJump}
         />
+      </div>
       </div>
       {((selection && !composing) || choices) &&
         createPortal(
           <div
             ref={toolbar}
             key={choices ? 'choices' : draftKey}
-            className={`floating selection-actions${choices ? '' : ' annotation-toolbar'}`}
+            className={`floating selection-actions${choices ? '' : ' annotation-toolbar'}${isSidebarShown ? ' chat-open' : ''}`}
             onKeyDown={(event) => {
               if (event.key === 'Escape') cancel();
             }}
@@ -1012,7 +1053,7 @@ function App() {
       {composing &&
         selection &&
         createPortal(
-          <section ref={composer} className="floating comment-popover" role="dialog" aria-label="Comment on selection">
+          <section ref={composer} className={`floating comment-popover${isSidebarShown ? ' chat-open' : ''}`} role="dialog" aria-label="Comment on selection">
             <QuestionForm
               key={draftKey}
               documentId={documentId}

@@ -110,11 +110,12 @@ test('an idle heartbeat cannot erase the native binding before an interruption h
 
 for (const mode of ['idle', 'busy', 'unknown', 'idle-final'] as const) test(`Claude's native module answers Reset from ${mode} state`, async t => {
   const root = await mkdtemp(join(tmpdir(), 'sidecar-reset-hooks-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
   let release = () => {};
   const completedGate = new Promise<void>(resolve => { release = resolve; });
   let ended: Promise<unknown> | undefined;
   const { f, request, prepared, state, finished } = await setup(t, root);
+  // The fixture's earlier teardown must stop the server before removing its parent directory.
+  t.after(() => rm(root, { recursive: true, force: true }));
   const handlers = new Map<string, any>(), aborted: string[] = [];
   let tick = () => {};
   const { register } = await import(new URL('../hooks/control.js', import.meta.url).href);
