@@ -143,7 +143,7 @@ test('Claude native module forwards completed final output before display hooks 
   const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'Explain', clientMessageId: 'native' })).json();
   const prepared = await (await f.agent(`/agent/requests/${request.id}/prepare`, {})).json();
   const handlers = new Map<string, any>();
-  const { register } = await import(new URL('../hooks/control.js', import.meta.url).href);
+  const { register } = await import(new URL('../.agents/hooks/control.js', import.meta.url).href);
   register((name: string, handler: unknown) => handlers.set(name, handler));
   const api = {
     session: { id: async () => f.owner.sessionId },

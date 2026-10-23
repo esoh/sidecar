@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "sidecar",
-      "source": "./",
+      "source": "./.agents",
       "description": "Discuss and revise Markdown documents with your existing coding agent."
     }
   ],

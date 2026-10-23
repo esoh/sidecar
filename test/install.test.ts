@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFile, spawn } from 'node:child_process';
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readlink, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 const exec = promisify(execFile);
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -83,10 +83,44 @@ fs.symlinkSync(${JSON.stringify(join(root, 'node_modules'))}, process.argv[3] + 
 test('both native manifests load the canonical skill and share the application version', async () => {
   const app = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
   for (const host of ['claude', 'codex']) {
-    const manifest = JSON.parse(await readFile(join(root, `.${host}-plugin/plugin.json`), 'utf8'));
+    const manifest = JSON.parse(await readFile(join(root, '.agents', `.${host}-plugin/plugin.json`), 'utf8'));
     assert.equal(manifest.version, app.version);
-    assert.equal(manifest.skills, './.agents/skills/');
-    assert.match(await readFile(join(root, manifest.skills, 'sidecar/SKILL.md'), 'utf8'), /sidecar --version/);
+    assert.equal(manifest.skills, './skills/');
+    assert.match(await readFile(join(root, '.agents', manifest.skills, 'sidecar/SKILL.md'), 'utf8'), /sidecar --version/);
   }
   assert.ok(app.dependencies.tsx, 'production installations need the TypeScript loader');
+});
+
+test('marketplaces cache only self-contained integration assets, never runtime dependencies', async t => {
+  const codex = JSON.parse(await readFile(join(root, '.agents/plugins/marketplace.json'), 'utf8'));
+  const claude = JSON.parse(await readFile(join(root, '.claude-plugin/marketplace.json'), 'utf8'));
+  const pluginRoot = await realpath(join(root, codex.plugins[0].source.path));
+  assert.notEqual(pluginRoot, await realpath(root), 'a runtime checkout must not become the hook trust bundle');
+  assert.equal(pluginRoot, await realpath(join(root, claude.plugins[0].source)));
+  const cache = await mkdtemp(join(tmpdir(), 'sidecar-plugin-cache-'));
+  t.after(() => rm(cache, { recursive: true, force: true }));
+  await cp(pluginRoot, cache, { recursive: true });
+  const entries = await readdir(cache, { recursive: true });
+  assert.ok(!entries.some(path => path.split(/[\\/]/).some(part => ['node_modules', '.git', 'src', 'web'].includes(part))));
+  for (const path of entries) assert.ok(!(await lstat(join(cache, path))).isSymbolicLink(), 'cached assets must not depend on source-checkout links');
+  for (const host of ['codex', 'claude']) {
+    const manifest = JSON.parse(await readFile(join(cache, `.${host}-plugin/plugin.json`), 'utf8'));
+    assert.equal(await readFile(join(cache, manifest.skills, 'sidecar/SKILL.md'), 'utf8'), await readFile(join(root, '.agents/skills/sidecar/SKILL.md'), 'utf8'));
+    const hooks = JSON.parse(await readFile(join(cache, manifest.hooks), 'utf8'));
+    if (host === 'codex') {
+      for (const groups of Object.values<any>(hooks.hooks)) for (const group of groups) for (const hook of group.hooks) {
+        assert.equal(hook.command, 'sidecar hook --agent codex');
+        assert.equal(hook.timeout, 2, 'fix packaging rather than extending the hook budget');
+      }
+    } else {
+      const { register } = await import(pathToFileURL(join(cache, 'hooks', hooks.modules[0])).href);
+      const events: string[] = [];
+      register((name: string) => events.push(name));
+      assert.ok(events.includes('tool.call'));
+      assert.ok(events.includes('turn.complete'));
+    }
+  }
+  // Copying a plugin must leave the separately installed app/loader available.
+  await lstat(join(root, 'node_modules/tsx'));
+  assert.match((await exec(join(root, 'scripts/sidecar'), ['--version'])).stdout, /Sidecar 0\.1\.0/);
 });

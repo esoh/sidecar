@@ -33,6 +33,8 @@ claude plugin marketplace add esoh/sidecar
 claude plugin install sidecar@sidecar
 ```
 
+Both marketplaces package only `.agents/`: the canonical skill, native manifests and hooks. The app, `node_modules`, and Git checkout stay outside that bundle. Keep dependencies in the app release; do not install them in the agent plugin cache. Codex fingerprints the whole plugin before each hook, within its timeout, so copying a full runtime into the cache can time out before the hook starts.
+
 Restart the agent. Invoke Sidecar's skill from the plugin's commands/skills menu (Claude: `/sidecar:sidecar`; Codex: select the Sidecar skill with `$`). Ask it to open an existing Markdown file or generate and open a document. Claude uses its native plugin module (with Monitor as an older-session fallback), and Codex uses native queue/steer delivery, as described below. Codex may ask you to review/trust the bundled hooks; installing the plugin does not bypass native hook trust.
 
 If you previously installed Sidecar with personal skill symlinks, remove those **Sidecar-only links** before enabling the plugin to avoid duplicate commands. The source-checkout workflow below remains available for development.
@@ -50,6 +52,8 @@ claude plugin update sidecar@sidecar
 ```
 
 Restart the agent to load the updated skill/hooks. Ask the original agent to stop and reopen its Sidecar app to load the updated app code; closing the browser alone does not stop it. Documents and threads are kept in `~/.local/state/sidecar`.
+
+If your marketplace points at an old local release directory, marketplace refresh cannot move that pinned path to a newer release. Codex also resolves a `current` symlink to its concrete release when registering it. Switch that marketplace back to the Git source once: run `codex plugin marketplace remove sidecar`, then the Codex installation commands above. For Claude, use `claude plugin marketplace remove sidecar`, then its installation commands. This replaces only the integration; the separately installed app, dependencies, saved documents and running viewers stay in place. A changed bundle may require native hook approval again; do not edit trusted hashes or disable trust checks.
 
 The installer prepares each Git revision in `~/.local/share/sidecar/releases/` and switches `current` only after dependencies and the launcher pass a startup check. A failed install leaves the current app selected. Old releases are retained so running viewers can continue using their files. It does not modify agent settings or install the plugins for you. `SIDECAR_REF` selects a branch or tag; `SIDECAR_INSTALL_DIR` and `SIDECAR_BIN_DIR` override absolute install paths. Maintainer tests can use `SIDECAR_REPOSITORY` to install a local Git fixture.
 
