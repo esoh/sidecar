@@ -61,7 +61,7 @@ for (const origin of ['idle', 'busy', 'monitor'] as const) test(`Claude native $
   const f = await fixture(t, 10000, root), doc = await f.register();
   const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'Question', clientMessageId: 'question' })).json();
   const event = await (await f.agent(`/agent/requests/${request.id}/prepare`, {})).json();
-  const handlers = new Map<string, any>(); const { register } = await import(new URL('../hooks/control.js', import.meta.url).href);
+  const handlers = new Map<string, any>(); const { register } = await import(new URL('../.agents/hooks/control.js', import.meta.url).href);
   register((name: string, handler: unknown) => handlers.set(name, handler));
   const api = {
     session: { id: async () => f.owner.sessionId }, env: { get: async () => root }, fs: { read: (path: string) => readFile(path, 'utf8') },

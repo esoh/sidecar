@@ -6,6 +6,11 @@
     "name": "esoh"
   },
   "repository": "https://github.com/esoh/sidecar",
-  "skills": "./.agents/skills/",
-  "hooks": "./hooks/claude-control.json"
+  "skills": "./skills/",
+  "hooks": "./hooks/codex.json",
+  "interface": {
+    "displayName": "Sidecar",
+    "shortDescription": "Document threads with your existing agent",
+    "category": "Productivity"
+  }
 }

@@ -10,7 +10,7 @@ async function setup(t: Parameters<typeof fixture>[0]) {
   const root = await mkdtemp(join(tmpdir(), 'sc-hook-')); t.after(() => rm(root, { recursive: true, force: true }));
   const f = await fixture(t, 10000, root), doc = await f.register();
   const handlers = new Map<string, any>();
-  const { register } = await import(new URL('../hooks/control.js', import.meta.url).href);
+  const { register } = await import(new URL('../.agents/hooks/control.js', import.meta.url).href);
   register((name: string, handler: unknown) => handlers.set(name, handler));
   let tick = () => {}, submitted: string[] = [];
   const api = {

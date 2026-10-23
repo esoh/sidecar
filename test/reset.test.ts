@@ -118,7 +118,7 @@ for (const mode of ['idle', 'busy', 'unknown', 'idle-final'] as const) test(`Cla
   t.after(() => rm(root, { recursive: true, force: true }));
   const handlers = new Map<string, any>(), aborted: string[] = [];
   let tick = () => {};
-  const { register } = await import(new URL('../hooks/control.js', import.meta.url).href);
+  const { register } = await import(new URL('../.agents/hooks/control.js', import.meta.url).href);
   register((name: string, handler: unknown) => handlers.set(name, handler));
   const api = {
     session: { id: async () => f.owner.sessionId },

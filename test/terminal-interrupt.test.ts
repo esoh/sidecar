@@ -69,7 +69,7 @@ for (const agent of ['codex', 'claude'] as const) {
         assert.fail('Queued work was not delivered');
       };
       const handlers = new Map<string, any>();
-      const { register } = await import(new URL('../hooks/control.js', import.meta.url).href);
+      const { register } = await import(new URL('../.agents/hooks/control.js', import.meta.url).href);
       register((name: string, handler: unknown) => handlers.set(name, handler));
       const api = {
         session: { id: async () => owner.sessionId },
