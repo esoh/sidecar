@@ -2,11 +2,11 @@ import { readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { filterWorkspaceStatusForDirectory, getWorkspaceStatusForDirectory, readComparisonOldText, type ComparisonRequest, type WorkspaceStatusResult } from './workspace-status.ts';
 import { DomainError } from './store.ts';
+import { decodeFileText, MAX_FILE_PREVIEW_BYTES } from './file-text.ts';
 
 // File-type predicates copied from @plannotator/core 0.25.7 annotatable.ts (MIT): the package
 // ships TypeScript source, which Playwright's loader will not compile from node_modules.
 const ANNOTATABLE_DOC_REGEX = /(?:\.(?:mdx?|txt|mmd|mermaid|dot|gv|html?|ya?ml|jsonc?|json5|toml|ini|cfg|conf|properties|csv|tsv|log|xml)|\.env\.example)$/i;
-const MAX_ANNOTATABLE_FILE_BYTES = 2 * 1024 * 1024;
 function diagramRenderKindForPath(input: string): 'mermaid' | 'graphviz' | null {
   if (/\.(?:mmd|mermaid)$/i.test(input.trim())) return 'mermaid';
   if (/\.(?:dot|gv)$/i.test(input.trim())) return 'graphviz';
@@ -26,10 +26,8 @@ export function isFileBrowserExcludedPath(relativePath: string): boolean {
   if (!normalized) return false;
   return normalized.split('/').filter(Boolean).some(part => FILE_BROWSER_EXCLUDED_NAMES.has(part));
 }
-// Listing and changed-file filtering follow handleFileBrowserFiles in Plannotator
-// packages/server/reference-handlers.ts at 772c620 (MIT), but list one directory per request.
-const includeWorkspaceFile = (relativePath: string) =>
-  (ANNOTATABLE_DOC_REGEX.test(relativePath) || CODE_FILE_REGEX.test(relativePath)) && !isFileBrowserExcludedPath(relativePath);
+// Keep folder exclusions, but list files regardless of their renderer support.
+const includeWorkspaceFile = (relativePath: string) => !isFileBrowserExcludedPath(relativePath);
 export type DirectoryEntry = { name: string; path: string; type: 'file' | 'folder' };
 export type DirectoryListing = { dir: string; entries: DirectoryEntry[] };
 export async function listDirectory(dir: string): Promise<DirectoryListing> {
@@ -51,11 +49,11 @@ export async function readStatus(directory: string, request: ComparisonRequest):
 export type FileDiffData = { path: string; old: string | null; current: string | null; status?: 'added' | 'deleted' | 'modified' };
 export async function readDiff(root: string, path: string, request: ComparisonRequest): Promise<FileDiffData> {
   const relativePath = relative(root, path).split(sep).join('/');
-  if (!relativePath || isOutside(root, path) || !includeWorkspaceFile(relativePath)) throw new DomainError('This file type cannot be compared', 415);
+  if (!relativePath || isOutside(root, path) || !includeWorkspaceFile(relativePath)) throw new DomainError('This path cannot be compared', 415);
   const info = await stat(path).catch(() => null);
   if (info && !info.isFile()) throw new DomainError('A regular file is required');
-  if (info && info.size > MAX_ANNOTATABLE_FILE_BYTES) throw new DomainError('File exceeds the 2 MiB preview limit', 413);
-  const current = info ? await readFile(path, 'utf8') : null;
+  if (info && info.size > MAX_FILE_PREVIEW_BYTES) throw new DomainError('File exceeds the 2 MiB preview limit', 413);
+  const current = info ? decodeFileText(await readFile(path)) : null;
   const old = await readComparisonOldText(path, request);
   if (current === null && old === null) throw new DomainError('File not found', 404);
   return { path, old, current, ...(old === null ? { status: 'added' as const } : current === null ? { status: 'deleted' as const } : old !== current ? { status: 'modified' as const } : {}) };
@@ -84,16 +82,14 @@ export async function authorizePath(workspace: string, grants: Iterable<string>,
   throw new DomainError('Open this folder in the file browser first', 403);
 }
 
-export type FilePreviewData = { path: string; text: string; renderAs: 'markdown' | 'html' | 'mermaid' | 'graphviz' };
+export type FilePreviewData = { path: string; text: string; renderAs: 'markdown' | 'html' | 'mermaid' | 'graphviz' | 'text' };
 export type CodeFileData = { codeFile: true; filepath: string; contents: string };
-// Code-link file types copied from @plannotator/core 0.25.7 code-file.ts (MIT).
-const CODE_FILE_REGEX = /(?:\.(tsx?|jsx?|py|rb|go|rs|java|c|cpp|h|hpp|cs|swift|kt|scala|sh|bash|zsh|sql|graphql|json|ya?ml|toml|ini|css|scss|less|xml|tf|lua|r|dart|ex|exs|vue|svelte|astro|zig|proto)|(?:^|\/)(Dockerfile|Makefile|Rakefile|Gemfile|Procfile|Vagrantfile|Brewfile|Justfile))$/i;
 const isOutside = (root: string, candidate: string) => {
   const fromRoot = relative(root, candidate);
   return fromRoot === '..' || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot);
 };
-// Resolve a viewer-supplied path to a regular file of an accepted type inside the real root.
-async function workspaceFile(root: string, path: string, accepted: RegExp) {
+// Resolve a viewer-supplied path to a regular text file inside the real root.
+async function workspaceFile(root: string, path: string) {
   if (!path || isAbsolute(path) || path.includes('\0')) throw new DomainError('Expected a path inside the workspace');
   const lexical = resolve(root, path);
   if (isOutside(root, lexical)) throw new DomainError('Path is outside the workspace', 403);
@@ -104,20 +100,20 @@ async function workspaceFile(root: string, path: string, accepted: RegExp) {
   const realRoot = await realpath(root);
   if (isOutside(realRoot, real)) throw new DomainError('Path is outside the workspace', 403);
   const relativePath = relative(realRoot, real).split(sep).join('/');
-  if (!accepted.test(relativePath) || isFileBrowserExcludedPath(relativePath))
-    throw new DomainError('This file type cannot be previewed', 415);
+  if (isFileBrowserExcludedPath(relativePath))
+    throw new DomainError('Files in excluded folders cannot be previewed', 415);
   const info = await stat(real);
   if (!info.isFile()) throw new DomainError('A regular file is required');
-  if (info.size > MAX_ANNOTATABLE_FILE_BYTES) throw new DomainError('File exceeds the 2 MiB preview limit', 413);
-  return { relativePath, text: await readFile(real, 'utf8') };
+  if (info.size > MAX_FILE_PREVIEW_BYTES) throw new DomainError('File exceeds the 2 MiB preview limit', 413);
+  return { relativePath, text: decodeFileText(await readFile(real)) };
 }
 export async function readPreview(root: string, path: string): Promise<FilePreviewData> {
-  const { relativePath, text } = await workspaceFile(root, path, ANNOTATABLE_DOC_REGEX);
+  const { relativePath, text } = await workspaceFile(root, path);
   const diagram = diagramRenderKindForPath(relativePath);
-  return { path: relativePath, text, renderAs: diagram ?? (/\.html?$/i.test(relativePath) ? 'html' : 'markdown') };
+  return { path: relativePath, text, renderAs: diagram ?? (/\.html?$/i.test(relativePath) ? 'html' : ANNOTATABLE_DOC_REGEX.test(relativePath) ? 'markdown' : 'text') };
 }
 // Code links may carry a :line or :start-end suffix, which Plannotator's popout parses itself.
 export async function readCode(root: string, path: string): Promise<CodeFileData> {
-  const { relativePath, text } = await workspaceFile(root, path.replace(/:\d+(?:-\d+)?$/, ''), CODE_FILE_REGEX);
+  const { relativePath, text } = await workspaceFile(root, path.replace(/:\d+(?:-\d+)?$/, ''));
   return { codeFile: true, filepath: relativePath, contents: text };
 }

@@ -59,7 +59,7 @@ export function FilePreview({ documentId, root, path, kind, refusal, revision, f
       }, (reason) => { if (!stopped) setError(errorText(reason)); });
     return () => { stopped = true; };
   }, [documentId, root, path, kind, refusal, revision, isDeleted]);
-  const isSource = !!lineRange || kind === 'code' || /\.(jsonc?|json5|ya?ml)$/i.test(path);
+  const isSource = !!lineRange || preview?.renderAs === 'text' || kind === 'code' || /\.(jsonc?|json5|ya?ml)$/i.test(path);
   const lineCount = useMemo(() => preview?.text.split('\n').length ?? 0, [preview?.text]);
   const hasLineRange = !!lineRange && !!preview && !isDeleted && !error && lineRange.end <= lineCount;
   const shownRange = hasLineRange && isLineRangeVisible && !diffOn ? lineRange : undefined;

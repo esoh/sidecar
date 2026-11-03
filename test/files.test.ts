@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { authorizePath, listDirectory, readCode, readPreview, type DirectoryEntry } from '../src/files.ts';
+import { authorizePath, listDirectory, readCode, readDiff, readPreview, readStatus, type DirectoryEntry } from '../src/files.ts';
 import { fixture } from './support.ts';
 
 const git = (cwd: string, ...args: string[]) => promisify(execFile)('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', ...args], { cwd });
@@ -22,7 +22,7 @@ async function write(root: string, files: Record<string, string>) {
 }
 const names = (nodes: DirectoryEntry[]) => nodes.map(node => node.type === 'folder' ? `${node.name}/` : node.name).sort();
 
-test('listing is one directory deep, follows Plannotator file types and exclusions, folders first', async t => {
+test('listing is one directory deep, keeps folder exclusions and sorts folders first', async t => {
   const root = await workspace(t);
   await write(root, {
     'README.md': '# Hi', 'docs/plan.md': '# Plan', 'docs/flow.mmd': 'graph TD; A-->B', 'page.html': '<p>x</p>',
@@ -32,7 +32,7 @@ test('listing is one directory deep, follows Plannotator file types and exclusio
   const listing = await listDirectory(root);
   assert.equal(listing.dir, root);
   assert.equal(listing.entries[0].type, 'folder');
-  assert.deepEqual(names(listing.entries), ['.env.example', 'README.md', 'config.yaml', 'docs/', 'page.html', 'src.ts']);
+  assert.deepEqual(names(listing.entries), ['.env', '.env.example', 'README.md', 'config.yaml', 'docs/', 'page.html', 'src.ts']);
   assert.deepEqual(listing.entries.find(entry => entry.name === 'docs'), { name: 'docs', path: join(root, 'docs'), type: 'folder' });
   assert.deepEqual(names((await listDirectory(join(root, 'docs'))).entries), ['flow.mmd', 'plan.md']);
   await assert.rejects(listDirectory(join(root, 'missing')), { status: 404 });
@@ -56,8 +56,8 @@ test('previews stay inside the workspace and say how to render', async t => {
   assert.equal(await status(`../${basename(outside)}/secret.md`), 403);
   assert.equal(await status(join(outside, 'secret.md')), 400);
   assert.equal(await status('escape.md'), 403);
-  assert.equal(await status('src.ts'), 415);
-  assert.equal(await status('.env'), 415);
+  assert.equal(await status('src.ts'), 200);
+  assert.equal(await status('.env'), 200);
   assert.equal(await status('node_modules/pkg/README.md'), 415);
   assert.equal(await status('big.md'), 413);
   assert.equal(await status('missing.md'), 404);
@@ -131,9 +131,9 @@ test('code reads stay inside the workspace and accept line suffixes', async t =>
   const status = (path: string) => readCode(root, path).then(() => 200, (error: { status?: number }) => error.status);
   assert.equal(await status('escape.ts'), 403);
   assert.equal(await status('../x.ts'), 403);
-  assert.equal(await status('notes.md'), 415);
+  assert.equal(await status('notes.md'), 200);
   assert.equal(await status('node_modules/pkg/index.js'), 415);
-  assert.equal(await status('.env'), 415);
+  assert.equal(await status('.env'), 200);
   assert.equal(await status('src/missing.ts'), 404);
 });
 
@@ -189,4 +189,51 @@ test('status, diff, branches and base endpoints use the document workspace and b
   assert.equal((await f.view(`/api/documents/${doc.id}/base`, { baseBranch: null })).status, 200);
   assert.equal((await (await f.view('/api/state')).json()).documents[doc.id].baseBranch, undefined);
   assert.equal((await f.agent('/agent/documents', { path: doc.path, workspace: root, baseBranch: '--x' })).status, 400);
+});
+
+
+test('all regular files are listed and unknown text formats use a source preview', async t => {
+  const root = await workspace(t);
+  const schema = 'model User {\n  id Int @id\n}\n';
+  await write(root, { 'schema.prisma': schema, 'custom.unrecognized': '<b>literal</b> 日本語\n', 'LICENSE': 'License text', 'empty.unknown': '' });
+  await symlink(join(root, 'schema.prisma'), join(root, 'linked.prisma'));
+  assert.deepEqual(names((await listDirectory(root)).entries), ['LICENSE', 'custom.unrecognized', 'empty.unknown', 'schema.prisma']);
+  for (const filename of ['schema.prisma', 'custom.unrecognized', 'LICENSE', 'empty.unknown']) {
+    const preview = await readPreview(root, filename);
+    assert.equal(preview.renderAs, 'text');
+    assert.equal((await readCode(root, filename)).contents, preview.text);
+  }
+  assert.equal((await readCode(root, 'schema.prisma:2')).contents, schema);
+});
+
+test('binary and oversized files remain listed but cannot be previewed as text', async t => {
+  const root = await workspace(t);
+  await writeFile(join(root, 'image.bin'), Buffer.from([0, 1, 2, 3]));
+  await writeFile(join(root, 'invalid.ts'), Buffer.from([0xff, 0xfe, 0x41]));
+  await write(root, { 'large.unknown': 'x'.repeat(2 * 1024 * 1024 + 1) });
+  assert.equal((await listDirectory(root)).entries.length, 3);
+  for (const filename of ['image.bin', 'invalid.ts']) {
+    await assert.rejects(readCode(root, filename), { status: 415, message: /binary|UTF-8/ });
+    await assert.rejects(readPreview(root, filename), { status: 415, message: /binary|UTF-8/ });
+    await assert.rejects(readDiff(root, join(root, filename), { mode: 'uncommitted' }), { status: 415 });
+  }
+  await assert.rejects(readCode(root, 'large.unknown'), { status: 413 });
+});
+
+test('comparison includes unknown file types but does not decode binary revisions as text', async t => {
+  const root = await workspace(t);
+  await git(root, 'init', '-b', 'main');
+  await write(root, { 'schema.prisma': 'model Old {}\n' });
+  await writeFile(join(root, 'old.bin'), Buffer.from([0, 1, 2]));
+  await writeFile(join(root, 'old-invalid.bin'), Buffer.from([0xff, 0xfe]));
+  await git(root, 'add', '.'); await git(root, 'commit', '-m', 'initial');
+  await write(root, { 'schema.prisma': 'model New {}\n', 'LICENSE': 'License text', 'old.bin': 'now text', 'old-invalid.bin': 'now text', 'new.bin': '\0binary' });
+  const status = await readStatus(root, { mode: 'uncommitted' });
+  assert.deepEqual(Object.keys(status.files).map(file => basename(file)).sort(), ['LICENSE', 'new.bin', 'old-invalid.bin', 'old.bin', 'schema.prisma']);
+  assert.equal(status.files[join(root, 'new.bin')].additions, 0);
+  assert.deepEqual(await readDiff(root, join(root, 'schema.prisma'), { mode: 'uncommitted' }), {
+    path: join(root, 'schema.prisma'), old: 'model Old {}\n', current: 'model New {}\n', status: 'modified',
+  });
+  for (const filename of ['old.bin', 'old-invalid.bin'])
+    await assert.rejects(readDiff(root, join(root, filename), { mode: 'uncommitted' }), { status: 415, message: /binary|UTF-8/ });
 });

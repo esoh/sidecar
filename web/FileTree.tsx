@@ -150,7 +150,7 @@ export function FileTree({ documentId, root, changes, category, onCategoryChange
         {root !== '/' && tokens.length === 0 && <button className="file-tree-item w-full text-left" aria-label="Go to parent folder" title={parentOf(root)} style={{ paddingLeft: 8 + 15 }} onClick={() => onRootChange(parentOf(root))}><FolderIcon /><span>..</span></button>}
         {content}
         {tokens.length > 0 && !shown && cache.dirs.has(root) && <p className="files-empty">No loaded files match. Folders that are not expanded are not searched.</p>}
-        {tokens.length === 0 && cache.dirs.get(root)?.length === 0 && <p className="files-empty">No previewable files in this folder.</p>}
+        {tokens.length === 0 && cache.dirs.get(root)?.length === 0 && <p className="files-empty">No files in this folder.</p>}
       </div>
     </div>
   );

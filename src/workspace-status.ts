@@ -1,16 +1,18 @@
 // Copied from Plannotator packages/shared/workspace-status.ts at 772c620 (MIT); see THIRD_PARTY_NOTICES.md.
-import { spawn, spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { DomainError, isBranchName } from "./store.ts";
+import { promisify } from "node:util";
+import { decodeFileText, MAX_FILE_PREVIEW_BYTES } from "./file-text.ts";
 
 import { isTestFile, readTestFileRules } from "./test-file-rules.ts";
 import type { WorkspaceFileChange as BaseWorkspaceFileChange, WorkspaceStatusPayload, GitRepositoryInfo, WorkspaceFileStatus } from '@plannotator/core/workspace-status-types';
 export type { WorkspaceStatusPayload, GitRepositoryInfo, WorkspaceFileStatus };
 export type WorkspaceFileChange = BaseWorkspaceFileChange & { isTest?: boolean };
 
-const TEXT_FILE_MAX_BYTES = 2 * 1024 * 1024;
+const execFileAsync = promisify(execFile);
 const GIT_MAX_BUFFER = 20 * 1024 * 1024;
 const DEFAULT_GIT_TIMEOUT_MS = 30_000;
 type GitResult = { ok: true; stdout: string } | { ok: false; error: string };
@@ -252,8 +254,8 @@ function parseNumstat(output: string): Map<string, { additions: number; deletion
 async function countTextFileLines(path: string): Promise<number> {
 	try {
 		const fileStat = await stat(path);
-		if (!fileStat.isFile() || fileStat.size > TEXT_FILE_MAX_BYTES) return 0;
-		const text = (await readFile(path, "utf8")).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+		if (!fileStat.isFile() || fileStat.size > MAX_FILE_PREVIEW_BYTES) return 0;
+		const text = decodeFileText(await readFile(path)).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 		if (text.length === 0) return 0;
 		const trimmed = text.endsWith("\n") ? text.slice(0, -1) : text;
 		return trimmed.length === 0 ? 1 : trimmed.split("\n").length;
@@ -468,9 +470,12 @@ export async function readComparisonOldText(absPath: string, request: { mode: Co
 	const show = async (path: string): Promise<string | null> => {
 		const size = await runGitAsync(repo.repoRoot, ["cat-file", "-s", `${target}:${path}`]);
 		if (!size.ok) return null;
-		if (Number.parseInt(size.stdout, 10) > TEXT_FILE_MAX_BYTES) throw new DomainError("File exceeds the 2 MiB preview limit", 413);
-		const blob = await runGitAsync(repo.repoRoot, ["cat-file", "blob", `${target}:${path}`]);
-		return blob.ok ? blob.stdout : null;
+		if (Number.parseInt(size.stdout, 10) > MAX_FILE_PREVIEW_BYTES) throw new DomainError("File exceeds the 2 MiB preview limit", 413);
+		// Keep the raw bytes until validation; UTF-8 decoding would otherwise hide binary content.
+		const blob = await execFileAsync("git", ["--no-optional-locks", "-C", repo.repoRoot, "cat-file", "blob", `${target}:${path}`], {
+			encoding: "buffer", maxBuffer: GIT_MAX_BUFFER, timeout: getGitTimeoutMs(), killSignal: "SIGKILL",
+		}).catch(() => null);
+		return blob ? decodeFileText(blob.stdout) : null;
 	};
 	const direct = await show(rel);
 	if (direct !== null) return direct;
