@@ -3658,13 +3658,13 @@ test('JSON and YAML file previews preserve literal content and indentation as hi
 });
 
 test('files panel handles empty workspaces, its own document and conversation navigation', async ({ page }) => {
-  const empty = await filesWorkspace({ 'ignored.bin': 'not previewable' });
+  const empty = await filesWorkspace({});
   const root = await filesWorkspace({ 'nav.md': '# Navigation\n\nQuoted passage text.\n', 'a.md': '# A file\n' });
   const doc = await (await f.agent('/agent/documents', { path: join(root, 'nav.md'), workspace: empty })).json();
   await page.goto(`${f.url}/?document=${doc.id}`);
   await page.getByRole('button', { name: 'Show files' }).click();
   const panel = page.getByRole('complementary', { name: 'Files' });
-  await expect(panel).toContainText('No previewable files in this folder.');
+  await expect(panel).toContainText('No files in this folder.');
   await expect(panel).not.toContainText('Settings');
 
   // A new declaration re-roots the open panel through the live state update.
@@ -4591,4 +4591,42 @@ test('file reference ranges reveal source lines from documents and replies with 
   await expect(file.getByRole('checkbox', { name: 'Show diff', exact: true })).not.toBeChecked();
   await expect.poll(() => isRevealed(170)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('file-reference-selection.png') });
+});
+
+
+test('unrecognized files open from the explorer and links with source selection and a binary fallback', async ({ page }) => {
+  const root = await filesWorkspace({
+    'schema.prisma': 'model User {\n  id Int @id\n}\n',
+    'custom.unknown': '<b>literal source</b>\nsecond line\n',
+    'LICENSE': 'License text', 'image.bin': '\0binary',
+  });
+  const doc = await f.register('main.md', '# Files\n\n[Schema](schema.prisma:2) [License](LICENSE) [External](https://example.com)');
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Show files' }).click();
+  const panel = page.getByRole('complementary', { name: 'Files' });
+  await panel.getByTitle('schema.prisma', { exact: true }).click();
+  let file = page.getByRole('dialog', { name: 'File: schema.prisma', exact: true });
+  await expect(file.locator('pre code')).toContainText('model User');
+  await expect(file.locator('[data-line-number-content]')).toHaveText(['1', '2', '3', '4']);
+  await file.locator('[data-column-number="2"]').click();
+  await expect(page.locator('.draft-selection')).toContainText('schema.prisma');
+  await expect(page.locator('.draft-selection')).toContainText('id Int @id');
+  await file.getByRole('button', { name: 'Close file window' }).click();
+  await page.locator('#document').getByRole('link', { name: 'Schema', exact: true }).click();
+  await expect(file.locator('[data-file-reference]')).toHaveCount(1);
+  await file.getByRole('button', { name: 'Close file window' }).click();
+  await panel.getByTitle('custom.unknown', { exact: true }).click();
+  file = page.getByRole('dialog', { name: 'File: custom.unknown', exact: true });
+  await expect(file.locator('pre code')).toContainText('<b>literal source</b>');
+  await file.getByRole('button', { name: 'Close file window' }).click();
+  await page.locator('#document').getByRole('link', { name: 'License', exact: true }).click();
+  file = page.getByRole('dialog', { name: 'File: LICENSE', exact: true });
+  await expect(file.locator('pre code')).toContainText('License text');
+  await file.getByRole('button', { name: 'Close file window' }).click();
+  await panel.getByTitle('image.bin', { exact: true }).click();
+  file = page.getByRole('dialog', { name: 'File: image.bin', exact: true });
+  await expect(file.getByRole('alert')).toContainText('binary');
+  await expect(file.getByRole('button', { name: 'Show in file browser' })).toHaveText('image.bin');
+  await expect(page.locator('#document').getByRole('link', { name: 'External', exact: true })).toHaveAttribute('href', 'https://example.com');
 });

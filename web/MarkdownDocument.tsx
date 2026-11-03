@@ -1,7 +1,6 @@
 import { viewerPath } from './viewer-path.ts';
 import { Fragment, createContext, memo, useContext, useMemo, useState, useEffect, useRef, type ReactNode } from 'react';
 import { BlockRenderer } from '@plannotator/ui/components/BlockRenderer';
-import { isCodeFilePath } from '@plannotator/core/code-file';
 import { MermaidBlock } from '@plannotator/ui/components/MermaidBlock';
 import { GraphvizBlock } from '@plannotator/ui/components/GraphvizBlock';
 import { computeListIndices, groupBlocks, parseMarkdownToBlocks } from '@plannotator/ui/utils/parser';
@@ -195,16 +194,14 @@ export const MarkdownDocument = memo(function MarkdownDocument({
         const href = event.target.closest('a[href]')?.getAttribute('href');
         if (!href) return;
         const path = href.trim();
-        // Plannotator misses document links with line suffixes and padded code links.
-        // Normalize those cases without changing saved Markdown or external links.
+        // Route local files even when Plannotator does not recognize their extension.
         const [documentPath, line] = splitLineSuffix(path);
         const isLocal = !/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(documentPath) || /^file:\/\//i.test(documentPath);
         const isHtml = !path.startsWith('#') && /\.html?(?:#.*)?$/i.test(path);
         const isDocument = hasLinkedDocExtension(documentPath);
-        const isLineLink = !!line && (isDocument || isCodeFilePath(documentPath));
         // Saved annotations keep their article-level thread/overlap navigation.
         const isHighlight = event.target.closest('#document mark.annotation-highlight');
-        if (openLink && isLocal && !isHighlight && (isHtml || isLineLink || (href !== path && isCodeFilePath(path)))) {
+        if (openLink && isLocal && path && !path.startsWith('#') && !isHighlight && (isHtml || line || !path.includes('#'))) {
           event.preventDefault(); event.stopPropagation();
           openLink(isHtml || isDocument ? 'doc' : 'code', path, linkBase);
           return;
