@@ -1,18 +1,20 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react';
 import { api, errorText } from './api.ts';
+import { useMessageSettings } from './TextSettings.tsx';
 import type { ChangeCategory, WorkspaceFileChange } from './useComparison.ts';
+import type { DirectoryEntry as Entry } from '../src/files.ts';
 
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem } from '@plannotator/ui/components/ui/dropdown-menu';
 
 // Lazy tree over Sidecar's directory listing, styled with Plannotator's file-tree classes (MIT);
 // see THIRD_PARTY_NOTICES.md. Listings and explicit expand/collapse choices are cached per document
 // at module level, so a remounted panel or a refresh keeps what the reader opened.
-type Entry = { name: string; path: string; type: 'file' | 'folder' };
-type DocumentCache = { dirs: Map<string, Entry[]>; errors: Map<string, string>; choices: Map<string, boolean>; revealed: object | null };
+const PAGE_SIZE = 200;
+type DocumentCache = { dirs: Map<string, Entry[]>; errors: Map<string, string>; choices: Map<string, boolean>; limits: Map<string, number>; revealed: object | null };
 const caches = new Map<string, DocumentCache>();
 const cacheFor = (documentId: string) => {
   let cache = caches.get(documentId);
-  if (!cache) caches.set(documentId, cache = { dirs: new Map(), errors: new Map(), choices: new Map(), revealed: null });
+  if (!cache) caches.set(documentId, cache = { dirs: new Map(), errors: new Map(), choices: new Map(), limits: new Map(), revealed: null });
   return cache;
 };
 const join = (dir: string, name: string) => `${dir.replace(/\/$/, '')}/${name}`;
@@ -39,6 +41,7 @@ export function FileTree({ documentId, root, changes, category, onCategoryChange
   reveal: { path: string; id: number } | null; refreshNonce: number;
   onSelect: (absolutePath: string) => void; onRootChange: (path: string) => void; onOpenChanges: (scope: string) => void;
 }) {
+  const { showIgnoredFiles } = useMessageSettings();
   const cache = cacheFor(documentId);
   const [, bump] = useReducer((value: number) => value + 1, 0);
   const [filter, setFilter] = useState('');
@@ -68,6 +71,12 @@ export function FileTree({ documentId, root, changes, category, onCategoryChange
   const tokens = filter.toLowerCase().split(/\s+/).filter(Boolean);
   // Filtering opens only folders already loaded; it must never trigger a recursive scan.
   const isOpen = (path: string) => tokens.length > 0 ? cache.dirs.has(path) : cache.choices.get(path) ?? byDir.has(path);
+  const isRevealTarget = (entry: Entry) => !!reveal && (entry.path === reveal.path || reveal.path.startsWith(`${entry.path}/`));
+  const isIncluded = (entry: Entry): boolean => {
+    if (entry.isIgnored && !showIgnoredFiles && !isRevealTarget(entry)) return false;
+    return tokens.every(token => entry.path.slice(base.length + 1).toLowerCase().includes(token)) ||
+      entry.type === 'folder' && !!cache.dirs.get(entry.path)?.some(isIncluded);
+  };
   const toLoad: string[] = [];
   let shown = 0;
   function rows(dir: string, depth: number): ReactNode[] {
@@ -79,14 +88,16 @@ export function FileTree({ documentId, root, changes, category, onCategoryChange
         ? <div key={`${dir}:error`} className="files-empty" role="alert" style={{ paddingLeft: 8 + depth * 14 }}>{failure} <button className="ft-link" onClick={() => { cache.errors.delete(dir); void load(dir, true); bump(); }}>Retry</button></div>
         : <div key={`${dir}:loading`} className="files-empty" role="status" style={{ paddingLeft: 8 + depth * 14 }}>Loading…</div>];
     }
-    return entries.flatMap(entry => {
+    const included = entries.filter(isIncluded), limit = cache.limits.get(dir) ?? PAGE_SIZE;
+    // A reveal can show one distant target without rendering every earlier entry.
+    const visible = included.filter((entry, index) => index < limit || isRevealTarget(entry));
+    const result = visible.flatMap(entry => {
       const rel = entry.path.slice(base.length + 1), padding = 8 + depth * 14;
       if (entry.type === 'file') {
-        if (tokens.length && !tokens.every(token => rel.toLowerCase().includes(token))) return [];
         shown++;
         const change = byFile.get(entry.path), mark = change && marks[change.status];
         return [<button key={entry.path} data-path={entry.path} className={`file-tree-item w-full text-left${entry.path === activePath ? ' active' : ''}`} style={{ paddingLeft: padding + 15 }} title={rel} onClick={() => onSelect(entry.path)}>
-          <FileIcon /><span className="truncate flex-1 min-w-0">{entry.name}</span>
+          <FileIcon /><span className={`truncate flex-1 min-w-0${entry.isIgnored ? ' is-ignored' : ''}`}>{entry.name}</span>
           {change && <span className="ml-auto flex flex-shrink-0 items-center gap-1.5 text-[10px]">
             <Counts additions={change.additions} deletions={change.deletions} />
             {mark && <span className={`font-semibold ${mark.className}`} title={change.oldPath ? `Renamed from ${change.oldPath}` : mark.title}>{mark.label}</span>}
@@ -94,17 +105,21 @@ export function FileTree({ documentId, root, changes, category, onCategoryChange
         </button>];
       }
       const open = isOpen(entry.path), children = open ? rows(entry.path, depth + 1) : [], sum = byDir.get(entry.path);
-      if (tokens.length && !children.length && !tokens.every(token => rel.toLowerCase().includes(token))) return [];
       shown++;
       return [<div key={entry.path} data-path={entry.path} className="file-tree-folder ft-folder text-[11px] text-muted-foreground" style={{ paddingLeft: padding }}>
         <button className="ft-toggle" aria-expanded={open} title={rel} disabled={tokens.length > 0} onClick={() => { cache.choices.set(entry.path, !open); bump(); }}>
-          <Chevron open={open} /><FolderIcon /><span className="truncate">{entry.name}</span>
+          <Chevron open={open} /><FolderIcon /><span className={`truncate${entry.isIgnored ? ' is-ignored' : ''}`}>{entry.name}</span>
         </button>
         {sum && <button className="ft-counts" aria-label={`${sum.files} changed ${sum.files === 1 ? 'file' : 'files'} in ${entry.name}`} title="Show changed files in this folder" onClick={() => onOpenChanges(entry.path)}>
           <Counts additions={sum.additions} deletions={sum.deletions} />
         </button>}
       </div>, ...children];
     });
+    const remaining = included.length - visible.length;
+    if (remaining) result.push(<div key={`${dir}:more`} className="files-empty" style={{ paddingLeft: 23 + depth * 14 }}>
+      <button className="ft-link" title={`${remaining} more entries`} onClick={() => { cache.limits.set(dir, limit + PAGE_SIZE); bump(); }}>Show {Math.min(PAGE_SIZE, remaining)} more</button>
+    </div>);
+    return result;
   }
   const content = rows(root, 0);
   useEffect(() => { for (const dir of new Set(toLoad)) void load(dir); });
@@ -150,7 +165,7 @@ export function FileTree({ documentId, root, changes, category, onCategoryChange
         {root !== '/' && tokens.length === 0 && <button className="file-tree-item w-full text-left" aria-label="Go to parent folder" title={parentOf(root)} style={{ paddingLeft: 8 + 15 }} onClick={() => onRootChange(parentOf(root))}><FolderIcon /><span>..</span></button>}
         {content}
         {tokens.length > 0 && !shown && cache.dirs.has(root) && <p className="files-empty">No loaded files match. Folders that are not expanded are not searched.</p>}
-        {tokens.length === 0 && cache.dirs.get(root)?.length === 0 && <p className="files-empty">No files in this folder.</p>}
+        {tokens.length === 0 && cache.dirs.has(root) && !shown && <p className="files-empty">No files in this folder.</p>}
       </div>
     </div>
   );

@@ -22,7 +22,7 @@ async function write(root: string, files: Record<string, string>) {
 }
 const names = (nodes: DirectoryEntry[]) => nodes.map(node => node.type === 'folder' ? `${node.name}/` : node.name).sort();
 
-test('listing is one directory deep, keeps folder exclusions and sorts folders first', async t => {
+test('listing is one directory deep, keeps Git metadata hidden and sorts folders first', async t => {
   const root = await workspace(t);
   await write(root, {
     'README.md': '# Hi', 'docs/plan.md': '# Plan', 'docs/flow.mmd': 'graph TD; A-->B', 'page.html': '<p>x</p>',
@@ -32,7 +32,7 @@ test('listing is one directory deep, keeps folder exclusions and sorts folders f
   const listing = await listDirectory(root);
   assert.equal(listing.dir, root);
   assert.equal(listing.entries[0].type, 'folder');
-  assert.deepEqual(names(listing.entries), ['.env', '.env.example', 'README.md', 'config.yaml', 'docs/', 'page.html', 'src.ts']);
+  assert.deepEqual(names(listing.entries), ['.claude/', '.env', '.env.example', 'README.md', 'config.yaml', 'docs/', 'node_modules/', 'page.html', 'src.ts']);
   assert.deepEqual(listing.entries.find(entry => entry.name === 'docs'), { name: 'docs', path: join(root, 'docs'), type: 'folder' });
   assert.deepEqual(names((await listDirectory(join(root, 'docs'))).entries), ['flow.mmd', 'plan.md']);
   await assert.rejects(listDirectory(join(root, 'missing')), { status: 404 });
@@ -58,7 +58,7 @@ test('previews stay inside the workspace and say how to render', async t => {
   assert.equal(await status('escape.md'), 403);
   assert.equal(await status('src.ts'), 200);
   assert.equal(await status('.env'), 200);
-  assert.equal(await status('node_modules/pkg/README.md'), 415);
+  assert.equal(await status('node_modules/pkg/README.md'), 200);
   assert.equal(await status('big.md'), 413);
   assert.equal(await status('missing.md'), 404);
   assert.equal(await status(''), 400);
@@ -132,7 +132,7 @@ test('code reads stay inside the workspace and accept line suffixes', async t =>
   assert.equal(await status('escape.ts'), 403);
   assert.equal(await status('../x.ts'), 403);
   assert.equal(await status('notes.md'), 200);
-  assert.equal(await status('node_modules/pkg/index.js'), 415);
+  assert.equal(await status('node_modules/pkg/index.js'), 200);
   assert.equal(await status('.env'), 200);
   assert.equal(await status('src/missing.ts'), 404);
 });
@@ -236,4 +236,38 @@ test('comparison includes unknown file types but does not decode binary revision
   });
   for (const filename of ['old.bin', 'old-invalid.bin'])
     await assert.rejects(readDiff(root, join(root, filename), { mode: 'uncommitted' }), { status: 415, message: /binary|UTF-8/ });
+});
+
+
+test('directory entries use Git ignore rules without hiding tracked files or scanning descendants', async t => {
+  const root = await workspace(t);
+  await git(root, 'init', '-b', 'main');
+  await write(root, {
+    '.gitignore': '*.log\nignored/\nnode_modules/\n!keep.log\n',
+    'drop.log': 'hidden', 'keep.log': 'visible', 'tracked.log': 'tracked',
+    'ignored/tracked.txt': 'tracked', 'ignored/other.txt': 'hidden',
+    'node_modules/pkg/index.js': 'dependency', 'public/index.html': '<p>public</p>',
+    'sub/.gitignore': '*.tmp\n', 'sub/cache.tmp': 'nested', 'sub/keep.ts': 'source',
+    'line\nbreak.log': 'hidden', '-leading.log': 'hidden',
+  });
+  await git(root, 'add', '-f', 'tracked.log', 'ignored/tracked.txt');
+  await writeFile(join(root, '.git/info/exclude'), 'local.txt\n');
+  await write(root, { 'local.txt': 'local', 'global.txt': 'global' });
+  const outside = await workspace(t);
+  await write(outside, { 'global-ignore': 'global.txt\n' });
+  await git(root, 'config', 'core.excludesFile', join(outside, 'global-ignore'));
+  const rootEntries = (await listDirectory(root)).entries;
+  const ignored = (entries: DirectoryEntry[]) => names(entries.filter(entry => 'isIgnored' in entry && entry.isIgnored));
+  assert.deepEqual(ignored(rootEntries), ['-leading.log', 'drop.log', 'global.txt', 'line\nbreak.log', 'local.txt', 'node_modules/']);
+  assert.ok(!names(rootEntries).includes('.git/'));
+  assert.ok(names(rootEntries).includes('public/'));
+  assert.deepEqual(ignored((await listDirectory(join(root, 'sub'))).entries), ['cache.tmp']);
+  assert.deepEqual(ignored((await listDirectory(join(root, 'ignored'))).entries), ['other.txt']);
+  assert.equal((await readCode(root, 'node_modules/pkg/index.js')).contents, 'dependency');
+  const linked = join(outside, 'linked');
+  await git(root, 'commit', '-m', 'tracked');
+  await git(root, 'worktree', 'add', '-b', 'linked', linked);
+  await write(linked, { '.gitignore': '*.log\n', 'drop.log': 'ignored' });
+  assert.deepEqual(ignored((await listDirectory(linked)).entries), ['drop.log']);
+  assert.ok(!names((await listDirectory(linked)).entries).includes('.git'));
 });
