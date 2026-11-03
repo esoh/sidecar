@@ -66,7 +66,9 @@ test('base mode compares with the merge-base, ignores base-only commits and incl
 test('a fetch request really fetches, reports failure, and still returns the local result', async t => {
   const root = await repo(t), remote = await repo(t);
   await commit(root, { 'a.md': '1\n' });
-  await commit(remote, { 'a.md': '1\n' });
+  // Share the actual ancestor; separate commits only match by chance within one second.
+  await git(remote, 'fetch', root, 'main');
+  await git(remote, 'reset', '--hard', 'FETCH_HEAD');
   const request = { mode: 'base' as const, base: 'main' };
   // Concurrent flights for the same directory must not satisfy the fetch request.
   const [plain, fetched] = await Promise.all([getWorkspaceStatusForDirectory(root, request), getWorkspaceStatusForDirectory(root, { ...request, fetch: true })]);

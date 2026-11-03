@@ -1499,6 +1499,7 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
 .files-popover-note { font-size: 11px; color: var(--subtle); }
 .files-popover-note p { margin: 2px 0; }
 .files-popover .is-error { color: var(--destructive, #f66); }
+.ft .is-ignored { opacity: 0.55; }
 .ft-link { color: var(--primary); cursor: pointer; font: inherit; }
 .ft-summary { display: flex; width: 100%; align-items: center; gap: 6px; padding: 6px 12px; font-size: 10px; color: var(--subtle); border: 0; border-bottom: 1px solid var(--line); background: transparent; cursor: pointer; text-align: left; }
 .ft-summary:hover { background: var(--muted); }

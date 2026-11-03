@@ -1,3 +1,5 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { filterWorkspaceStatusForDirectory, getWorkspaceStatusForDirectory, readComparisonOldText, type ComparisonRequest, type WorkspaceStatusResult } from './workspace-status.ts';
@@ -13,22 +15,29 @@ function diagramRenderKindForPath(input: string): 'mermaid' | 'graphviz' | null 
   return null;
 }
 
-// Exclusions and tree building copied from Plannotator packages/shared/reference-common.ts
-// at 772c620 (MIT); see THIRD_PARTY_NOTICES.md.
-export const FILE_BROWSER_EXCLUDED = [
-  'node_modules/', '.git/', '.claude/', '.agents/', 'dist/', 'build/', '.next/', '__pycache__/', '.obsidian/', '.trash/',
-  '.venv/', 'vendor/', 'target/', '.cache/', 'coverage/', '.turbo/', '.svelte-kit/', '.nuxt/', '.output/', '.parcel-cache/',
-  '.webpack/', '.expo/', '_site/', 'public/', '.jekyll-cache/', 'out/', '.docusaurus/', 'storybook-static/',
-];
-const FILE_BROWSER_EXCLUDED_NAMES = new Set(FILE_BROWSER_EXCLUDED.map(entry => entry.replace(/\/+$/, '')));
+// Git metadata stays out of the explorer; other visibility follows Git's ignore rules.
 export function isFileBrowserExcludedPath(relativePath: string): boolean {
-  const normalized = relativePath.replace(/\\/g, '/').replace(/^\/+/, '');
-  if (!normalized) return false;
-  return normalized.split('/').filter(Boolean).some(part => FILE_BROWSER_EXCLUDED_NAMES.has(part));
+  return relativePath.replace(/\\/g, '/').split('/').includes('.git');
 }
-// Keep folder exclusions, but list files regardless of their renderer support.
 const includeWorkspaceFile = (relativePath: string) => !isFileBrowserExcludedPath(relativePath);
-export type DirectoryEntry = { name: string; path: string; type: 'file' | 'folder' };
+export type DirectoryEntry = { name: string; path: string; type: 'file' | 'folder'; isIgnored?: boolean };
+const execFileAsync = promisify(execFile);
+async function ignoredEntries(dir: string, entries: DirectoryEntry[]): Promise<Set<string>> {
+  if (!entries.length) return new Set();
+  // One NUL-delimited batch per loaded directory: no recursive scan or per-file Git processes.
+  const check = execFileAsync('git', ['--no-optional-locks', '-C', dir, 'check-ignore', '-z', '--stdin'], {
+    encoding: 'utf8', timeout: 5000, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C' },
+  });
+  check.child.stdin?.on('error', () => {}); // Git can exit before consuming input outside a repository.
+  check.child.stdin?.end(entries.map(entry => `${entry.name}${entry.type === 'folder' ? '/' : ''}\0`).join(''));
+  try {
+    return new Set((await check).stdout.split('\0').filter(Boolean).map(name => name.replace(/\/$/, '')));
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && (error.code === 1 || error.code === 'ENOENT' ||
+      error.code === 128 && 'stderr' in error && typeof error.stderr === 'string' && error.stderr.includes('not a git repository'))) return new Set();
+    throw new DomainError('Could not check Git ignore rules. Refresh to retry.', 503);
+  }
+}
 export type DirectoryListing = { dir: string; entries: DirectoryEntry[] };
 export async function listDirectory(dir: string): Promise<DirectoryListing> {
   if (!(await stat(dir).catch(() => null))?.isDirectory())
@@ -39,6 +48,8 @@ export async function listDirectory(dir: string): Promise<DirectoryListing> {
     if (entry.isDirectory() && !isFileBrowserExcludedPath(entry.name)) entries.push({ name: entry.name, path: join(dir, entry.name), type: 'folder' });
     else if (entry.isFile() && includeWorkspaceFile(entry.name)) entries.push({ name: entry.name, path: join(dir, entry.name), type: 'file' });
   }
+  const ignored = await ignoredEntries(dir, entries);
+  for (const entry of entries) if (ignored.has(entry.name)) entry.isIgnored = true;
   entries.sort((a, b) => a.type !== b.type ? (a.type === 'folder' ? -1 : 1) : a.name.localeCompare(b.name));
   return { dir, entries };
 }
