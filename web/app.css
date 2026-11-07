@@ -585,6 +585,10 @@ body {
   .floating.chat-open { display: none; }
   body:has(.viewer[data-chat-open='true']) > .reference-layer { visibility: hidden; }
   .canvas { padding: 20px 15px 40px; }
+  .document-workspace > .canvas { padding: 0; background: var(--card); }
+  .document-workspace .reading-width { max-width: none; }
+  .document-workspace .document-card { border: 0; border-radius: 0; box-shadow: none; }
+  .document-workspace .document-tools { left: 38px; }
   .preview-label { display: none; }
   .document-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 }
@@ -663,6 +667,11 @@ select {
 }
 .document-card {
   overflow-wrap: anywhere;
+}
+/* Keep table columns readable; the renderer's wrapper handles horizontal overflow. */
+.plannotator-content :is(th, td) {
+  min-width: 10rem;
+  overflow-wrap: normal;
 }
 .annotation-highlight[data-pending] {
   background: color-mix(in srgb, #ffff00 var(--sidecar-highlight-intensity, 100%), transparent);
