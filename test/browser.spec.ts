@@ -2300,6 +2300,84 @@ test('real drags can partially overlap the previous pending selection', async ({
   await expect(page.getByLabel('Comment', { exact: true })).toHaveValue('Keep this overlapping draft');
 });
 
+test('phone documents fill the reading background while desktop keeps its card', async ({ page }, testInfo) => {
+  const doc = await f.register('phone-card.md', '# Room to read\n\nThe document uses the available phone width, with comfortable padding around the text.');
+  await f.agent('/agent/documents', { path: doc.path, workspace: f.directory, repoInfo: { display: 'sidecar', branch: 'fix/phone-layout' } });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const article = page.locator('#document');
+  await expect(article).toContainText('Room to read');
+  for (const width of [390, 850]) {
+    await page.setViewportSize({ width, height: 844 });
+    const layout = await article.evaluate(element => {
+      const rect = element.getBoundingClientRect(), canvas = element.closest('.canvas')!;
+      const style = getComputedStyle(element), background = getComputedStyle(canvas);
+      return { left: rect.left, right: rect.right, top: rect.top, canvasTop: canvas.getBoundingClientRect().top,
+        border: style.borderTopWidth, radius: style.borderTopLeftRadius, padding: parseFloat(style.paddingLeft),
+        background: background.backgroundColor, cardBackground: style.backgroundColor, grid: background.backgroundImage };
+    });
+    expect(layout.left).toBe(0); expect(layout.right).toBe(width);
+    expect(layout.top).toBe(layout.canvasTop);
+    expect(layout.border).toBe('0px'); expect(layout.radius).toBe('0px');
+    expect(layout.padding).toBeGreaterThanOrEqual(16);
+    expect(layout.background).toBe(layout.cardBackground); expect(layout.grid).toBe('none');
+    const badge = (await article.getByText('sidecar', { exact: true }).boundingBox())!;
+    const files = (await page.getByRole('button', { name: 'Show files', exact: true }).boundingBox())!;
+    expect(badge.x).toBeGreaterThanOrEqual(files.x + files.width);
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: testInfo.outputPath('phone-document.png') });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const desktop = await article.evaluate(element => ({ left: element.getBoundingClientRect().left,
+    border: getComputedStyle(element).borderTopWidth, radius: getComputedStyle(element).borderTopLeftRadius }));
+  expect(desktop.left).toBeGreaterThan(0); expect(desktop.border).toBe('1px'); expect(desktop.radius).toBe('12px');
+});
+
+test('Markdown tables keep readable columns and scroll within documents, chat and file windows', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const markdown = `| Case | Before | After |
+| --- | --- | --- |
+| Earlier decision prefix | Expanding a summary before adding later summaries could return over 4,000 records. | Count the complete selected result, independent of row order. |
+| A cold maintenance pass | Its error stops attempts for the other discovered call IDs. | Roll back that pass, count the attempt, and continue within the same 32-attempt budget. |`;
+  const root = await filesWorkspace({ 'table.md': markdown });
+  const doc = await f.register('table-review.md', `# Comparison\n\n${markdown}\n\n[Open table](${root}/table.md)`);
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const assertReadable = async (table: import('@playwright/test').Locator, scrolls: boolean) => {
+    await expect(table).toBeVisible();
+    const layout = await table.evaluate(element => {
+      const container = element.parentElement!;
+      container.scrollLeft = 60;
+      return { minColumn: Math.min(...Array.from(element.querySelectorAll('th')).map(cell => cell.getBoundingClientRect().width)),
+        canScroll: container.scrollWidth > container.clientWidth, scrollLeft: container.scrollLeft,
+        contained: container.getBoundingClientRect().right <= window.innerWidth };
+    });
+    expect(layout.minColumn).toBeGreaterThanOrEqual(160);
+    expect(layout.contained).toBe(true);
+    expect(layout.canScroll).toBe(scrolls);
+    if (scrolls) expect(layout.scrollLeft).toBeGreaterThan(0);
+    await table.evaluate(element => { element.parentElement!.scrollLeft = 0; });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  };
+  const documentTable = page.locator('#document table');
+  await expect(documentTable).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('phone-table.png') });
+  await assertReadable(documentTable, true);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await assertReadable(documentTable, false);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Show conversations', exact: true }).click();
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Show the comparison'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer(markdown);
+  await assertReadable(page.locator('.message.agent table'), true);
+  await page.getByRole('button', { name: 'Hide conversations', exact: true }).click();
+  await page.getByRole('link', { name: 'Open table', exact: true }).click();
+  const file = page.getByRole('dialog', { name: 'File: table.md', exact: true });
+  await assertReadable(file.locator('table'), true);
+});
+
 test('rich Markdown renders Plannotator code, callouts, tables, math and diagrams safely', async ({ page }) => {
   test.setTimeout(60000);
   const doc = await f.register('rich.md', `# Rich document
