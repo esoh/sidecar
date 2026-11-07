@@ -1,4 +1,5 @@
 import { viewerPath, isGateway, libraryPath } from './viewer-path.ts';
+import { HtmlFilePage } from './HtmlFile.tsx';
 import { ViewerEvents } from './viewer-events.ts';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
@@ -1079,4 +1080,5 @@ function App() {
   );
 }
 const root = document.getElementById('root');
-if (root) createRoot(root).render(<SettingsProvider>{(new URLSearchParams(location.search).has('library') || isGateway && !new URLSearchParams(location.search).has('document')) ? <DocumentLibrary /> : <App />}</SettingsProvider>);
+const query = new URLSearchParams(location.search);
+if (root) createRoot(root).render(<SettingsProvider>{query.get('view') === 'html' ? <HtmlFilePage /> : (query.has('library') || isGateway && !query.has('document')) ? <DocumentLibrary /> : <App />}</SettingsProvider>);

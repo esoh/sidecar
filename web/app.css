@@ -1473,6 +1473,15 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
   border-radius: 12px;
   background: white;
 }
+.html-file-page { height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+.html-file-page header { display: flex; align-items: center; gap: 12px; flex-shrink: 0; padding: 4px 12px; font-size: 12px; border-bottom: 1px solid var(--border); }
+.html-file-page header code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--subtle); }
+.html-file-page header a, .html-file-page .file-diff-toggle { display: inline-flex; align-items: center; min-height: 40px; flex-shrink: 0; }
+.html-file-page a, .html-full-page-link { color: var(--primary); }
+.html-file-page a:focus-visible, .html-full-page-link:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.html-file-page > .file-preview-frame { display: block; height: 0; min-height: 0; border: 0; border-radius: 0; }
+.file-preview-path:has(.html-full-page-link) { flex-wrap: wrap; }
+.html-full-page-link { white-space: nowrap; }
 .file-preview { min-height: 100%; display: flex; flex-direction: column; }
 .file-preview-path { display: flex; align-items: center; gap: 12px; color: var(--subtle); font-size: 11px; margin-bottom: 16px; }
 .file-preview-path code { overflow-wrap: anywhere; }

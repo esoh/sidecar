@@ -3,7 +3,7 @@ import { guideLanguageForPath } from '@plannotator/core/guide-format';
 import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
 import type { CodeFileData, FileDiffData, FilePreviewData } from '../src/files.ts';
 import { api, errorText } from './api.ts';
-import { viewerPath } from './viewer-path.ts';
+import { HtmlFileFrame, RunHtmlScripts, htmlFullPageUrl } from './HtmlFile.tsx';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
 import type { FileQuote } from '../src/quote.ts';
 import { excludedSelection, selectionText } from './selection.ts';
@@ -107,9 +107,7 @@ export function FilePreview({ documentId, root, path, kind, refusal, revision, f
   ) : sourceLanguage ? (
     <CodeFileView path={path} contents={preview.text} lineRange={shownRange} revision={revision} onQuote={quote => root && onQuoteFile({ path: `${root.replace(/\/$/, '')}/${preview.path}`, kind, ...quote })} />
   ) : markdown === null ? (
-    // A separate response keeps inline-script permission out of the main viewer's CSP.
-    <iframe key={`${areScriptsEnabled}:${revision}:${fragment ?? ''}`} className="file-preview-frame" title={`Preview of ${path}`} sandbox={areScriptsEnabled ? 'allow-scripts' : ''} referrerPolicy="no-referrer"
-      src={viewerPath(`/api/files/html?document=${encodeURIComponent(documentId)}&path=${encodeURIComponent(path)}${root ? `&directory=${encodeURIComponent(root)}` : ''}${areScriptsEnabled ? '&scripts=1' : ''}`) + (fragment ?? '')} />
+    <HtmlFileFrame documentId={documentId} path={path} root={root} fragment={fragment} revision={revision} areScriptsEnabled={areScriptsEnabled} />
   ) : (
     <article onMouseUp={event => capture(event.currentTarget)} onTouchEnd={event => capture(event.currentTarget)} onKeyUp={event => { if (event.key === 'Shift' || event.key.startsWith('Arrow')) capture(event.currentTarget); }}>
       {/* An empty document ID keeps relative images from resolving against the open document's folder. */}
@@ -125,7 +123,10 @@ export function FilePreview({ documentId, root, path, kind, refusal, revision, f
           <button className="selection-visibility" aria-label={shownRange ? 'Hide referenced lines' : 'Show referenced lines'} aria-pressed={!!shownRange} disabled={!hasLineRange} onClick={() => { if (!shownRange) setShowDiff(false); onSetLineRangeVisible(!shownRange); }}>{shownRange ? 'Hide' : 'Show'}</button>
         </div>}
         {canDiff && <label className="file-diff-toggle"><input type="checkbox" checked={diffOn} onChange={event => setShowDiff(event.target.checked)} />Show diff</label>}
-        {renderAs === 'html' && !isSource && !diffOn && <label className="file-diff-toggle" title="Only enable for trusted HTML. Blocks external resources and viewer access, but scripts can navigate their own frame."><input type="checkbox" checked={areScriptsEnabled} onChange={event => onSetScripts(event.target.checked)} />Run scripts</label>}
+        {renderAs === 'html' && !isSource && !diffOn && <>
+          <RunHtmlScripts enabled={areScriptsEnabled} onChange={onSetScripts} />
+          <a className="html-full-page-link" href={htmlFullPageUrl({ documentId, path, root, fragment })} target="_blank" rel="noopener noreferrer">Open full page</a>
+        </>}
         <span>Read-only</span>
       </div>
       {lineRange && preview && !hasLineRange && <p role="status">The referenced lines are outside this file ({lineCount} lines).</p>}

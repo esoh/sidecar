@@ -459,3 +459,100 @@ test('scripted HTML blocks resource requests and keeps the main viewer policy un
     expect(await standalone.evaluate(() => { try { void document.cookie; return false; } catch { return true; } })).toBe(true);
   } finally { await standalone.close(); }
 });
+
+
+for (const access of ['direct', 'gateway', 'network'] as const) test(`HTML full page opens from its preview through ${access}`, async ({ page, context }) => {
+  const owner = f.owners[1], filename = 'full page.html';
+  await writeFile(join(owner.directory, filename), `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><p id="result">Static diagram</p><script>
+    document.querySelector('#result').textContent='Tab ' + location.hash;
+    try { document.cookie; } catch { document.body.dataset.isolated='yes'; }
+  </script>`);
+  await writeFile(join(owner.directory, 'review.md'), '# Full page review\n\n[Diagram](full%20page.html#chained.html#tab)');
+  let base = `${f.gateway.url}/a/${owner.alias}`;
+  if (access === 'direct') base = JSON.parse(await readFile(join(owner.directory, 'runtime.json'), 'utf8')).url;
+  if (access === 'network') {
+    const network = await (await f.view('/api/network', { enabled: true })).json();
+    base = `${network.urls[0]}/a/${owner.alias}`;
+    await page.goto(base + '/');
+    await page.getByLabel('Passphrase', { exact: true }).fill(network.passphrase);
+    await page.getByRole('button', { name: 'Unlock', exact: true }).click();
+  }
+  await page.goto(`${base}/?document=${owner.doc.id}`);
+  await page.getByLabel('Message', { exact: true }).fill('Keep my draft');
+  await page.getByRole('link', { name: 'Diagram', exact: true }).click();
+  const preview = page.getByRole('dialog', { name: `File: ${filename}`, exact: true });
+  await preview.getByRole('checkbox', { name: 'Run scripts', exact: true }).check();
+  const opened = context.waitForEvent('page');
+  await preview.getByRole('link', { name: 'Open full page', exact: true }).click();
+  const fullPage = await opened;
+  try {
+    await fullPage.setViewportSize({ width: 390, height: 844 });
+    const frame = fullPage.frameLocator('.file-preview-frame');
+    const toggle = fullPage.getByRole('checkbox', { name: 'Run scripts', exact: true });
+    await expect(frame.locator('#result')).toHaveText('Static diagram');
+    await expect(toggle).not.toBeChecked();
+    expect(new URL(fullPage.url()).pathname).toBe(new URL(base + '/').pathname);
+    expect(new URL(fullPage.url()).hash).toBe('#chained.html#tab');
+    await expect(fullPage.getByRole('link', { name: 'Back to document' })).toHaveAttribute('href', new URL(base).pathname.replace(/\/$/, '') + `/?document=${owner.doc.id}`);
+    for (const size of [{ width: 390, height: 844 }, { width: 844, height: 390 }, { width: 1440, height: 900 }]) {
+      await fullPage.setViewportSize(size);
+      const bounds = await fullPage.locator('.file-preview-frame').boundingBox();
+      expect(bounds!.x).toBe(0);
+      expect(bounds!.width).toBe(size.width);
+      expect(bounds!.y).toBeLessThanOrEqual(60);
+      expect(Math.abs(bounds!.y + bounds!.height - size.height)).toBeLessThanOrEqual(1);
+      expect(await fullPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    }
+    await toggle.check();
+    await expect(frame.locator('#result')).toHaveText('Tab #chained.html#tab');
+    await expect(frame.locator('body')).toHaveAttribute('data-isolated', 'yes');
+    await toggle.uncheck();
+    await expect(frame.locator('#result')).toHaveText('Static diagram');
+    await toggle.check();
+    await fullPage.reload();
+    await expect(toggle).not.toBeChecked();
+    await expect(frame.locator('#result')).toHaveText('Static diagram');
+    expect(await fullPage.evaluate(() => window.opener)).toBeNull();
+    await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep my draft');
+  } finally { await fullPage.close(); }
+});
+
+test('HTML full page logs a new browser in and returns to the exact owner, file and fragment', async ({ page }) => {
+  const owner = f.owners[1];
+  await writeFile(join(owner.directory, 'diagram.html'), '<p id="result">Static diagram</p><script>document.querySelector("#result").textContent=location.hash</script>');
+  const network = await (await f.view('/api/network', { enabled: true })).json();
+  const base = `${network.urls[0]}/a/${owner.alias}`;
+  const query = new URLSearchParams({ view: 'html', document: owner.doc.id, path: 'diagram.html', directory: owner.directory, scripts: '1', returnTo: 'https://evil.example/' });
+  const target = `${base}/?${query}#chained.html#tab`;
+  const paths: string[] = [];
+  page.on('request', request => paths.push(new URL(request.url()).pathname));
+  await page.goto(target);
+  await expect(page.getByRole('button', { name: 'Unlock', exact: true })).toBeVisible();
+  expect(paths.some(path => path.includes('/api/'))).toBe(false);
+  await page.getByLabel('Passphrase', { exact: true }).fill('wrong-passphrase');
+  await page.getByRole('button', { name: 'Unlock', exact: true }).click();
+  await expect(page.getByRole('alert')).toHaveText('Incorrect passphrase.');
+  await page.getByLabel('Passphrase', { exact: true }).fill(network.passphrase);
+  await page.getByRole('button', { name: 'Unlock', exact: true }).click();
+  await expect(page.frameLocator('.file-preview-frame').locator('#result')).toHaveText('Static diagram');
+  expect(page.url()).toBe(target);
+  await expect(page.getByRole('checkbox', { name: 'Run scripts' })).not.toBeChecked();
+  await page.getByRole('checkbox', { name: 'Run scripts' }).check();
+  await expect(page.frameLocator('.file-preview-frame').locator('#result')).toHaveText('#chained.html#tab');
+  await page.reload();
+  await expect(page.frameLocator('.file-preview-frame').locator('#result')).toHaveText('Static diagram');
+  expect(paths.filter(path => path.includes('/api/')).every(path => path === `/a/${owner.alias}/api/files/html`)).toBe(true);
+});
+
+test('HTML full page keeps file authorization and rejects non-HTML content', async ({ page }) => {
+  const owner = f.owners[1], base = `${f.gateway.url}/a/${owner.alias}/?view=html&document=${owner.doc.id}`;
+  await page.goto(base + '&path=review.md');
+  await expect(page.getByRole('alert')).toContainText('HTTP 415');
+  await expect(page.locator('iframe')).toHaveCount(0);
+  await page.goto(base + '&path=../outside.html');
+  await expect(page.getByRole('alert')).toContainText('HTTP 403');
+  await expect(page.locator('iframe')).toHaveCount(0);
+  await page.goto(base);
+  await expect(page.getByRole('alert')).toContainText('document and file');
+  await expect(page.locator('iframe')).toHaveCount(0);
+});
