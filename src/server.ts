@@ -674,7 +674,7 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
         const testFiles = method === 'POST' ? await writeTestFileRules(repo.gitCommonDir, await bodyOf(request)) : await readTestFileRules(repo.gitCommonDir);
         json(response, { testFiles }); return;
       }
-      if (method === 'GET' && ['/api/files', '/api/files/content', '/api/files/html', '/api/files/code', '/api/files/status', '/api/files/branches', '/api/files/diff'].includes(path)) {
+      if ((method === 'GET' || method === 'HEAD' && path === '/api/files/html') && ['/api/files', '/api/files/content', '/api/files/html', '/api/files/code', '/api/files/status', '/api/files/branches', '/api/files/diff'].includes(path)) {
         const document = get(store.read().documents, target.searchParams.get('document') ?? '');
         const workspace = document.workspace;
         if (!workspace) throw new DomainError('This document has no recorded workspace. Reopen it from your agent.', 404);

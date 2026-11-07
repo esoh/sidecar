@@ -90,8 +90,10 @@ test('protected gateway authenticates once, confines native APIs, and revokes a 
   });
   assert.equal((await call(base + '/api/state')).status, 401);
   assert.match((await call(base + '/')).text, /Passphrase/);
-  const login = await call(base + '/?document=' + owner.doc.id, 'passphrase=gateway+test+passphrase', { 'Content-Type': 'application/x-www-form-urlencoded' });
-  assert.equal(login.status, 303); assert.equal(login.headers.location, base + '/?document=' + owner.doc.id);
+  const fullPage = base + '/?view=html&document=' + owner.doc.id + '&path=diagram.html&returnTo=https%3A%2F%2Fevil.example';
+  assert.match((await call(fullPage)).text, /Passphrase/);
+  const login = await call(fullPage, 'passphrase=gateway+test+passphrase', { 'Content-Type': 'application/x-www-form-urlencoded' });
+  assert.equal(login.status, 303); assert.equal(login.headers.location, fullPage);
   const cookie = login.headers['set-cookie']![0].split(';')[0], headers = { Cookie: cookie, 'X-Sidecar-Token': await readFile(join(f.root, 'gateway/agent-token'), 'utf8') };
   assert.equal(JSON.parse((await call(base + '/api/state', undefined, headers)).text).owner.sessionId, owner.owner.sessionId);
   assert.equal(JSON.parse((await call('/api/library', undefined, headers)).text).sessions.length, 2);

@@ -11,6 +11,11 @@ test('HTML frame endpoint requires viewer auth and an authorized HTML file', asy
   await writeFile(join(f.directory, 'diagram.html'), '<p>Diagram</p><script>document.body.dataset.ran="yes"</script>');
   const route = `/api/files/html?document=${doc.id}&path=diagram.html`;
   assert.equal((await fetch(f.url + route)).status, 403);
+  assert.equal((await fetch(f.url + route, { method: 'HEAD' })).status, 403);
+  const checked = await f.view(route, undefined, 'HEAD');
+  assert.equal(checked.status, 200);
+  assert.match(checked.headers.get('content-type')!, /text\/html/);
+  assert.equal(await checked.text(), '');
   const staticFrame = await f.view(route);
   assert.equal(staticFrame.status, 200);
   assert.match(staticFrame.headers.get('content-security-policy')!, /script-src 'none'/);
@@ -21,6 +26,9 @@ test('HTML frame endpoint requires viewer auth and an authorized HTML file', asy
   assert.doesNotMatch(scripted.headers.get('content-security-policy')!, /allow-same-origin/);
   assert.match(await scripted.text(), /<script>/);
   assert.equal((await f.view(`/api/files/html?document=${doc.id}&path=a.md&scripts=1`)).status, 415);
+  assert.equal((await f.view(`/api/files/html?document=${doc.id}&path=a.md`, undefined, 'HEAD')).status, 415);
+  assert.equal((await f.view(`/api/files/html?document=${doc.id}&path=../outside.html`, undefined, 'HEAD')).status, 403);
+  assert.equal((await f.view('/api/files/html?document=missing&path=diagram.html', undefined, 'HEAD')).status, 404);
   assert.equal((await f.view(`/api/files/html?document=${doc.id}&path=../outside.html&scripts=1`)).status, 403);
   assert.equal((await f.view('/api/files/html?document=missing&path=diagram.html&scripts=1')).status, 404);
 });
