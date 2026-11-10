@@ -1473,13 +1473,28 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
   border-radius: 12px;
   background: white;
 }
-.html-file-page { height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
-.html-file-page header { display: flex; align-items: center; gap: 12px; flex-shrink: 0; padding: 4px 12px; font-size: 12px; border-bottom: 1px solid var(--border); }
-.html-file-page header code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--subtle); }
-.html-file-page header a, .html-file-page .file-diff-toggle { display: inline-flex; align-items: center; min-height: 40px; flex-shrink: 0; }
-.html-file-page a, .html-full-page-link { color: var(--primary); }
-.html-file-page a:focus-visible, .html-full-page-link:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-.html-file-page > .file-preview-frame { display: block; height: 0; min-height: 0; border: 0; border-radius: 0; }
+.html-full-page-link { color: var(--primary); }
+.html-full-page-link:focus-visible, .html-topbar a:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.html-topbar { font-size: 12px; }
+/* The edge toggle would cover the HTML page's own content; this view is about one file. */
+.viewer.html-view > .files-edge-toggle { display: none; }
+.html-topbar .html-back { width: auto; gap: 6px; padding: 0 6px; color: var(--primary); }
+.html-topbar .html-filename { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--subtle); }
+.html-topbar .agent-status { margin-left: 0; }
+.html-topbar .file-diff-toggle { min-height: 30px; }
+.html-topbar .html-action { width: auto; gap: 6px; padding: 0 8px; }
+.html-topbar .html-action[aria-pressed='true'] { color: var(--primary); background: var(--muted); }
+.html-topbar :disabled { opacity: .45; cursor: not-allowed; }
+.document-workspace > .html-canvas { display: flex; flex-direction: column; padding: 0; overflow: hidden; background: var(--card) none; }
+.html-canvas > p { margin: 0; padding: 8px 12px; font-size: 12px; }
+.html-canvas > .html-notice { flex-shrink: 0; border-bottom: 1px solid var(--border); color: var(--subtle); }
+.html-canvas > .file-preview-frame { height: 0; min-height: 0; border: 0; border-radius: 0; }
+.row-tag + .row-tag { margin-left: 8px; }
+@media (max-width: 850px) {
+  .html-topbar .html-back > span, .html-topbar .html-action > span, .html-topbar .agent-status > span:last-child { display: none; }
+  .html-topbar .html-back, .html-topbar .html-action { padding: 0; }
+  .html-topbar .file-diff-toggle { white-space: nowrap; }
+}
 .file-preview-path:has(.html-full-page-link) { flex-wrap: wrap; }
 .html-full-page-link { white-space: nowrap; }
 .file-preview { min-height: 100%; display: flex; flex-direction: column; }

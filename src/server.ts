@@ -22,7 +22,8 @@ import { libraryDocument, listLibrary, recordDocumentOpen, closeLibraryDocument,
 import { authorizePath, listDirectory, readCode, readDiff, readPreview, readStatus } from './files.ts';
 import { readTestFileRules, writeTestFileRules } from './test-file-rules.ts';
 import { getGitRepositoryInfoAsync, listBranches, type ComparisonRequest } from './workspace-status.ts';
-import { claim, createThread, closeDocument, discardEmptyThread, nameThread, pinMessage, DomainError, get, isObject, isQuote, isRepoInfo, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, reanchorSelection, setBaseBranch, isBranchName, setSelectionVisibility, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput, type ReplyInput } from './store.ts';
+import { htmlBridge } from './html-bridge.ts';
+import { claim, createThread, closeDocument, discardEmptyThread, nameThread, pinMessage, DomainError, get, isObject, isQuote, isRepoInfo, isThreadFile, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, reanchorSelection, setBaseBranch, isBranchName, setSelectionVisibility, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput, type ReplyInput } from './store.ts';
 import { isPinStyle } from './pin-style.ts';
 import { stopRequest, prepareBatch, requestBatch, setMessageSelectionVisibility, type State } from './store.ts';
 import { isMessageQuote, isFileQuote } from './quote.ts';
@@ -68,7 +69,14 @@ function requestContext(state: State, id: string) {
     ...(request.fileQuote ? { fileQuote: request.fileQuote } : {}),
   }));
   const { requestId: _, ...single } = messages[0];
-  return { documentId: request.documentId, thread: { id: thread.id, lastRequestId: previous?.requestId ?? null, ...(thread.title ? { title: thread.title } : {}) }, ...(request.covers?.length ? { covers: request.covers } : {}), ...(messages.length > 1 ? { messages } : single) };
+  return { documentId: request.documentId, thread: { id: thread.id, lastRequestId: previous?.requestId ?? null, ...(thread.title ? { title: thread.title } : {}), ...(thread.file ? { file: thread.file } : {}) }, ...(request.covers?.length ? { covers: request.covers } : {}), ...(messages.length > 1 ? { messages } : single) };
+}
+// Right after the doctype (and any comments allowed before it), keeping standards mode, so the bridge's
+// listeners register before any page script. Without a doctype the page is already in quirks mode.
+// Each comment stops at its first --> so the prolog has one parse (no exponential backtracking).
+export function withBridge(html: string) {
+  const at = /^\uFEFF?(?:\s|<!--(?:(?!-->)[\s\S])*-->)*<!doctype[^>]*>/i.exec(html)?.[0].length ?? 0;
+  return `${html.slice(0, at)}<script data-sidecar-bridge>${htmlBridge}</script>${html.slice(at)}`;
 }
 export async function startServer({ owner, directory, stateRoot, port = 0, pollMs = 1000 }: ServerOptions) {
   const ids = await openAgentIds(stateRoot), key = ownerKey(owner);
@@ -701,7 +709,7 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
             response.setHeader('Content-Security-Policy', `default-src 'none'; script-src ${scripts ? "'unsafe-inline'" : "'none'"}; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox${scripts ? ' allow-scripts' : ''};`);
             response.setHeader('Content-Type', 'text/html; charset=utf-8');
             response.setHeader('Referrer-Policy', 'no-referrer');
-            sendBody(response, preview.text);
+            sendBody(response, scripts && param('bridge') === '1' ? withBridge(preview.text) : preview.text);
           } else json(response, path === '/api/files/code' ? await readCode(root, file) : await readPreview(root, file));
         }
         return;
@@ -979,7 +987,10 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
         await refresh(document); changed(); json(response, { ...document, title: title(document) }); return;
       }
       if (method === 'POST' && path === '/api/threads') {
-        const input = { id: text(body, 'id'), documentId: text(body, 'documentId') };
+        // The file only tells the agent what this conversation is about; it grants no file access.
+        const file = optionalText(body, 'file');
+        if (file !== undefined && !isThreadFile(file)) throw new DomainError('Expected an absolute file path');
+        const input = { id: text(body, 'id'), documentId: text(body, 'documentId'), file };
         const thread = await store.update(state => createThread(state, input));
         changed(); json(response, thread); return;
       }

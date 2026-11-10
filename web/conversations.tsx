@@ -410,6 +410,7 @@ export function ConversationSidebar({
   onQuoteMessage,
   onOpenFileQuote,
   onUnreadChange,
+  threadFile,
 }: {
   documentId: string;
   threads: Thread[];
@@ -436,6 +437,7 @@ export function ConversationSidebar({
   onQuoteMessage: (quote: MessageQuote) => void;
   onOpenFileQuote: (quote: FileQuote) => void;
   onUnreadChange: (count: number) => void;
+  threadFile?: string;
 }) {
   const [filter, setFilter] = useState('unresolved'),
     [search, setSearch] = useState(''),
@@ -573,7 +575,7 @@ export function ConversationSidebar({
     setCreating(true);
     creatingId.current ??= randomId();
     try {
-      const thread = await api<Thread>('/api/threads', { id: creatingId.current, documentId });
+      const thread = await api<Thread>('/api/threads', { id: creatingId.current, documentId, ...(threadFile ? { file: threadFile } : {}) });
       creatingId.current = null;
       setFilter('unresolved');
       setError('');
@@ -839,6 +841,7 @@ export function ConversationSidebar({
                     {match ? <>{match.before}<mark>{match.match}</mark>{match.after}</> : thread.messages.at(-1)?.text ?? 'Start a conversation about this document.'}
                   </span>
                 </span>
+                {thread.file && !threadFile && <span className="row-tag" title={thread.file}>{thread.file.split('/').pop()}</span>}
                 {(drafts.get(thread.id)?.text || drafts.get(thread.id)?.quote || drafts.get(thread.id)?.messageQuote || drafts.get(thread.id)?.fileQuote) && <span className="row-tag">Draft</span>}
               </span>
             </button>;

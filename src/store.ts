@@ -14,7 +14,7 @@ export type RepoInfo = { display: string; branch?: string };
 export type DocumentRecord = { id: string; path: string; generated: boolean; providedTitle?: string; userTitle?: string; repoInfo?: RepoInfo; workspace?: string; baseBranch?: string };
 export type MessageSelection = { id: string; slug: string; quote: Quote; isVisible: boolean; label?: string; proposalError?: string };
 export type Message = { id: string; role: 'user' | 'agent'; text: string; requestId: string; createdAt: number; selections?: MessageSelection[]; messageQuote?: MessageQuote; fileQuote?: FileQuote; isPinned?: boolean; pinStyle?: PinStyle };
-export type Thread = { id: string; documentId: string; title?: string; createdAt?: number; isResolved: boolean; messages: Message[] };
+export type Thread = { id: string; documentId: string; title?: string; file?: string; createdAt?: number; isResolved: boolean; messages: Message[] };
 export type RequestRecord = {
   id: string; documentId: string; threadId: string; text: string; clientMessageId: string;
   quote?: Quote; messageQuote?: MessageQuote; fileQuote?: FileQuote; status: 'queued' | 'claimed' | 'completed' | 'failed' | 'uncertain' | 'stopped'; createdAt: number;
@@ -59,8 +59,9 @@ function isMessage(v: unknown): v is Message {
 function isMessageFields(v: unknown): v is Record<string, unknown> & { id: string } {
   return isObject(v) && string(v.id) && (v.role === 'user' || v.role === 'agent') && string(v.text) && string(v.requestId) && number(v.createdAt) && (v.isPinned === undefined || typeof v.isPinned === 'boolean') && (v.pinStyle === undefined || isPinStyle(v.pinStyle));
 }
+export const isThreadFile = (v: unknown): v is string => typeof v === 'string' && v.startsWith('/') && v.length <= 4096 && !/[\x00-\x1f]/.test(v);
 function isThreadFields(v: unknown): v is Thread {
-  return isObject(v) && string(v.id) && string(v.documentId) && optionalString(v.title) && (v.createdAt === undefined || number(v.createdAt)) && typeof v.isResolved === 'boolean' && Array.isArray(v.messages) && v.messages.every(isMessage);
+  return isObject(v) && string(v.id) && string(v.documentId) && optionalString(v.title) && (v.file === undefined || isThreadFile(v.file)) && (v.createdAt === undefined || number(v.createdAt)) && typeof v.isResolved === 'boolean' && Array.isArray(v.messages) && v.messages.every(isMessage);
 }
 function isThread(v: unknown): v is Thread {
   return isThreadFields(v) && !('scope' in v) && !('quote' in v);
@@ -178,16 +179,17 @@ export function closeDocument(state: State, documentId: string, discardPending =
   delete state.documents[documentId];
   return threadIds;
 }
-export function createThread(state: State, input: { id?: string; documentId: string }): Thread {
+export function createThread(state: State, input: { id?: string; documentId: string; file?: string }): Thread {
   get(state.documents, input.documentId);
   const id = input.id ?? randomUUID();
   if (!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) throw new DomainError('Expected a thread UUID');
   if (Object.hasOwn(state.threads, id)) {
     const existing = get(state.threads, id);
-    if (existing.documentId !== input.documentId) throw new DomainError('Thread ID was already used for another conversation', 409);
+    if (existing.documentId !== input.documentId || existing.file !== input.file) throw new DomainError('Thread ID was already used for another conversation', 409);
     return existing;
   }
   const thread: Thread = { id, documentId: input.documentId, createdAt: Date.now(), isResolved: false, messages: [] };
+  if (input.file !== undefined) thread.file = input.file;
   state.threads[id] = thread;
   return thread;
 }
