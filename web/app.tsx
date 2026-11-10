@@ -1,5 +1,5 @@
 import { viewerPath, isGateway, libraryPath } from './viewer-path.ts';
-import { HtmlFilePage } from './HtmlFile.tsx';
+import { HtmlControls, HtmlFileViewer, isHtmlViewValid, readHtmlView, useHtmlBridge } from './HtmlFile.tsx';
 import { ViewerEvents } from './viewer-events.ts';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
@@ -74,8 +74,16 @@ function App() {
   const documentId = requestedDocument ?? Object.keys(state?.documents ?? {})[0] ?? '';
   const current = state?.documents[documentId];
   const [unreadCount, setUnreadCount] = useState(0);
+  const [htmlView] = useState(readHtmlView);
+  const htmlRoot = htmlView && (htmlView.root ?? current?.workspace);
+  const htmlAbsolute = htmlView && htmlRoot ? `${htmlRoot.replace(/\/$/, '')}/${htmlView.path}` : undefined;
+  const [areScriptsEnabled, setScriptsEnabled] = useState(false), [isBridgeReady, setBridgeReady] = useState(false), [isPicking, setPicking] = useState(false);
+  const [htmlSelection, setHtmlSelection] = useState<{ exact: string; selector: string } | null>(null), [htmlNotice, setHtmlNotice] = useState('');
+  const frameRef = useRef<HTMLIFrameElement>(null);
   useEffect(() => {
-    if (current && !closedDocument) document.title = `${unreadCount ? `(${unreadCount}) ` : ''}${current.title}`;
+    const prefix = unreadCount ? `(${unreadCount}) ` : '';
+    if (htmlView) document.title = `${prefix}${htmlView.path.split('/').pop() || 'HTML file'} — Sidecar`;
+    else if (current && !closedDocument) document.title = `${prefix}${current.title}`;
   }, [current?.title, unreadCount, closedDocument]);
   const drafts = useQuestionDrafts(documentId);
   const floatingDrafts = useMemo<QuestionDrafts>(() => ({
@@ -87,7 +95,7 @@ function App() {
   useEffect(() => {
     if (current) void api(`/api/documents/${documentId}/opened`, {}).catch(reason => setError(errorText(reason)));
   }, [documentId, !!current]);
-  const threads = Object.values(state?.threads ?? {}).filter((thread) => thread.documentId === documentId);
+  const threads = Object.values(state?.threads ?? {}).filter((thread) => thread.documentId === documentId && (!htmlView || (!!htmlAbsolute && thread.file === htmlAbsolute)));
   const [activeThreadId, setActiveThreadId] = useState<string | null | undefined>(undefined);
   const [activeMessageId, setActiveMessageId] = useState<string | null>(null);
   const [sentRequestId, setSentRequestId] = useState<string | null>(null);
@@ -726,7 +734,7 @@ function App() {
     try {
       let target = activeThreadId;
       if (!target) {
-        fileThread.current ??= api<Thread>('/api/threads', { id: randomId(), documentId });
+        fileThread.current ??= api<Thread>('/api/threads', { id: randomId(), documentId, ...(htmlAbsolute ? { file: htmlAbsolute } : {}) });
         const thread = await fileThread.current;
         setState(previous => previous ? { ...previous, threads: { ...previous.threads, [thread.id]: thread } } : previous);
         target = thread.id;
@@ -745,8 +753,32 @@ function App() {
     if (pending && !composing) void attachToConversation({ quote: pending });
     else setSidebarShown(true);
   }
+  const attachHtml = (exact: string, selector: string, fingerprint?: string) => {
+    if (htmlAbsolute) void attachToConversation({ fileQuote: { path: htmlAbsolute, kind: 'html', exact, selector, ...(fingerprint ? { isElement: true, fingerprint } : {}) } });
+  };
+  const postBridge = useHtmlBridge(frameRef, message => {
+    if (message.type === 'ready') { setBridgeReady(true); setPicking(false); }
+    else if (message.type === 'selection') setHtmlSelection(message.exact ? message : null);
+    else if (message.type === 'pick') { setPicking(false); attachHtml(message.exact, message.selector, message.fingerprint); }
+    else if (message.type === 'picker') setPicking(false);
+    else setHtmlNotice(message.ok ? '' : 'This part of the page changed or was removed since it was attached.');
+  });
+  const changeScripts = (enabled: boolean) => { setScriptsEnabled(enabled); setBridgeReady(false); setPicking(false); setHtmlSelection(null); setHtmlNotice(''); };
+  const togglePicker = (on: boolean) => { setPicking(on); postBridge({ type: 'picker', on }); };
+  useEffect(() => {
+    if (!isPicking) return;
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') togglePicker(false); };
+    window.addEventListener('keydown', escape);
+    return () => window.removeEventListener('keydown', escape);
+  }, [isPicking]);
   const selectionActions = {
-    onOpenFileQuote: (quote: FileQuote) => openLink(quote.kind, quote.path),
+    onOpenFileQuote: (quote: FileQuote) => {
+      if (!htmlView || quote.kind !== 'html' || quote.path !== htmlAbsolute || !quote.selector) return openLink(quote.kind === 'code' ? 'code' : 'doc', quote.path);
+      if (innerWidth <= 850) setSidebarShown(false);
+      if (!areScriptsEnabled) return setHtmlNotice('Turn on Run scripts to show this on the page.');
+      setHtmlNotice('');
+      postBridge({ type: 'reveal', selector: quote.selector, exact: quote.exact, isElement: !!quote.isElement, fingerprint: quote.fingerprint });
+    },
     onQuoteMessage: (messageQuote: import('../src/quote.ts').MessageQuote) => {
       fileSelectionVisit.current++;
       const target = activeThreadId && isSidebarShown ? activeThreadId : messageQuote.threadId;
@@ -838,8 +870,10 @@ function App() {
     <WorkspaceLinks.Provider value={openLink}>
       <ProposalReviewContext.Provider value={proposalReview.context}>
       {proposalReview.popover}
-      <div className="viewer" ref={viewer} data-chat-open={isSidebarShown}>
-      <header className="topbar">
+      <div className={`viewer${htmlView ? ' html-view' : ''}`} ref={viewer} data-chat-open={isSidebarShown}>
+      <header className={`topbar${htmlView ? ' html-topbar' : ''}`}>
+        {htmlView ? <HtmlControls file={htmlView} areScriptsEnabled={areScriptsEnabled} onScripts={changeScripts} isReady={areScriptsEnabled && isBridgeReady}
+          isPicking={isPicking} onPick={() => togglePicker(!isPicking)} canAsk={!!htmlSelection} onAsk={() => { if (htmlSelection) { attachHtml(htmlSelection.exact, htmlSelection.selector); setHtmlSelection(null); } }} /> : <>
         <div className="brand">
           <Icon name="logo" />
           <span>Sidecar</span>
@@ -862,8 +896,9 @@ function App() {
             ))}
           </select>
         )}
+        </>}
         <AgentStatus state={state} connected={connected} />
-        <TextSettings version={state?.appVersion} />
+        {!htmlView && <TextSettings version={state?.appVersion} />}
         <button
           className="sidebar-toggle conversation-toggle"
           aria-label={isSidebarShown ? 'Hide conversations' : 'Show conversations'}
@@ -876,7 +911,7 @@ function App() {
           <Icon name="panel" />
           <span>{isSidebarShown ? 'Document' : 'Chat'}</span>
         </button>
-        {current && (
+        {current && !htmlView && (
           <button className="sidebar-toggle" aria-label="Close document" title="Close document" disabled={isClosing} onClick={() => { void closeCurrentDocument(); }}>
             <Icon name="close" />
           </button>
@@ -909,8 +944,12 @@ function App() {
           </>
         )}
         <div className="document-workspace" id="document-workspace" ref={workspace}>
-        <main className="canvas">
-          <div className="reading-width">
+        <main className={`canvas${htmlView ? ' html-canvas' : ''}`}>
+          {htmlView ? <>
+            {htmlNotice && <p className="html-notice" role="status">{htmlNotice}</p>}
+            {htmlView.root || current?.workspace ? <HtmlFileViewer key={`${htmlView.path}:${htmlRoot}`} file={htmlView} areScriptsEnabled={areScriptsEnabled} bridge frameRef={frameRef} />
+              : state ? <p role="alert">This document has no recorded workspace. Reopen it from your agent.</p> : <p role="status">Loading HTML file…</p>}
+          </> : <div className="reading-width">
             {originalMessage?.quote && activeThreadId && (
               <OriginalDocument
                 key={originalMessage.id}
@@ -957,7 +996,7 @@ function App() {
               {current && !documentError && <DocumentHeader key={documentId} repoInfo={current.repoInfo} markdown={content.markdown} onError={setError} />}
               <MarkdownDocument markdown={content.markdown} documentId={documentId} linkBase={current?.path.replace(/\/[^/]*$/, '')} canCollapseHeadings />
             </article>
-          </div>
+          </div>}
         </main>
         <PinnedWindows key={documentId} workspace={workspace} threads={threads} files={files} onSetLineRangeVisible={(id, visible) => setFiles(previous => previous.map(file => file.id === id ? { ...file, isLineRangeVisible: visible } : file))} onSetFileScripts={(id, enabled) => setFiles(previous => previous.map(file => file.id === id ? { ...file, areScriptsEnabled: enabled } : file))} root={current?.workspace} documentId={documentId} comparison={comparison} changesScope={changesScope} onCloseChanges={() => setChangesScope(null)} onOpenChange={openChange} onQuoteFile={fileQuote => attachToConversation({ fileQuote })} onRevealFile={revealFile} openRequests={openPins} onOpened={ids => setOpenPins(previous => previous.filter(id => !ids.includes(id)))} onCloseFile={id => {
           setFiles(previous => previous.filter(file => file.id !== id));
@@ -1004,6 +1043,7 @@ function App() {
           }}
           onGoToMessage={goToMessage}
           messageJump={messageJump}
+          threadFile={htmlAbsolute}
         />
       </div>
       </div>
@@ -1081,4 +1121,4 @@ function App() {
 }
 const root = document.getElementById('root');
 const query = new URLSearchParams(location.search);
-if (root) createRoot(root).render(<SettingsProvider>{query.get('view') === 'html' ? <HtmlFilePage /> : (query.has('library') || isGateway && !query.has('document')) ? <DocumentLibrary /> : <App />}</SettingsProvider>);
+if (root) createRoot(root).render(<SettingsProvider>{query.get('view') === 'html' && !isHtmlViewValid(readHtmlView()!) ? <p role="alert">Open this page with a document and file from its Sidecar viewer.</p> : (query.has('library') || isGateway && !query.has('document')) ? <DocumentLibrary /> : <App />}</SettingsProvider>);

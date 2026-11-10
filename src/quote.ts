@@ -1,13 +1,16 @@
 export type Quote = { exact: string; prefix: string; suffix: string; start: number; end: number; version: string; sentence?: string; isPositionVerified?: boolean };
 export type MessageQuote = { threadId: string; messageId: string; exact: string };
-export type FileQuote = { path: string; kind: 'doc' | 'code'; exact: string; startLine?: number; endLine?: number };
+export type FileQuote = { path: string; kind: 'doc' | 'code' | 'html'; exact: string; startLine?: number; endLine?: number; selector?: string; isElement?: true; fingerprint?: string };
 export function isFileQuote(value: unknown): value is FileQuote {
   return isObject(value) && string(value.path) && value.path.startsWith('/') && value.path.length <= 4096 && !/[\x00-\x1f]/.test(value.path)
-    && (value.kind === 'doc' || value.kind === 'code') && string(value.exact) && !!value.exact.trim() && value.exact.length <= 128 * 1024
+    && (value.kind === 'doc' || value.kind === 'code' || value.kind === 'html') && string(value.exact) && !!value.exact.trim() && value.exact.length <= 128 * 1024
+    && (value.kind === 'html' ? isSelector(value.selector) && value.startLine === undefined && value.endLine === undefined && (value.isElement === true ? string(value.fingerprint) && /^\d{1,9}:[0-9a-f]{8}$/.test(value.fingerprint) : value.isElement === undefined && value.fingerprint === undefined)
+      : value.selector === undefined && value.isElement === undefined && value.fingerprint === undefined)
     && ((value.startLine === undefined && value.endLine === undefined) || (number(value.startLine) && Number.isInteger(value.startLine) && value.startLine > 0 && number(value.endLine) && Number.isInteger(value.endLine) && value.endLine >= value.startLine));
 }
+export const isSelector = (v: unknown): v is string => typeof v === 'string' && v.length >= 1 && v.length <= 1024 && !/[\x00-\x1f]/.test(v);
 export function fileQuoteLabel(quote: FileQuote) {
-  return (quote.path.split('/').pop() ?? quote.path) + (quote.startLine ? `:${quote.startLine}${quote.endLine !== quote.startLine ? `–${quote.endLine}` : ''}` : '');
+  return (quote.path.split('/').pop() ?? quote.path) + (quote.isElement ? ' element' : '') + (quote.startLine ? `:${quote.startLine}${quote.endLine !== quote.startLine ? `–${quote.endLine}` : ''}` : '');
 }
 export function isMessageQuote(value: unknown): value is MessageQuote {
   return isObject(value) && string(value.threadId) && value.threadId.length > 0 && value.threadId.length <= 256 && string(value.messageId) && value.messageId.length > 0 && value.messageId.length <= 256 && string(value.exact) && !!value.exact.trim() && value.exact.length <= 128 * 1024;

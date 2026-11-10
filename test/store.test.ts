@@ -3,7 +3,8 @@ import { test } from 'node:test';
 import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createState, registerDocument, submit, claim, reply, resolveThread, setTitle, setBaseBranch, openStore, readSavedState } from '../src/store.ts';
+import { isFileQuote } from '../src/quote.ts';
+import { createState, createThread, registerDocument, submit, claim, reply, resolveThread, setTitle, setBaseBranch, openStore, readSavedState } from '../src/store.ts';
 
 for (const order of ['combined', 'older-first'] as const) test(`mid-turn receipts preserve immutable batches: ${order}`, () => {
   const { state, input } = setup(), a = submit(state, input);
@@ -279,4 +280,25 @@ test('base branch round-trips, is kept when omitted, can be cleared, and rejects
   setBaseBranch(state, doc.id, null);
   assert.equal(state.documents[doc.id]!.baseBranch, undefined);
   assert.throws(() => readSavedState({ ...JSON.parse(JSON.stringify(state)), documents: { [doc.id]: { ...doc, baseBranch: '-x' } } }));
+});
+
+test('threads may be bound to an absolute file and html file quotes need a selector', () => {
+  const { state, doc, input } = setup(), id = '11111111-1111-4111-8111-111111111112';
+  doc.workspace = '/tmp/work';
+  const thread = createThread(state, { id, documentId: doc.id, file: '/tmp/work/a.html' });
+  assert.equal(thread.file, '/tmp/work/a.html');
+  assert.equal(createThread(state, { id, documentId: doc.id, file: '/tmp/work/a.html' }), thread);
+  for (const file of [undefined, '/tmp/work/b.html']) assert.throws(() => createThread(state, { id, documentId: doc.id, file }), /already used/);
+  assert.equal(createThread(state, { documentId: doc.id }).file, undefined);
+  assert.deepEqual(readSavedState(JSON.parse(JSON.stringify(state))), state);
+  for (const file of ['relative.html', '/tmp/a\nb.html', '/' + 'x'.repeat(4096), 7]) {
+    const invalid = structuredClone(state); (invalid.threads[id] as any).file = file;
+    assert.throws(() => readSavedState(invalid), /Malformed/);
+  }
+  const html = { path: '/tmp/work/a.html', kind: 'html' as const, exact: '<b>x</b>', selector: 'body > b', isElement: true as const, fingerprint: '8:0123abcd' };
+  assert.ok(isFileQuote(html) && isFileQuote({ ...html, isElement: undefined, fingerprint: undefined }));
+  for (const bad of [{ ...html, selector: undefined }, { ...html, selector: '' }, { ...html, selector: 'a\nb' }, { ...html, selector: 'x'.repeat(1025) }, { ...html, startLine: 1, endLine: 1 }, { ...html, isElement: false },
+    { ...html, fingerprint: undefined }, { ...html, fingerprint: 'abc' }, { ...html, isElement: undefined }, { ...html, kind: 'doc' }, { ...html, kind: 'code', isElement: undefined, fingerprint: undefined }]) assert.equal(isFileQuote(bad), false);
+  assert.equal(submit(state, { ...input, fileQuote: html, clientMessageId: 'html' }).fileQuote?.selector, 'body > b');
+  assert.deepEqual(readSavedState(JSON.parse(JSON.stringify(state))), state);
 });

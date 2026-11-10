@@ -498,9 +498,12 @@ for (const access of ['direct', 'gateway', 'network'] as const) test(`HTML full 
       await fullPage.setViewportSize(size);
       const bounds = await fullPage.locator('.file-preview-frame').boundingBox();
       expect(bounds!.x).toBe(0);
-      expect(bounds!.width).toBe(size.width);
+      // The chat panel sits beside the page on desktop and replaces it on phones.
+      expect(bounds!.width).toBeLessThanOrEqual(size.width);
+      if (size.width <= 850) expect(bounds!.width).toBe(size.width);
       expect(bounds!.y).toBeLessThanOrEqual(60);
-      expect(Math.abs(bounds!.y + bounds!.height - size.height)).toBeLessThanOrEqual(1);
+      // The viewer's mobile height follows the resize on the next animation frame.
+      await expect.poll(async () => { const box = await fullPage.locator('.file-preview-frame').boundingBox(); return Math.abs(box!.y + box!.height - size.height) <= 1; }).toBe(true);
       expect(await fullPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     }
     await toggle.check();
@@ -541,7 +544,8 @@ test('HTML full page logs a new browser in and returns to the exact owner, file 
   await expect(page.frameLocator('.file-preview-frame').locator('#result')).toHaveText('#chained.html#tab');
   await page.reload();
   await expect(page.frameLocator('.file-preview-frame').locator('#result')).toHaveText('Static diagram');
-  expect(paths.filter(path => path.includes('/api/')).every(path => path === `/a/${owner.alias}/api/files/html`)).toBe(true);
+  expect(paths.filter(path => path.includes('/api/')).every(path => path.startsWith(`/a/${owner.alias}/api/`))).toBe(true);
+  expect(paths.filter(path => path.endsWith('/api/files/html')).every(path => path === `/a/${owner.alias}/api/files/html`)).toBe(true);
 });
 
 test('HTML full page keeps file authorization and rejects non-HTML content', async ({ page }) => {
@@ -555,4 +559,228 @@ test('HTML full page keeps file authorization and rejects non-HTML content', asy
   await page.goto(base);
   await expect(page.getByRole('alert')).toContainText('document and file');
   await expect(page.locator('iframe')).toHaveCount(0);
+});
+
+const pageHtml = '<!doctype html><body><h1 id="title">Title</h1><p>Alpha <b>beta</b>\n  gamma</p><a href="#nav" id="link">Link</a> <button id="go" onclick="document.body.dataset.clicked=\'yes\'">Go</button></body>';
+async function htmlThreads() {
+  const owner = f.owners[1], base = `${f.gateway.url}/a/${owner.alias}`, file = join(owner.directory, 'page.html');
+  await writeFile(file, pageHtml);
+  // The browser derives the path from the registered (real) workspace.
+  const bound_file = `${owner.doc.workspace.replace(/\/$/, '')}/page.html`;
+  const post = async (path: string, body: object) => (await f.view(`/a/${owner.alias}${path}`, body)).json();
+  const bound = '00000000-0000-4000-8000-000000000001';
+  await post('/api/threads', { id: bound, documentId: owner.doc.id, file: bound_file });
+  await post('/api/questions', { documentId: owner.doc.id, threadId: bound, text: 'Question about the page', clientMessageId: 'bound' });
+  await post('/api/questions', { documentId: owner.doc.id, text: 'Plain document question', clientMessageId: 'plain' });
+  return { owner, base, file: bound_file, full: `${base}/?view=html&document=${owner.doc.id}&path=page.html` };
+}
+
+test('HTML full page lists only its file-bound threads and the document view tags them', async ({ page }) => {
+  const { base, owner, full } = await htmlThreads();
+  await page.goto(full);
+  await expect(page.locator('.sidebar')).toContainText('Question about the page');
+  await expect(page.locator('.sidebar')).not.toContainText('Plain document question');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await expect(page.locator('.thread-row')).toHaveCount(1);
+  await expect(page.locator('.thread-row .row-tag')).toHaveCount(0);
+  await page.goto(`${base}/?document=${owner.doc.id}`);
+  await page.getByRole('button', { name: 'Threads', exact: true }).click({ timeout: 1000 }).catch(() => undefined);
+  await expect(page.locator('.thread-row', { hasText: 'Plain document question' })).toHaveCount(1);
+  await expect(page.locator('.thread-row', { hasText: 'Question about the page' }).locator('.row-tag')).toHaveText('page.html');
+  await expect(page.locator('.thread-row', { hasText: 'Plain document question' }).locator('.row-tag')).toHaveCount(0);
+});
+
+test('HTML full page needs Run scripts to ask about a selection, then sends an html file quote on a file-bound thread', async ({ page }) => {
+  const { full, file } = await htmlThreads();
+  await page.goto(full);
+  const frame = page.frameLocator('.file-preview-frame'), pick = page.getByRole('button', { name: 'Pick element' }), ask = page.getByRole('button', { name: 'Ask about selection' });
+  await expect(frame.locator('p')).toHaveText('Alpha beta gamma');
+  for (const button of [pick, ask]) { await expect(button).toBeDisabled(); await expect(button).toHaveAttribute('title', /Run scripts/); }
+  await page.getByRole('checkbox', { name: 'Run scripts' }).check();
+  await expect(pick).toBeEnabled();
+  await expect(ask).toBeDisabled();
+  await frame.locator('p').evaluate(p => getSelection()!.selectAllChildren(p));
+  await expect(ask).toBeEnabled();
+  await ask.click();
+  await expect(page.locator('.sidebar .selection-badge')).toHaveText('page.html');
+  const sent = page.waitForRequest(request => request.url().endsWith('/api/questions'));
+  await page.getByLabel('Message', { exact: true }).fill('What does this say?');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  const body = (await sent).postDataJSON();
+  expect(body.fileQuote).toMatchObject({ path: file, kind: 'html' });
+  expect(body.fileQuote.exact.replace(/\s+/g, ' ').trim()).toBe('Alpha beta gamma');
+  expect(body.fileQuote.selector).toBe('html > body > p');
+  const state = await (await f.view(`/a/${f.owners[1].alias}/api/state`)).json();
+  expect(state.threads[body.threadId].file).toBe(file);
+});
+
+test('HTML element picking swallows page clicks until it ends', async ({ page }) => {
+  const { full } = await htmlThreads();
+  await page.goto(full);
+  const frame = page.frameLocator('.file-preview-frame'), pick = page.getByRole('button', { name: 'Pick element' });
+  await page.getByRole('checkbox', { name: 'Run scripts' }).check();
+  await expect(pick).toBeEnabled();
+  await pick.click();
+  await expect(pick).toHaveAttribute('aria-pressed', 'true');
+  await frame.locator('#go').click();
+  await expect(pick).toHaveAttribute('aria-pressed', 'false');
+  await expect(frame.locator('body')).not.toHaveAttribute('data-clicked', 'yes');
+  await expect(page.locator('.sidebar .selection-badge')).toHaveText('page.html element');
+  await expect(page.locator('.sidebar .composer')).toContainText('<button');
+  await pick.click();
+  await page.keyboard.press('Escape');
+  await expect(pick).toHaveAttribute('aria-pressed', 'false');
+  await frame.locator('#go').click();
+  await expect(frame.locator('body')).toHaveAttribute('data-clicked', 'yes');
+  await frame.locator('#link').click();
+  expect(page.url()).toBe(full);
+});
+
+test('resolved file-bound threads leave the Unresolved filter', async ({ page }) => {
+  const { full } = await htmlThreads();
+  await page.goto(full);
+  await page.getByRole('button', { name: 'Resolve thread' }).click();
+  await expect(page.locator('.thread-row')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Thread status' }).click();
+  await page.getByRole('menuitemradio', { name: 'Resolved', exact: true }).click();
+  await expect(page.locator('.thread-row')).toHaveCount(1);
+  await page.getByRole('button', { name: 'Thread status' }).click();
+  await page.getByRole('menuitemradio', { name: 'All', exact: true }).click();
+  await expect(page.locator('.thread-row')).toHaveCount(1);
+});
+
+test('attached HTML parts reveal only while they still match the page', async ({ page }) => {
+  const { full, owner } = await htmlThreads();
+  await page.goto(full);
+  const frame = page.frameLocator('.file-preview-frame'), pick = page.getByRole('button', { name: 'Pick element' });
+  const scripts = page.getByRole('checkbox', { name: 'Run scripts' });
+  await scripts.check();
+  await expect(pick).toBeEnabled();
+  await pick.click();
+  await frame.locator('#go').click();
+  await page.getByLabel('Message', { exact: true }).fill('About this button');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  const attachment = page.getByRole('button', { name: /Open (quoted|queued) file: page.html element/ });
+  await attachment.click();
+  await expect(frame.locator('div[data-sidecar-bridge]')).toHaveCSS('display', 'block');
+  await expect(page.getByRole('status').filter({ hasText: 'changed' })).toHaveCount(0);
+  await scripts.uncheck();
+  await attachment.click();
+  await expect(page.getByRole('status').filter({ hasText: 'Turn on Run scripts to show this on the page.' })).toBeVisible();
+  await writeFile(join(owner.directory, 'page.html'), pageHtml.replace('>Go<', '>Go now<'));
+  await scripts.check();
+  await expect(pick).toBeEnabled();
+  await attachment.click();
+  await expect(page.getByRole('status').filter({ hasText: 'This part of the page changed or was removed since it was attached.' })).toBeVisible();
+  await expect(frame.locator('div[data-sidecar-bridge]')).toHaveCount(0);
+});
+
+test('attached HTML text reveals across inline markup and source whitespace', async ({ page }) => {
+  const { full } = await htmlThreads();
+  await page.goto(full);
+  const frame = page.frameLocator('.file-preview-frame'), ask = page.getByRole('button', { name: 'Ask about selection' });
+  await page.getByRole('checkbox', { name: 'Run scripts' }).check();
+  await expect(page.getByRole('button', { name: 'Pick element' })).toBeEnabled();
+  await frame.locator('p').evaluate(p => getSelection()!.selectAllChildren(p));
+  await expect(ask).toBeEnabled();
+  await ask.click();
+  await page.getByLabel('Message', { exact: true }).fill('About this text');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await frame.locator('p').evaluate(() => getSelection()!.removeAllRanges());
+  await page.getByRole('button', { name: /Open (quoted|queued) file: page.html$/ }).click();
+  await expect.poll(() => frame.locator('p').evaluate(() => getSelection()!.toString().replace(/\s+/g, ' ').trim())).toBe('Alpha beta gamma');
+  await expect(page.getByRole('status').filter({ hasText: 'changed' })).toHaveCount(0);
+});
+
+async function pickAndSend(page: import('@playwright/test').Page, html: string, selector: string) {
+  const { full, owner } = await htmlThreads();
+  await writeFile(join(owner.directory, 'page.html'), html);
+  await page.goto(full);
+  const frame = page.frameLocator('.file-preview-frame'), pick = page.getByRole('button', { name: 'Pick element' });
+  await page.getByRole('checkbox', { name: 'Run scripts' }).check();
+  await expect(pick).toBeEnabled();
+  await pick.click();
+  await frame.locator(selector).click();
+  await expect(pick).toHaveAttribute('aria-pressed', 'false');
+  const sent = page.waitForRequest(request => request.url().endsWith('/api/questions'));
+  await page.getByLabel('Message', { exact: true }).fill('About this element');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  return { frame, fileQuote: (await sent).postDataJSON().fileQuote, attachment: page.getByRole('button', { name: /Open (quoted|queued) file: page.html element/ }), changed: page.getByRole('status').filter({ hasText: 'changed or was removed' }) };
+}
+
+test('picking blocks page handlers registered before it, including touch', async ({ browser, page }) => {
+  const { full, owner } = await htmlThreads();
+  await writeFile(join(owner.directory, 'page.html'), '<!doctype html><head><script>addEventListener("click", e => { if (e.target.id === "go") document.body.dataset.clicked = "click"; }, true);</script></head><body><button id="go" ontouchstart="document.body.dataset.touched=\'yes\'">Go</button></body>');
+  const phone = await browser.newPage({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
+  for (const [current, tap] of [[page, false], [phone, true]] as const) {
+    await current.goto(full);
+    const frame = current.frameLocator('.file-preview-frame'), pick = current.getByRole('button', { name: 'Pick element' });
+    await current.getByRole('checkbox', { name: 'Run scripts' }).check();
+    await expect(pick).toBeEnabled();
+    await (tap ? pick.tap() : pick.click());
+    await (tap ? frame.locator('#go').tap() : frame.locator('#go').click());
+    await expect(pick).toHaveAttribute('aria-pressed', 'false');
+    expect(await frame.locator('body').evaluate(body => [body.dataset.clicked, body.dataset.touched])).toEqual([undefined, undefined]);
+    // Picking off: the page's own handlers run again (on a phone the pick opened the chat over the page).
+    if (tap) await current.getByRole('button', { name: 'Hide conversations' }).tap();
+    await (tap ? frame.locator('#go').tap() : frame.locator('#go').click());
+    await expect(frame.locator('body')).toHaveAttribute('data-clicked', 'click');
+    if (tap) await expect(frame.locator('body')).toHaveAttribute('data-touched', 'yes');
+  }
+  await phone.close();
+});
+
+test('a picked element reveals while its full markup is unchanged and unique', async ({ page }) => {
+  const long = `<!doctype html><body><div id="box"><button id="go" data-filler="${'x'.repeat(4100)}">Approve</button></div></body>`;
+  const { frame, attachment, changed } = await pickAndSend(page, long, '#go');
+  await attachment.click();
+  await expect(frame.locator('div[data-sidecar-bridge]')).toHaveCSS('display', 'block');
+  await expect(changed).toHaveCount(0);
+  // A change past the 4,000-character excerpt still counts.
+  await frame.locator('#go').evaluate(button => { button.textContent = 'Delete everything'; });
+  await attachment.click();
+  await expect(changed).toBeVisible();
+});
+
+test('a picked element whose selector became ambiguous reports changed', async ({ page }) => {
+  const { frame, attachment, changed } = await pickAndSend(page, '<!doctype html><body><div id="original"><button id="go">Go</button></div></body>', '#go');
+  await frame.locator('body').evaluate(body => { const copy = document.createElement('div'); copy.innerHTML = '<button id="go">Go</button>'; body.prepend(copy); });
+  await attachment.click();
+  await expect(changed).toBeVisible();
+});
+
+test('a picked body excerpt excludes Sidecar instrumentation and reveals unchanged', async ({ page }) => {
+  const { attachment, changed, fileQuote } = await pickAndSend(page, '<!doctype html><body style="margin:0;min-height:800px"><h1>Title</h1></body>', 'body');
+  expect(fileQuote).toMatchObject({ selector: 'html > body', isElement: true });
+  expect(fileQuote.exact).toBe('<body style="margin:0;min-height:800px"><h1>Title</h1></body>');
+  await attachment.click();
+  await expect(changed).toHaveCount(0);
+});
+
+test('Run scripts keeps standards mode and layout when comments precede the doctype', async ({ page }) => {
+  const { full, owner } = await htmlThreads();
+  await writeFile(join(owner.directory, 'page.html'), '<!-- Generated diagram -->\n<!DOCTYPE html><html><head><style>#box { height: 100%; padding: 20px; }</style></head><body><div id="box">Diagram</div></body></html>');
+  await page.goto(full);
+  const box = page.frameLocator('.file-preview-frame').locator('#box');
+  const layout = () => box.evaluate(element => [document.compatMode, element.getBoundingClientRect().height]);
+  const before = await layout();
+  expect(before[0]).toBe('CSS1Compat');
+  await page.getByRole('checkbox', { name: 'Run scripts' }).check();
+  await expect(page.getByRole('button', { name: 'Pick element' })).toBeEnabled();
+  expect(await layout()).toEqual(before);
+});
+
+test('HTML full page header fits a phone and Chat swaps with the page', async ({ page }) => {
+  const { full } = await htmlThreads();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(full);
+  const frame = page.locator('.file-preview-frame');
+  await expect(frame).toBeVisible();
+  for (const name of ['Back to document', 'Pick element', 'Ask about selection']) await expect(page.getByLabel(name, { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => [document.documentElement.scrollWidth <= innerWidth, (() => { const bar = document.querySelector('.topbar')!; return bar.scrollWidth <= bar.clientWidth; })()])).toEqual([true, true]);
+  await page.getByRole('button', { name: 'Show conversations' }).click();
+  await expect(page.locator('.sidebar')).toBeVisible();
+  await expect(frame).toBeHidden();
+  await page.getByRole('button', { name: 'Hide conversations' }).click();
+  await expect(frame).toBeVisible();
 });
