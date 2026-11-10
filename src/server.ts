@@ -12,7 +12,7 @@ import { CodexControlUnavailableError, reconcileCodexQueue } from './codex-queue
 import { observeCodex, readCodexControl, resetCodexSession, type CodexObserver, type NativeResetResult, type NativeControl } from './codex-stream.ts';
 import { ReplyStream, ThreadReplyRouter, isStreamEvent, findReplyBlocks } from './stream.ts';
 import { parseReply } from './reply-metadata.ts';
-import { readDocument } from './documents.ts';
+import { isHtmlPath, readDocument } from './documents.ts';
 import { prepareProposal } from './proposals.ts';
 import { createProposalService } from './proposal-service.ts';
 import { saveDocumentVersion } from './snapshots.ts';
@@ -684,9 +684,11 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
       }
       if ((method === 'GET' || method === 'HEAD' && path === '/api/files/html') && ['/api/files', '/api/files/content', '/api/files/html', '/api/files/code', '/api/files/status', '/api/files/branches', '/api/files/diff'].includes(path)) {
         const document = get(store.read().documents, target.searchParams.get('document') ?? '');
-        const workspace = document.workspace;
-        if (!workspace) throw new DomainError('This document has no recorded workspace. Reopen it from your agent.', 404);
         const param = (key: string, fallback?: string) => target.searchParams.get(key) ?? fallback;
+        // A standalone HTML document's own registered file needs no workspace or browsing grant.
+        const isOwnHtml = path === '/api/files/html' && isHtmlPath(document.path) && param('directory') === dirname(document.path) && param('path') === basename(document.path);
+        const workspace = isOwnHtml ? dirname(document.path) : document.workspace;
+        if (!workspace) throw new DomainError('This document has no recorded workspace. Reopen it from your agent.', 404);
         const authorize = (key: string, fallback?: string) => authorizePath(workspace, browsingRoots.get(document.id) ?? [], param(key, fallback) ?? '');
         const comparison = (): ComparisonRequest => {
           const mode = param('mode', 'uncommitted'), base = param('base', document.baseBranch);

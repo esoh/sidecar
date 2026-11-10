@@ -1,4 +1,4 @@
-import { writeFile, readFile, mkdir, readdir } from 'node:fs/promises';
+import { writeFile, readFile, mkdir, readdir, realpath } from 'node:fs/promises';
 import { join, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { test, expect } from '@playwright/test';
@@ -770,6 +770,105 @@ test('Run scripts keeps standards mode and layout when comments precede the doct
   expect(await layout()).toEqual(before);
 });
 
+const linkPage = '<!doctype html><body><a id="code" href="src/a.ts:3">a.ts line 3</a> <a id="notes" href="./docs/notes.md">notes</a> <a id="anchor" href="#sec">section</a> '
+  + '<a id="ext" href="https://example.invalid/a.ts">external</a> <a id="script" href="javascript:void 0">script</a> <a id="out" href="/tmp/sidecar-outside-example.md">outside</a> <a id="root" href="README.md:2-4">readme</a> <a id="tel" href="tel:5551234">phone</a><h2 id="sec">Section</h2></body>';
+async function htmlLinks(page: import('@playwright/test').Page) {
+  const context = await htmlThreads(), dir = context.owner.directory;
+  await mkdir(join(dir, 'src'), { recursive: true }); await mkdir(join(dir, 'docs'), { recursive: true });
+  await writeFile(join(dir, 'src/a.ts'), Array.from({ length: 12 }, (_, i) => `export const line${i + 1} = ${i + 1};`).join('\n'));
+  await writeFile(join(dir, 'src/b.ts'), 'export const b = 1;\nexport const c = 2;\n');
+  await writeFile(join(dir, 'README.md'), 'one\ntwo\nthree\nfour\nfive\n');
+  await writeFile(join(dir, 'docs/notes.md'), '# Notes\n\nSee [b.ts](../src/b.ts:2).\n');
+  await writeFile(join(dir, 'page.html'), linkPage);
+  await page.goto(context.full);
+  const frame = page.frameLocator('.file-preview-frame');
+  await page.getByRole('checkbox', { name: 'Run scripts' }).check();
+  await expect(page.getByRole('button', { name: 'Pick element' })).toBeEnabled();
+  return { ...context, frame, windows: page.locator('.reference-window') };
+}
+
+test('HTML page file links open nested Sidecar file windows at their lines while the page stays open', async ({ page }) => {
+  const { frame, windows } = await htmlLinks(page);
+  await frame.locator('#code').click();
+  const code = page.getByRole('dialog', { name: /^File: .*src\/a\.ts$/ });
+  await expect(code).toBeVisible();
+  await expect(code.locator('.file-line-reference')).toContainText('Line 3');
+  await frame.locator('#notes').click();
+  const notes = page.getByRole('dialog', { name: /^File: .*docs\/notes\.md$/ });
+  await expect(notes.getByRole('heading', { name: 'Notes' })).toBeVisible();
+  // A link inside a file window opens another window; earlier windows and the page remain.
+  await notes.getByRole('link', { name: 'b.ts' }).click();
+  const nested = page.getByRole('dialog', { name: /^File: .*src\/b\.ts$/ });
+  await expect(nested.locator('.file-line-reference')).toContainText('Line 2');
+  await expect(windows).toHaveCount(3);
+  // A root-level file name with a line range is a file link, not a URI scheme.
+  await frame.locator('#root').click();
+  await expect(page.getByRole('dialog', { name: 'File: README.md', exact: true }).locator('.file-line-reference')).toContainText('Lines 2–4');
+  await expect(windows).toHaveCount(4);
+  await expect(page.locator('.file-preview-frame')).toBeVisible();
+  await expect(frame.locator('#code')).toBeVisible();
+  // Existing window controls: zoom, minimize and dock.
+  await nested.getByRole('button', { name: 'Zoom in', exact: true }).click();
+  await expect(nested.getByRole('button', { name: 'Reset content zoom', exact: true })).toBeEnabled();
+  await nested.getByRole('button', { name: 'Minimize window', exact: true }).click();
+  const dock = page.getByRole('region', { name: 'Window dock', exact: true });
+  await expect(dock.getByRole('button', { name: 'Expand dock', exact: true })).toHaveText('1 window');
+  await code.getByRole('button', { name: 'Dock window', exact: true }).click();
+  await expect(windows).toHaveCount(2);
+});
+
+test('HTML page links keep anchors and URLs native, refuse outside files, and yield to picking', async ({ page }) => {
+  const { frame, windows } = await htmlLinks(page);
+  // The bridge cancels only local file links; a test listener records and then stops every navigation.
+  const prevented = await frame.locator('body').evaluate(() => {
+    const seen: Record<string, boolean> = {};
+    addEventListener('click', event => { seen[(event.target as Element).id] = event.defaultPrevented; event.preventDefault(); });
+    for (const id of ['anchor', 'ext', 'script', 'tel']) document.getElementById(id)!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    return seen;
+  });
+  expect(prevented).toEqual({ anchor: false, ext: false, script: false, tel: false });
+  await frame.locator('#out').click();
+  await expect(page.getByRole('status').filter({ hasText: 'Only files inside this document’s workspace open from the page: /tmp/sidecar-outside-example.md' })).toBeVisible();
+  await expect(windows).toHaveCount(0);
+  await page.getByRole('button', { name: 'Pick element' }).click();
+  await frame.locator('#code').click();
+  await expect(page.locator('.sidebar .selection-badge')).toHaveText('page.html element');
+  await expect(page.locator('.sidebar .composer')).toContainText('src/a.ts:3');
+  await expect(windows).toHaveCount(0);
+});
+
+test('HTML page link messages need this frame, a valid local href and a user click', async ({ page }) => {
+  const { frame, windows, owner } = await htmlLinks(page);
+  const post = (href: string) => frame.locator('body').evaluate((_, href) => parent.postMessage({ sidecar: 'html-bridge', type: 'open-file', href }, '*'), href);
+  // Messages from any other source are ignored.
+  await page.evaluate(() => postMessage({ sidecar: 'html-bridge', type: 'open-file', href: 'src/a.ts' }, '*'));
+  // Hostile or oversized hrefs open nothing and grant no root.
+  for (const href of ['src/a.ts' + ' '.repeat(5000), 'javascript:alert(1)', '//evil.example/a.ts', 'file://host/etc/passwd', 'https://example.invalid/src/a.ts']) await post(href);
+  await post('../../../etc/passwd');
+  await expect(page.getByRole('status').filter({ hasText: 'Only files inside this document’s workspace' })).toBeVisible();
+  await page.waitForTimeout(300);
+  await expect(windows).toHaveCount(0);
+  await post('src/a.ts:2');
+  await expect(page.getByRole('dialog', { name: /^File: .*src\/a\.ts$/ }).locator('.file-line-reference')).toContainText('Line 2');
+  // A page script posting on its own, long after any click, opens nothing.
+  await writeFile(join(owner.directory, 'page.html'), linkPage + '<script>setTimeout(() => parent.postMessage({ sidecar: "html-bridge", type: "open-file", href: "src/b.ts" }, "*"), 6000)</script>');
+  await page.reload();
+  await page.getByRole('checkbox', { name: 'Run scripts' }).check();
+  await page.waitForTimeout(7000);
+  await expect(page.locator('.reference-window')).toHaveCount(0);
+});
+
+test('with Run scripts off, HTML page links open no file windows', async ({ page }) => {
+  const context = await htmlThreads(), dir = context.owner.directory;
+  await mkdir(join(dir, 'src'), { recursive: true });
+  await writeFile(join(dir, 'src/a.ts'), 'export const a = 1;\n');
+  await writeFile(join(dir, 'page.html'), linkPage);
+  await page.goto(context.full);
+  await page.frameLocator('.file-preview-frame').locator('#code').click();
+  await page.waitForTimeout(500);
+  await expect(page.locator('.reference-window')).toHaveCount(0);
+});
+
 test('HTML full page header fits a phone and Chat swaps with the page', async ({ page }) => {
   const { full } = await htmlThreads();
   await page.setViewportSize({ width: 390, height: 844 });
@@ -783,4 +882,302 @@ test('HTML full page header fits a phone and Chat swaps with the page', async ({
   await expect(frame).toBeHidden();
   await page.getByRole('button', { name: 'Hide conversations' }).click();
   await expect(frame).toBeVisible();
+});
+
+// A registered HTML file outside every workspace: the document itself, with no Markdown wrapper.
+async function standaloneHtml(owner = f.owners[1]) {
+  const directory = join(f.root, 'standalone');
+  await mkdir(directory, { recursive: true });
+  const path = join(directory, 'diagram.html');
+  await writeFile(path, `<!doctype html><title>Standalone &amp; diagram</title><body><p id="result">Static diagram</p><button id="go">Go</button><script>
+    document.querySelector('#result').textContent = 'Ran ' + location.hash;
+    try { document.cookie; } catch { document.body.dataset.isolated = 'yes'; }
+  </script></body>`);
+  const doc = await (await owner.agentCall('/agent/documents', { path, generated: false })).json();
+  return { owner, doc };
+}
+
+for (const access of ['direct', 'gateway', 'network'] as const) test(`a standalone HTML document opens in the full-page viewer, from the library and on reload, through ${access}`, async ({ page }) => {
+  const { owner, doc } = await standaloneHtml();
+  expect(doc.workspace).toBeUndefined();
+  let base = `${f.gateway.url}/a/${owner.alias}`;
+  if (access === 'direct') base = JSON.parse(await readFile(join(owner.directory, 'runtime.json'), 'utf8')).url;
+  const target = `${base}/?document=${doc.id}#part`;
+  if (access === 'network') {
+    const network = await (await f.view('/api/network', { enabled: true })).json();
+    base = `${network.urls[0]}/a/${owner.alias}`;
+    // A new browser logs in and returns to the exact document URL.
+    await page.goto(`${base}/?document=${doc.id}#part`);
+    await page.getByLabel('Passphrase', { exact: true }).fill(network.passphrase);
+    await page.getByRole('button', { name: 'Unlock', exact: true }).click();
+    expect(page.url()).toBe(`${base}/?document=${doc.id}#part`);
+  } else await page.goto(target);
+  const frame = page.frameLocator('.file-preview-frame'), toggle = page.getByRole('checkbox', { name: 'Run scripts', exact: true });
+  await expect(frame.locator('#result')).toHaveText('Static diagram');
+  await expect(toggle).not.toBeChecked();
+  await expect(page.locator('#document')).toHaveCount(0);
+  await expect(page).toHaveTitle('Standalone & diagram');
+  await expect(page.locator('.html-filename')).toHaveText('diagram.html');
+  await toggle.check();
+  await expect(frame.locator('#result')).toHaveText('Ran #part');
+  await expect(frame.locator('body')).toHaveAttribute('data-isolated', 'yes');
+  await page.reload();
+  await expect(toggle).not.toBeChecked();
+  await expect(frame.locator('#result')).toHaveText('Static diagram');
+  const library = page.getByRole('link', { name: 'All documents' });
+  await expect(library).toHaveAttribute('href', access === 'direct' ? '/?library=1' : `/a/${owner.alias}/`);
+  await library.click();
+  await page.getByRole('link', { name: /Standalone & diagram/ }).click();
+  await expect(frame.locator('#result')).toHaveText('Static diagram');
+  expect(new URL(page.url()).searchParams.get('document')).toBe(doc.id);
+  // The Markdown document of the same owner still renders as Markdown.
+  await page.goto(`${base}/?document=${owner.doc.id}`);
+  await expect(page.locator('#document')).toContainText('Own document.');
+  await expect(page.locator('.file-preview-frame')).toHaveCount(0);
+});
+
+test('a standalone HTML document keeps its own threads, selections, picked elements and revisions', async ({ page }) => {
+  const { owner, doc } = await standaloneHtml();
+  const post = async (path: string, body: object) => (await f.view(`/a/${owner.alias}${path}`, body)).json();
+  await post('/api/questions', { documentId: owner.doc.id, text: 'Markdown document question', clientMessageId: 'markdown' });
+  await page.goto(`${f.gateway.url}/a/${owner.alias}/?document=${doc.id}`);
+  const frame = page.frameLocator('.file-preview-frame'), ask = page.getByRole('button', { name: 'Ask about selection' }), pick = page.getByRole('button', { name: 'Pick element' });
+  await expect(frame.locator('#result')).toHaveText('Static diagram');
+  await expect(pick).toBeDisabled();
+  await page.getByRole('checkbox', { name: 'Run scripts' }).check();
+  await expect(pick).toBeEnabled();
+  await frame.locator('#result').evaluate(p => getSelection()!.selectAllChildren(p));
+  await ask.click();
+  await expect(page.locator('.sidebar .selection-badge')).toHaveText('diagram.html');
+  let sent = page.waitForRequest(request => request.url().endsWith('/api/questions'));
+  await page.getByLabel('Message', { exact: true }).fill('What does this say?');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  let body = (await sent).postDataJSON();
+  expect(body).toMatchObject({ documentId: doc.id, fileQuote: { path: doc.path, kind: 'html', exact: 'Ran ', selector: '#result' } });
+  const state = await (await f.view(`/a/${owner.alias}/api/state`)).json();
+  expect(state.threads[body.threadId]).toMatchObject({ documentId: doc.id });
+  expect(state.threads[body.threadId].file).toBeUndefined();
+  await pick.click();
+  await frame.locator('#go').click();
+  await expect(page.locator('.sidebar .selection-badge')).toHaveText('diagram.html element');
+  sent = page.waitForRequest(request => request.url().endsWith('/api/questions'));
+  await page.getByLabel('Message', { exact: true }).fill('And this button?');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  body = (await sent).postDataJSON();
+  expect(body.fileQuote).toMatchObject({ path: doc.path, kind: 'html', isElement: true, selector: '#go' });
+  await expect(page.locator('.sidebar')).not.toContainText('Markdown document question');
+  // An agent revision reloads the frame and keeps the Run scripts choice.
+  await writeFile(doc.path, '<!doctype html><title>Revised</title><p id="result">Revised</p><script>document.querySelector("#result").textContent = "Revised and ran"</script>');
+  await owner.agentCall('/agent/documents', { path: doc.path, generated: false });
+  await expect(frame.locator('#result')).toHaveText('Revised and ran');
+  await expect(page).toHaveTitle('Revised');
+  await expect(page.getByRole('checkbox', { name: 'Run scripts' })).toBeChecked();
+  await expect(pick).toBeEnabled();
+  // The owner's Markdown document lists only its own threads.
+  await page.goto(`${f.gateway.url}/a/${owner.alias}/?document=${owner.doc.id}`);
+  await page.getByRole('button', { name: 'Threads', exact: true }).click({ timeout: 1000 }).catch(() => undefined);
+  await expect(page.locator('.thread-row', { hasText: 'Markdown document question' })).toHaveCount(1);
+  await expect(page.locator('.thread-row', { hasText: 'What does this say?' })).toHaveCount(0);
+});
+
+test('a stopped agent’s standalone HTML document previews as a note, never as Markdown or a frame', async ({ page }) => {
+  const { owner, doc } = await standaloneHtml();
+  await owner.stop();
+  await page.goto(`${f.gateway.url}/a/${owner.alias}/`);
+  await page.getByRole('link', { name: /Standalone & diagram/ }).click();
+  await expect(page.getByText('This is an HTML document.')).toBeVisible();
+  await expect(page.locator('iframe')).toHaveCount(0);
+  await expect(page.getByText('Static diagram')).toHaveCount(0);
+  expect(new URL(page.url()).searchParams.get('document')).toBe(doc.id);
+});
+
+// The agent answers the thread's queued question with one marked reply carrying highlight metadata.
+async function agentReply(owner: (typeof f.owners)[number], threadId: string, highlights: unknown[], text: string) {
+  const state = await (await f.view(`/a/${owner.alias}/api/state`)).json();
+  const request = Object.values(state.requests as Record<string, { id: string; threadId: string; documentId: string; status: string }>).find(r => r.threadId === threadId && r.status === 'queued')!;
+  await owner.agentCall(`/agent/requests/${request.id}/prepare`, {});
+  const replied = await owner.agentCall('/agent/replies', { requestId: request.id, documentId: request.documentId, threadId, text: `[[sc-meta ${JSON.stringify({ highlights })}]]\n${text}` });
+  expect(replied.status).toBe(200);
+}
+
+test('agent HTML targets reveal on the full page only while unchanged and unique, without enabling scripts', async ({ page }) => {
+  const { full } = await htmlThreads();
+  const owner = f.owners[1], thread = '00000000-0000-4000-8000-000000000001';
+  await agentReply(owner, thread, [
+    { selector: 'p', exact: 'beta', label: 'Beta' }, { selector: '#go', exact: 'Go', element: true, label: 'Go button' },
+    { selector: '#title', exact: 'Missing', label: 'Missing' }, { selector: 'body > *', exact: 'Title', label: 'Ambiguous' },
+  ], 'See [beta](#selection-1) and [the button](#selection-2).');
+  await page.goto(full);
+  const frame = page.frameLocator('.file-preview-frame'), scripts = page.getByRole('checkbox', { name: 'Run scripts' });
+  const notice = page.locator('.html-notice'), overlay = frame.locator('div[data-sidecar-bridge]');
+  await expect(page.locator('.sidebar .selection-badge')).toHaveText(['Beta', 'Go button', 'Missing', 'Ambiguous']);
+  await page.getByRole('button', { name: 'Show on page: Beta' }).click();
+  await expect(notice).toHaveText('Turn on Run scripts to show this on the page.');
+  await expect(scripts).not.toBeChecked();
+  await scripts.check();
+  await expect(page.getByRole('button', { name: 'Pick element' })).toBeEnabled();
+  await page.locator('.message-bubble a', { hasText: 'beta' }).click();
+  await expect.poll(() => frame.locator('p').evaluate(() => getSelection()!.toString())).toBe('beta');
+  await expect(notice).toHaveCount(0);
+  await page.locator('.message-bubble a', { hasText: 'the button' }).click();
+  await expect(overlay).toHaveCSS('display', 'block');
+  await expect(notice).toHaveCount(0);
+  for (const name of ['Missing', 'Ambiguous']) {
+    await page.getByRole('button', { name: 'Show on page: Beta' }).click();
+    await expect(notice).toHaveCount(0);
+    await page.getByRole('button', { name: `Show on page: ${name}` }).click();
+    await expect(notice).toHaveText('This part of the page changed or was removed since it was attached.');
+  }
+  // An element target whose text changed is not revealed, even though its selector still matches.
+  await frame.locator('#go').evaluate(button => { button.textContent = 'Delete'; });
+  await page.getByRole('button', { name: 'Show on page: Beta' }).click();
+  await expect(notice).toHaveCount(0);
+  await page.getByRole('button', { name: 'Show on page: Go button' }).click();
+  await expect(notice).toHaveText('This part of the page changed or was removed since it was attached.');
+});
+
+test('agent HTML targets reveal on a standalone HTML document; Markdown highlights still paint the Markdown document', async ({ page }) => {
+  const { owner, doc } = await standaloneHtml();
+  const post = async (path: string, body: object) => (await f.view(`/a/${owner.alias}${path}`, body)).json();
+  // The registration's own thread is the one the page opens first.
+  const general = Object.values((await (await f.view(`/a/${owner.alias}/api/state`)).json()).threads as Record<string, { id: string; documentId: string }>).find(thread => thread.documentId === doc.id)!;
+  const html = await post('/api/questions', { documentId: doc.id, threadId: general.id, text: 'Where is the result?', clientMessageId: 'html' });
+  await agentReply(owner, html.threadId, [{ selector: '#result', exact: 'Ran', label: 'Result' }], 'It is [here](#selection-1).');
+  const markdownThread = Object.values((await (await f.view(`/a/${owner.alias}/api/state`)).json()).threads as Record<string, { id: string; documentId: string }>).find(thread => thread.documentId === owner.doc.id)!;
+  const markdown = await post('/api/questions', { documentId: owner.doc.id, threadId: markdownThread.id, text: 'Where is it said?', clientMessageId: 'markdown' });
+  await agentReply(owner, markdown.threadId, [{ selector: '#result', exact: 'Ran' }, { exact: 'Own document.' }], 'It is [here](#selection-2).');
+  await page.goto(`${f.gateway.url}/a/${owner.alias}/?document=${doc.id}`);
+  const frame = page.frameLocator('.file-preview-frame');
+  await page.getByRole('checkbox', { name: 'Run scripts' }).check();
+  await expect(page.getByRole('button', { name: 'Pick element' })).toBeEnabled();
+  await page.locator('.message-bubble a', { hasText: 'here' }).click();
+  await expect.poll(() => frame.locator('#result').evaluate(() => getSelection()!.toString())).toBe('Ran');
+  await expect(page.locator('.html-notice')).toHaveCount(0);
+  // On a plain Markdown thread the HTML target is dropped and the Markdown selection keeps its own link.
+  await page.goto(`${f.gateway.url}/a/${owner.alias}/?document=${owner.doc.id}`);
+  await expect(page.locator('#document mark.annotation-highlight')).toHaveText('Own document.');
+  await expect(page.getByRole('button', { name: /^Show on page/ })).toHaveCount(0);
+  await page.locator('.message-bubble a', { hasText: 'here' }).click();
+  await expect(page.locator('#document mark.annotation-highlight')).toBeFocused();
+});
+
+test('an agent HTML target clicked from the Markdown document opens its full page and reveals there after Run scripts', async ({ page, context }) => {
+  const { base, owner } = await htmlThreads();
+  const thread = '00000000-0000-4000-8000-000000000001';
+  await agentReply(owner, thread, [{ selector: 'p', exact: 'beta', label: 'Beta' }, { selector: '#go', exact: 'Go', element: true, label: 'Go button' }], 'See [the button](#selection-2).');
+  await page.goto(`${base}/?document=${owner.doc.id}`);
+  await page.getByRole('button', { name: 'Threads', exact: true }).click({ timeout: 1000 }).catch(() => undefined);
+  await page.locator('.thread-row', { has: page.locator('.row-tag', { hasText: 'page.html' }) }).click();
+  for (const [open, check] of [
+    [() => page.getByRole('button', { name: 'Show on page: Beta' }).click(), async (full: import('@playwright/test').Page) => {
+      await expect.poll(() => full.frameLocator('.file-preview-frame').locator('p').evaluate(() => getSelection()!.toString())).toBe('beta');
+    }],
+    [() => page.locator('.message-bubble a', { hasText: 'the button' }).click(), async (full: import('@playwright/test').Page) => {
+      await expect(full.frameLocator('.file-preview-frame').locator('div[data-sidecar-bridge]')).toHaveCSS('display', 'block');
+    }],
+  ] as const) {
+    const opened = context.waitForEvent('page');
+    await open();
+    const full = await opened;
+    try {
+      // The Markdown document stays put; no static file window replaces the target.
+      await expect(page.locator('#document')).toBeVisible();
+      await expect(page.getByRole('dialog', { name: /^File: / })).toHaveCount(0);
+      const url = new URL(full.url());
+      expect([url.searchParams.get('view'), url.searchParams.get('path'), url.searchParams.get('document')]).toEqual(['html', 'page.html', owner.doc.id]);
+      const scripts = full.getByRole('checkbox', { name: 'Run scripts' });
+      await expect(full.locator('.html-notice')).toHaveText('Turn on Run scripts to show this on the page.');
+      await expect(scripts).not.toBeChecked();
+      await expect(full.locator('.sidebar')).toContainText('Question about the page');
+      await scripts.check();
+      await check(full);
+      await expect(full.locator('.html-notice')).toHaveCount(0);
+    } finally { await full.close(); }
+  }
+});
+
+test('a standalone HTML document opens its page file links with a workspace and explains refusal without one', async ({ page }) => {
+  const owner = f.owners[1], directory = join(f.root, 'linked');
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, 'notes.md'), '# Notes');
+  for (const [name, workspace] of [['with.html', directory], ['without.html', undefined]] as const) {
+    const path = join(directory, name);
+    await writeFile(path, '<!doctype html><body><a id="notes" href="notes.md">Notes</a></body>');
+    const doc = await (await owner.agentCall('/agent/documents', { path, generated: false, ...(workspace ? { workspace } : {}) })).json();
+    await page.goto(`${f.gateway.url}/a/${owner.alias}/?document=${doc.id}`);
+    await page.getByRole('checkbox', { name: 'Run scripts' }).check();
+    await expect(page.getByRole('button', { name: 'Pick element' })).toBeEnabled();
+    await page.frameLocator('.file-preview-frame').locator('#notes').click();
+    if (workspace) await expect(page.getByRole('dialog', { name: 'File: notes.md', exact: true }).getByRole('heading', { name: 'Notes' })).toBeVisible();
+    else {
+      await expect(page.locator('.html-notice')).toHaveText('Files open from the page only when this document has a workspace. Reopen it from your agent with one.');
+      await expect(page.getByRole('dialog', { name: /^File: / })).toHaveCount(0);
+    }
+    await expect(page.locator('.file-preview-frame')).toBeVisible();
+  }
+});
+
+test('HTML selection modes are icon-only toggles with tooltips, accessible names and a clear active mode', async ({ page }) => {
+  const { full } = await htmlThreads();
+  await page.goto(full);
+  const modes = page.getByRole('group', { name: 'Selection mode' });
+  const text = modes.getByRole('button', { name: 'Select text' }), pick = modes.getByRole('button', { name: 'Pick element' }), ask = page.getByRole('button', { name: 'Ask about selection' });
+  for (const button of [text, pick, ask]) { await expect(button).toHaveText(''); await expect(button).toBeDisabled(); await expect(button).toHaveAttribute('title', /Run scripts/); }
+  await page.getByRole('checkbox', { name: 'Run scripts' }).check();
+  await expect(text).toHaveAttribute('aria-pressed', 'true');
+  await expect(pick).toHaveAttribute('aria-pressed', 'false');
+  await expect(pick).toHaveAttribute('title', /^Pick element/);
+  await expect(text).toHaveAttribute('title', /^Select text/);
+  await pick.click();
+  await expect(pick).toHaveAttribute('aria-pressed', 'true');
+  await expect(text).toHaveAttribute('aria-pressed', 'false');
+  await text.click();
+  await expect(text).toHaveAttribute('aria-pressed', 'true');
+  await expect(pick).toHaveAttribute('aria-pressed', 'false');
+  // Selected text still attaches through the labeled Ask button, by keyboard too.
+  await page.frameLocator('.file-preview-frame').locator('p').evaluate(p => getSelection()!.selectAllChildren(p));
+  await expect(ask).toBeEnabled();
+  await ask.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.sidebar .selection-badge')).toHaveText('page.html');
+});
+
+test('an outside-workspace HTML target opens its tab within the click, survives a slow root grant, and offers a link when blocked', async ({ page, context }) => {
+  const owner = f.owners[1], outside = join(f.root, 'outside-page');
+  await mkdir(outside, { recursive: true });
+  await writeFile(join(outside, 'page.html'), pageHtml);
+  const file = join(await realpath(outside), 'page.html'), thread = '00000000-0000-4000-8000-000000000003';
+  await f.view(`/a/${owner.alias}/api/threads`, { id: thread, documentId: owner.doc.id, file });
+  await f.view(`/a/${owner.alias}/api/questions`, { documentId: owner.doc.id, threadId: thread, text: 'Outside page question', clientMessageId: 'outside' });
+  await agentReply(owner, thread, [{ selector: 'p', exact: 'beta', label: 'Beta' }], 'See [beta](#selection-1).');
+  let granted = 0;
+  await page.route('**/api/files/root', async route => { await new Promise(resolve => setTimeout(resolve, 1500)); await route.continue(); granted++; });
+  await page.goto(`${f.gateway.url}/a/${owner.alias}/?document=${owner.doc.id}`);
+  await page.getByRole('button', { name: 'Threads', exact: true }).click({ timeout: 1000 }).catch(() => undefined);
+  await page.locator('.thread-row', { has: page.locator('.row-tag', { hasText: 'page.html' }) }).click();
+  const reveals = async (full: import('@playwright/test').Page) => {
+    try {
+      await full.waitForURL(/view=html/);
+      expect(new URL(full.url()).searchParams.get('directory')).toBe(await realpath(outside));
+      await full.getByRole('checkbox', { name: 'Run scripts' }).check();
+      await expect.poll(() => full.frameLocator('.file-preview-frame').locator('p').evaluate(() => getSelection()!.toString())).toBe('beta');
+      expect(await full.evaluate(() => window.opener)).toBeNull();
+    } finally { await full.close(); }
+  };
+  // The tab exists before the delayed grant answers, then navigates to the granted page.
+  let opened = context.waitForEvent('page');
+  await page.getByRole('button', { name: 'Show on page: Beta' }).click();
+  const tab = await opened;
+  expect(granted).toBe(0);
+  await reveals(tab);
+  expect(granted).toBe(1);
+  // A blocked tab is reported with a real link instead of failing silently.
+  await page.evaluate(() => { window.open = () => null; });
+  await page.getByRole('button', { name: 'Show on page: Beta' }).click();
+  const fallback = page.getByRole('alert').getByRole('link', { name: 'Open the HTML page' });
+  await expect(fallback).toBeVisible();
+  opened = context.waitForEvent('page');
+  await fallback.click();
+  await reveals(await opened);
+  await expect(fallback).toHaveCount(0);
 });

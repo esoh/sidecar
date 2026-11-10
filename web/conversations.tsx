@@ -435,7 +435,7 @@ export function ConversationSidebar({
   onGoToMessage: (messageId: string) => void;
   messageJump: { id: string; sequence: number } | null;
   onQuoteMessage: (quote: MessageQuote) => void;
-  onOpenFileQuote: (quote: FileQuote) => void;
+  onOpenFileQuote: (quote: FileQuote, revealId?: string) => void;
   onUnreadChange: (count: number) => void;
   threadFile?: string;
 }) {
@@ -787,7 +787,7 @@ export function ConversationSidebar({
                 <span className="queue-preview" title={message.text}>{messagePreview(message.text)}</span>
                 {message.selections?.map(selection => <button key={selection.id} data-selection-id={selection.id} aria-label="Show queued selection" title={selection.quote.exact} onClick={() => passageIssue(selection.quote) ? showOriginal(selection.id) : showPassage(selection)}><Icon name="annotation" /></button>)}
                 {message.messageQuote && <button aria-label="Go to queued quote" title={message.messageQuote.exact} onClick={() => onGoToMessage(message.messageQuote!.messageId)}><Icon name="comment" /></button>}
-                {message.fileQuote && <button aria-label={`Open queued file: ${fileQuoteLabel(message.fileQuote)}`} title={message.fileQuote.exact} onClick={() => onOpenFileQuote(message.fileQuote!)}><Icon name="file" /></button>}
+                {message.fileQuote && <button aria-label={`Open queued file: ${fileQuoteLabel(message.fileQuote)}`} title={message.fileQuote.exact} onClick={() => onOpenFileQuote(message.fileQuote!, message.id)}><Icon name="file" /></button>}
               </li>)}
             </ol>
           </section>}
@@ -857,7 +857,7 @@ export type MessageContentProps = {
   message: Message; documentId: string; threadId: string; activeSelectionId: string | null;
   passageIssue: (quote: Quote) => string | null; showPassage: (selection: SavedSelection) => void; showOriginal: (id: string) => void;
   onQuoteMessage: (quote: MessageQuote) => void; onGoToMessage: (id: string) => void;
-  onOpenFileQuote: (quote: FileQuote) => void;
+  onOpenFileQuote: (quote: FileQuote, revealId?: string) => void;
 };
 export function MessageContent({ message, documentId, threadId, activeSelectionId, passageIssue, showPassage, showOriginal, onQuoteMessage, onOpenFileQuote, onGoToMessage, prefix = 'message' }: MessageContentProps & { prefix?: string }) {
   const review = useProposalContext(), proposals = review?.proposals.filter(p => p.messageId === message.id) ?? [];
@@ -872,18 +872,24 @@ export function MessageContent({ message, documentId, threadId, activeSelectionI
   return <>
     {message.fileQuote && <div className="message-selection file-quote quote">
       <span className="selection-badge text-[9px] font-semibold tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary" title={message.fileQuote.path}>{fileQuoteLabel(message.fileQuote)}</span>
-      <button aria-label={`Open quoted file: ${fileQuoteLabel(message.fileQuote)}`} onClick={() => onOpenFileQuote(message.fileQuote!)}><span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={message.fileQuote.exact}>{message.fileQuote.exact}</span><span className="passage-arrow"><Icon name="arrowUpRight" /></span></button>
+      <button aria-label={`Open quoted file: ${fileQuoteLabel(message.fileQuote)}`} onClick={() => onOpenFileQuote(message.fileQuote!, message.id)}><span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={message.fileQuote.exact}>{message.fileQuote.exact}</span><span className="passage-arrow"><Icon name="arrowUpRight" /></span></button>
     </div>}
     {message.messageQuote && <div className="message-selection message-quote quote">
       <span className="selection-badge text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary">quote</span>
       <button aria-label="Go to quoted message" onClick={() => onGoToMessage(message.messageQuote!.messageId)}><span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={message.messageQuote.exact}>{message.messageQuote.exact}</span><span className="passage-arrow"><Icon name="arrowUpRight" /></span></button>
     </div>}
     <ReplyProposalActions proposals={proposals} />
+    {message.fileSelections?.map(selection => <div key={selection.id} className="message-selection file-quote quote" data-selection-id={selection.id}>
+      <span className="selection-badge text-[9px] font-semibold tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary" title={selection.fileQuote.path}>{selection.label ?? fileQuoteLabel(selection.fileQuote)}</span>
+      <button aria-label={`Show on page: ${selection.label ?? selection.fileQuote.exact}`} onClick={() => onOpenFileQuote(selection.fileQuote, selection.id)}><span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={selection.fileQuote.exact}>{selection.fileQuote.exact}</span><span className="passage-arrow"><Icon name="arrowUpRight" /></span></button>
+    </div>)}
     {message.selections?.map(selection => {
       const proposal = proposals.find(p => p.selectionId === selection.id);
       return <MessageSelection key={selection.id} documentId={documentId} messageId={message.id} threadId={threadId} selection={selection} isActive={selection.id === activeSelectionId} issue={passageIssue(selection.quote)} showPassage={() => showPassage(selection)} showOriginal={() => showOriginal(selection.id)}>{proposal && <ProposalCard proposal={proposal} selection={selection} />}</MessageSelection>;
     })}
     <div className="message-bubble" onMouseUp={event => capture(event.currentTarget)} onTouchEnd={event => capture(event.currentTarget)} onKeyUp={event => { if (event.key === 'Shift' || event.key.startsWith('Arrow')) capture(event.currentTarget); }}><MarkdownDocument markdown={message.text} documentId={documentId} anchorPrefix={`${prefix}-${message.id}-`} onSelectionLink={slug => {
+      const target = message.fileSelections?.find(selection => selection.slug === slug);
+      if (target) { onOpenFileQuote(target.fileQuote, target.id); return true; }
       const selection = message.selections?.find(selection => selection.slug === slug);
       if (!selection) return false;
       if (review?.open(selection.id, document.activeElement instanceof HTMLElement ? document.activeElement : null)) return true;

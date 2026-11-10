@@ -1,10 +1,13 @@
 export type Quote = { exact: string; prefix: string; suffix: string; start: number; end: number; version: string; sentence?: string; isPositionVerified?: boolean };
 export type MessageQuote = { threadId: string; messageId: string; exact: string };
 export type FileQuote = { path: string; kind: 'doc' | 'code' | 'html'; exact: string; startLine?: number; endLine?: number; selector?: string; isElement?: true; fingerprint?: string };
-export function isFileQuote(value: unknown): value is FileQuote {
+// A registered .html/.htm file is a standalone HTML document; every other file is Markdown.
+export const isHtmlPath = (path: string) => /\.html?$/i.test(path);
+// An agent-authored HTML element target has no fingerprint: the viewer checks its text instead.
+export function isFileQuote(value: unknown, isAgentTarget = false): value is FileQuote {
   return isObject(value) && string(value.path) && value.path.startsWith('/') && value.path.length <= 4096 && !/[\x00-\x1f]/.test(value.path)
     && (value.kind === 'doc' || value.kind === 'code' || value.kind === 'html') && string(value.exact) && !!value.exact.trim() && value.exact.length <= 128 * 1024
-    && (value.kind === 'html' ? isSelector(value.selector) && value.startLine === undefined && value.endLine === undefined && (value.isElement === true ? string(value.fingerprint) && /^\d{1,9}:[0-9a-f]{8}$/.test(value.fingerprint) : value.isElement === undefined && value.fingerprint === undefined)
+    && (value.kind === 'html' ? isSelector(value.selector) && value.startLine === undefined && value.endLine === undefined && (value.isElement === true ? (isAgentTarget ? value.fingerprint === undefined : string(value.fingerprint) && /^\d{1,9}:[0-9a-f]{8}$/.test(value.fingerprint)) : value.isElement === undefined && value.fingerprint === undefined)
       : value.selector === undefined && value.isElement === undefined && value.fingerprint === undefined)
     && ((value.startLine === undefined && value.endLine === undefined) || (number(value.startLine) && Number.isInteger(value.startLine) && value.startLine > 0 && number(value.endLine) && Number.isInteger(value.endLine) && value.endLine >= value.startLine));
 }

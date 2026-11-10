@@ -1,6 +1,8 @@
 import { isProposalInput, type ProposalInput } from './proposals.ts';
+import { isSelector } from './quote.ts';
 
-export type HighlightInput = { exact: string; prefix?: string; suffix?: string; label?: string; proposal?: ProposalInput; proposalError?: string };
+// A highlight with a selector targets the thread's HTML page: text inside that unique element, or the element itself.
+export type HighlightInput = { exact: string; prefix?: string; suffix?: string; label?: string; proposal?: ProposalInput; proposalError?: string; selector?: string; element?: true };
 export type ReplyMetadata = { threadTitle?: string; highlights?: HighlightInput[]; isError?: boolean };
 
 const prefixes = ['[[sidecar-meta ', '[[sc-meta '];
@@ -9,7 +11,8 @@ const shortLabel = (value: unknown): value is string => typeof value === 'string
 function highlight(value: unknown): value is HighlightInput {
   return object(value) && typeof value.exact === 'string' && value.exact.trim().length > 0 && value.exact.length <= 16384 &&
     ['prefix', 'suffix'].every(key => value[key] === undefined || (typeof value[key] === 'string' && value[key].length <= 512)) &&
-    (value.label === undefined || shortLabel(value.label));
+    (value.label === undefined || shortLabel(value.label)) &&
+    (value.selector === undefined ? value.element === undefined : isSelector(value.selector) && (value.element === undefined || value.element === true) && value.prefix === undefined && value.suffix === undefined && value.proposal === undefined);
 }
 
 // One optional JSON line at the start of a marked reply. Partial headers never flash in the viewer.
@@ -30,6 +33,7 @@ export function parseReply(text: string): { text: string; metadata: ReplyMetadat
         exact: h.exact,
         ...(h.prefix !== undefined ? { prefix: h.prefix } : {}), ...(h.suffix !== undefined ? { suffix: h.suffix } : {}),
         ...(h.label !== undefined ? { label: h.label } : {}),
+        ...(h.selector !== undefined ? { selector: h.selector, ...(h.element ? { element: true as const } : {}) } : {}),
         ...(h.proposal === undefined ? {} : isProposalInput(h.proposal) ? { proposal: {
           before: h.proposal.before, after: h.proposal.after,
           ...(h.proposal.prefix !== undefined ? { prefix: h.proposal.prefix } : {}), ...(h.proposal.suffix !== undefined ? { suffix: h.proposal.suffix } : {}),

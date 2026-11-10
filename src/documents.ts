@@ -4,6 +4,7 @@ import { open, realpath, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import MarkdownIt from 'markdown-it';
 import { DomainError } from './store.ts';
+import { isHtmlPath } from './quote.ts';
 
 const renderer = new MarkdownIt({ html: false });
 renderer.validateLink = (link: string) => {
@@ -23,8 +24,21 @@ export async function readSourceFile(path: string): Promise<SourceFile> {
     return { path: resolve(path), bytes, markdown, version: createHash('sha256').update(bytes).digest('hex'), identity: { dev: identity.dev, ino: identity.ino, mode: identity.mode } };
   } finally { await file.close(); }
 }
+export { isHtmlPath };
+const entities: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+function decodeEntities(text: string) {
+  return text.replace(/&(?:#(\d{1,7})|#x([0-9a-f]{1,6})|(\w+));/gi, (match, decimal?: string, hex?: string, name?: string) => {
+    const code = decimal ? Number(decimal) : hex ? parseInt(hex, 16) : NaN;
+    return name ? entities[name.toLowerCase()] ?? match : code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : match;
+  });
+}
 export async function readDocument(path: string) {
   const { markdown, version } = await readSourceFile(path);
+  if (isHtmlPath(path)) {
+    // The source is kept for snapshots and agent context only; the viewer renders it in its sandboxed frame.
+    const title = decodeEntities(/<title[^>]*>([^<]*)<\/title>/i.exec(markdown)?.[1] ?? '').replace(/\s+/g, ' ').trim();
+    return { markdown, html: '', heading: title || null, version };
+  }
   const tokens = renderer.parse(markdown, {});
   const headingIndex = tokens.findIndex(token => token.type === 'heading_open');
   const inline = headingIndex >= 0 ? tokens[headingIndex + 1] : undefined;

@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import { isSelector } from '../src/quote.ts';
 import { Icon } from './conversations.tsx';
-import { isGateway, viewerBase, viewerPath } from './viewer-path.ts';
+import { isGateway, libraryPath, viewerBase, viewerPath } from './viewer-path.ts';
+export const revealParameter = () => new URLSearchParams(location.search).get('reveal');
 
+export { isHtmlPath } from '../src/quote.ts';
 export type HtmlFile = { documentId: string; path: string; root?: string; fragment?: string };
 const scriptWarning = 'Only enable for trusted HTML. Blocks external resources and viewer access, but scripts can navigate their own frame.';
 
@@ -10,8 +12,9 @@ function fileQuery({ documentId, path, root }: HtmlFile) {
   return new URLSearchParams({ document: documentId, path, ...(root ? { directory: root } : {}) });
 }
 
-export function htmlFullPageUrl(file: HtmlFile) {
-  return viewerPath(`/?view=html&${fileQuery(file)}`) + (file.fragment ?? '');
+// reveal names a saved HTML target (a user message or an agent selection) to show once Run scripts is on.
+export function htmlFullPageUrl(file: HtmlFile, reveal?: string) {
+  return viewerPath(`/?view=html&${fileQuery(file)}${reveal ? `&reveal=${encodeURIComponent(reveal)}` : ''}`) + (file.fragment ?? '');
 }
 
 // Only the full-page view's file; null when the URL names no file or a gateway page lacks an owner-scoped viewer path.
@@ -33,7 +36,7 @@ export function RunHtmlScripts({ enabled, onChange }: { enabled: boolean; onChan
   return <label className="file-diff-toggle" title={scriptWarning}><input type="checkbox" checked={enabled} onChange={event => onChange(event.target.checked)} />Run scripts</label>;
 }
 
-export type BridgeMessage = { type: 'ready' } | { type: 'selection'; exact: string; selector: string } | { type: 'pick'; exact: string; selector: string; fingerprint: string } | { type: 'picker'; on: false } | { type: 'revealed'; ok: boolean };
+export type BridgeMessage = { type: 'ready' } | { type: 'selection'; exact: string; selector: string } | { type: 'pick'; exact: string; selector: string; fingerprint: string } | { type: 'picker'; on: false } | { type: 'revealed'; ok: boolean } | { type: 'open-file'; href: string };
 const isExact = (v: unknown): v is string => typeof v === 'string' && v.length <= 128 * 1024;
 // Scripted pages could forge these; Run scripts is the trusted opt-in and the parent supplies the file path itself.
 export function useHtmlBridge(frame: RefObject<HTMLIFrameElement | null>, onMessage: (message: BridgeMessage) => void) {
@@ -48,6 +51,7 @@ export function useHtmlBridge(frame: RefObject<HTMLIFrameElement | null>, onMess
       else if (data.type === 'pick' && 'exact' in data && 'selector' in data && 'fingerprint' in data && isExact(data.exact) && isSelector(data.selector) && typeof data.fingerprint === 'string' && /^\d{1,9}:[0-9a-f]{8}$/.test(data.fingerprint)) latest.current({ type: 'pick', exact: data.exact, selector: data.selector, fingerprint: data.fingerprint });
       else if (data.type === 'picker' && 'on' in data && data.on === false) latest.current({ type: 'picker', on: false });
       else if (data.type === 'revealed' && 'ok' in data && typeof data.ok === 'boolean') latest.current({ type: 'revealed', ok: data.ok });
+      else if (data.type === 'open-file' && 'href' in data && typeof data.href === 'string' && data.href.length <= 4096 && !/[\x00-\x1f]/.test(data.href)) latest.current({ type: 'open-file', href: data.href });
     };
     window.addEventListener('message', listen);
     return () => window.removeEventListener('message', listen);
@@ -73,16 +77,21 @@ export function HtmlFileViewer({ file, areScriptsEnabled, bridge, frameRef }: { 
 }
 
 const needScripts = 'Turn on Run scripts to select or pick elements';
-export function HtmlControls({ file, areScriptsEnabled, onScripts, isReady, isPicking, onPick, canAsk, onAsk }: {
-  file: HtmlFile; areScriptsEnabled: boolean; onScripts: (enabled: boolean) => void; isReady: boolean; isPicking: boolean; onPick: () => void; canAsk: boolean; onAsk: () => void;
+export function HtmlControls({ file, isDocument, areScriptsEnabled, onScripts, isReady, isPicking, onPick, canAsk, onAsk }: {
+  file: HtmlFile; isDocument: boolean; areScriptsEnabled: boolean; onScripts: (enabled: boolean) => void; isReady: boolean; isPicking: boolean; onPick: () => void; canAsk: boolean; onAsk: () => void;
 }) {
   const title = isReady ? '' : needScripts;
   return <>
     {/* Only the existing owner-scoped viewer route is a return destination; query values never select a host or route. */}
-    <a className="html-back sidebar-toggle" href={viewerPath(`/?document=${encodeURIComponent(file.documentId)}`)} aria-label="Back to document" title="Back to document"><Icon name="back" /><span>Back to document</span></a>
+    {isDocument ? <a className="html-back sidebar-toggle" href={isGateway ? viewerPath('/') : libraryPath()} aria-label="All documents" title="All documents"><Icon name="back" /><span>All documents</span></a>
+      : <a className="html-back sidebar-toggle" href={viewerPath(`/?document=${encodeURIComponent(file.documentId)}`)} aria-label="Back to document" title="Back to document"><Icon name="back" /><span>Back to document</span></a>}
     <code className="html-filename" title={file.path}>{file.path.split('/').pop()}</code>
     <RunHtmlScripts enabled={areScriptsEnabled} onChange={onScripts} />
-    <button className="sidebar-toggle html-action" aria-label="Pick element" aria-pressed={isPicking} disabled={!isReady} title={title || 'Pick an element to ask about'} onClick={onPick}><Icon name="target" /><span>Pick element</span></button>
-    <button className="sidebar-toggle html-action" aria-label="Ask about selection" disabled={!isReady || !canAsk} title={title || (canAsk ? 'Ask about the selected text' : 'Select text in the page first')} onClick={onAsk}><Icon name="comment" /><span>Ask about selection</span></button>
+    {/* Icon-only mode switch: select text (the default) or pick an element; labels live in tooltips and accessible names. */}
+    <div className="html-modes" role="group" aria-label="Selection mode">
+      <button className="sidebar-toggle html-action" aria-label="Select text" aria-pressed={isReady && !isPicking} disabled={!isReady} title={title || 'Select text: drag across the page, then ask about it'} onClick={() => { if (isPicking) onPick(); }}><Icon name="annotation" /></button>
+      <button className="sidebar-toggle html-action" aria-label="Pick element" aria-pressed={isPicking} disabled={!isReady} title={title || 'Pick element: click a part of the page to ask about it'} onClick={onPick}><Icon name="target" /></button>
+    </div>
+    <button className="sidebar-toggle html-action" aria-label="Ask about selection" disabled={!isReady || !canAsk} title={title || (canAsk ? 'Ask about the selected text' : 'Select text in the page first')} onClick={onAsk}><Icon name="comment" /></button>
   </>;
 }
