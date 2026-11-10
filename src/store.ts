@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile, rename, unlink } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
-import { isQuote, isMessageQuote, isFileQuote, type FileQuote, type MessageQuote, type Quote } from './quote.ts';
+import { isQuote, isMessageQuote, isFileQuote, isHtmlPath, type FileQuote, type MessageQuote, type Quote } from './quote.ts';
 import type { ReplyMetadata } from './reply-metadata.ts';
 import { isPinStyle, type PinStyle } from './pin-style.ts';
 import { isPreparedProposal, isProposal, isProposalWrite, type PreparedProposal, type Proposal, type ProposalWrite } from './proposals.ts';
@@ -13,7 +13,9 @@ export { isQuote, type Quote } from './quote.ts';
 export type RepoInfo = { display: string; branch?: string };
 export type DocumentRecord = { id: string; path: string; generated: boolean; providedTitle?: string; userTitle?: string; repoInfo?: RepoInfo; workspace?: string; baseBranch?: string };
 export type MessageSelection = { id: string; slug: string; quote: Quote; isVisible: boolean; label?: string; proposalError?: string };
-export type Message = { id: string; role: 'user' | 'agent'; text: string; requestId: string; createdAt: number; selections?: MessageSelection[]; messageQuote?: MessageQuote; fileQuote?: FileQuote; isPinned?: boolean; pinStyle?: PinStyle };
+// An agent-authored target on the thread's HTML page; it shares selection-N slugs with Markdown selections.
+export type FileSelection = { id: string; slug: string; label?: string; fileQuote: FileQuote };
+export type Message = { id: string; role: 'user' | 'agent'; text: string; requestId: string; createdAt: number; selections?: MessageSelection[]; fileSelections?: FileSelection[]; messageQuote?: MessageQuote; fileQuote?: FileQuote; isPinned?: boolean; pinStyle?: PinStyle };
 export type Thread = { id: string; documentId: string; title?: string; file?: string; createdAt?: number; isResolved: boolean; messages: Message[] };
 export type RequestRecord = {
   id: string; documentId: string; threadId: string; text: string; clientMessageId: string;
@@ -51,7 +53,14 @@ export function isRepoInfo(v: unknown): v is RepoInfo {
 function isDocument(v: unknown): v is DocumentRecord {
   return isObject(v) && string(v.id) && string(v.path) && isAbsolute(v.path) && typeof v.generated === 'boolean' && optionalString(v.providedTitle) && optionalString(v.userTitle) && (v.repoInfo === undefined || isRepoInfo(v.repoInfo)) && (v.workspace === undefined || (string(v.workspace) && isAbsolute(v.workspace))) && (v.baseBranch === undefined || isBranchName(v.baseBranch));
 }
+function isFileSelections(v: Record<string, unknown>): boolean {
+  if (v.fileSelections === undefined) return true;
+  const all = [...(Array.isArray(v.selections) ? v.selections : []), ...(Array.isArray(v.fileSelections) ? v.fileSelections : [])];
+  return v.role === 'agent' && Array.isArray(v.fileSelections) && all.length <= 20 && v.fileSelections.every(s => isObject(s) && string(s.id) && string(s.slug) && /^selection-[1-9][0-9]*$/.test(s.slug) && optionalString(s.label) && isFileQuote(s.fileQuote, true) && s.fileQuote.kind === 'html')
+    && new Set(all.map(s => s.id)).size === all.length && new Set(all.map(s => s.slug)).size === all.length;
+}
 function isMessage(v: unknown): v is Message {
+  if (isObject(v) && !isFileSelections(v)) return false;
   if (isObject(v) && v.fileQuote !== undefined && (!isFileQuote(v.fileQuote) || v.role !== 'user' || v.messageQuote !== undefined || (Array.isArray(v.selections) && v.selections.length > 0))) return false;
   if (isObject(v) && v.messageQuote !== undefined && (!isMessageQuote(v.messageQuote) || v.role !== 'user' || (Array.isArray(v.selections) && v.selections.length > 0))) return false;
   return isMessageFields(v) && !('quote' in v) && (v.selections === undefined || (Array.isArray(v.selections) && v.selections.length <= (v.role === 'user' ? 1 : 20) && v.selections.every(s => isObject(s) && string(s.id) && string(s.slug) && /^selection-[1-9][0-9]*$/.test(s.slug) && isQuote(s.quote) && typeof s.isVisible === 'boolean' && optionalString(s.label) && (s.proposalError === undefined || (string(s.proposalError) && s.proposalError.length <= 160))) && new Set(v.selections.map(s => s.id)).size === v.selections.length && new Set(v.selections.map(s => s.slug)).size === v.selections.length));
@@ -216,7 +225,8 @@ export function submit(state: State, input: SubmitInput): RequestRecord {
   if ([input.quote, input.messageQuote, input.fileQuote].filter(value => value !== undefined).length > 1) throw new DomainError('Attach only one selection per message');
   if (input.fileQuote !== undefined) {
     if (!isFileQuote(input.fileQuote)) throw new DomainError('Invalid file quote');
-    if (!document.workspace) throw new DomainError('This document has no workspace');
+    // A standalone HTML document quotes its own registered file, which needs no workspace.
+    if (!document.workspace && input.fileQuote.path !== document.path) throw new DomainError('This document has no workspace');
     // A quote may come from an explicitly chosen browsing root. It is context, not authority to read/edit a file.
   }
   if (input.messageQuote !== undefined) {
@@ -310,19 +320,27 @@ export function reply(state: State, input: ReplyInput): void {
   }
   const thread = get(state.threads, request.threadId), id = randomUUID();
   if (!thread.title && input.metadata?.threadTitle) nameThread(state, thread.id, input.metadata.threadTitle);
-  const selections = input.metadata?.highlights?.map((h, index): MessageSelection => {
+  // HTML targets belong to the page this thread is about; a plain Markdown thread has none, so they are dropped.
+  const document = get(state.documents, request.documentId), page = thread.file ?? (isHtmlPath(document.path) ? document.path : undefined);
+  const selections: MessageSelection[] = [], fileSelections: FileSelection[] = [];
+  for (const [index, h] of (input.metadata?.highlights ?? []).entries()) {
+    const base = { id: index ? `${id}-${index + 1}` : id, slug: `selection-${index + 1}`, ...(h.label ? { label: h.label.trim() } : {}) };
+    if (h.selector !== undefined) {
+      if (page) fileSelections.push({ ...base, fileQuote: { path: page, kind: 'html', exact: h.exact, selector: h.selector, ...(h.element ? { isElement: true } : {}) } });
+      continue;
+    }
     if (input.selectionVersion === undefined) throw new DomainError('Document version required for highlights');
-    return { id: index ? `${id}-${index + 1}` : id, slug: `selection-${index + 1}`, isVisible: !thread.isResolved, ...(h.label ? { label: h.label.trim() } : {}), ...(h.proposalError ? { proposalError: h.proposalError } : {}), quote: { exact: h.exact, prefix: h.prefix ?? '', suffix: h.suffix ?? '', start: 0, end: h.exact.length, version: input.selectionVersion } };
-  });
+    selections.push({ ...base, isVisible: !thread.isResolved, ...(h.proposalError ? { proposalError: h.proposalError } : {}), quote: { exact: h.exact, prefix: h.prefix ?? '', suffix: h.suffix ?? '', start: 0, end: h.exact.length, version: input.selectionVersion } });
+  }
   const createdAt = Date.now();
   for (const [index, target] of (input.proposalTargets ?? []).entries()) {
     if (!target) continue;
-    const selection = selections?.[index], original = input.metadata?.highlights?.[index].proposal;
+    const selection = selections.find(s => s.slug === `selection-${index + 1}`), original = input.metadata?.highlights?.[index].proposal;
     if (!selection || selection.proposalError || !original || target.before !== original.before || target.after !== original.after || !isPreparedProposal(target)) throw new DomainError('Invalid prepared proposal');
     const proposalId = randomUUID();
     state.proposals[proposalId] = { ...structuredClone(target), id: proposalId, documentId: request.documentId, threadId: thread.id, messageId: id, selectionId: selection.id, status: target.reason ? 'outdated' : 'pending', createdAt };
   }
-  thread.messages.push({ id, role: 'agent', text: answer.text, requestId: request.id, createdAt, ...(selections?.length ? { selections } : {}) });
+  thread.messages.push({ id, role: 'agent', text: answer.text, requestId: request.id, createdAt, ...(selections.length ? { selections } : {}), ...(fileSelections.length ? { fileSelections } : {}) });
 }
 export function stopRequest(state: State, requestId: string, partial: string): void {
   const batch = requestBatch(state, requestId);

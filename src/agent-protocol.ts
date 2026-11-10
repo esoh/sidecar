@@ -31,6 +31,7 @@ export async function compactContext(owner: Owner, context: Record<string, unkno
     if (result.quote) result.quote = quote(result.quote);
     if (result.messageQuote) result.messageQuote = messageQuote(result.messageQuote);
     if (result.selections) result.selections = array(result.selections, selection);
+    if (result.fileSelections) result.fileSelections = array(result.fileSelections, v => fields(v, { id: 's' }));
     if (result.replyRecovery) result.replyRecovery = fields(result.replyRecovery, { id: 'e' }, ['turnId']);
     return result;
   };

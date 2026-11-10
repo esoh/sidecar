@@ -99,6 +99,22 @@ window.addEventListener('pointermove', moved, true);
 window.addEventListener('scroll', refresh, true);
 window.addEventListener('resize', refresh, true);
 window.addEventListener('keydown', escape, true);
+// Local file links open Sidecar file windows instead of navigating this frame. Registered after the picker
+// guards, so a pick wins. Same-page anchors, URL schemes and scheme-relative URLs keep their normal behavior;
+// the viewer re-validates every href and only opens files inside the document's workspace.
+function isLocalHref(href) {
+  var value = href.trim();
+  return !!value && value.length <= 4096 && !/[\x00-\x1f]/.test(value) && value.charAt(0) !== '#' && value.slice(0, 2) !== '//'
+    // Same rule as the viewer: a dotted bare file name with a line suffix (README.md:2-4) is not a scheme.
+    && (!/^[a-z][a-z0-9+.-]*:/i.test(value) || /^file:\/\/\//i.test(value) || /^[^:/?#]*\.[^:/?#]*:\d+(?:-\d+)?(?:#.*)?$/.test(value));
+}
+window.addEventListener('click', function (event) {
+  var element = elementOf(event.target), link = !picking && element ? element.closest('a[href]') : null;
+  var href = link ? link.getAttribute('href') || '' : '';
+  if (!link || !isLocalHref(href)) return;
+  event.preventDefault();
+  send({ type: 'open-file', href: href });
+}, true);
 function setPicker(on) {
   if (on === picking) return;
   picking = on;
@@ -141,7 +157,8 @@ function reveal(message) {
     var matches = document.querySelectorAll(message.selector), element = matches.length === 1 ? matches[0] : null;
     if (element && !isOwn(element)) {
       if (message.isElement) {
-        if (typeof message.fingerprint === 'string' && fingerprint(element) === message.fingerprint) { element.scrollIntoView({ block: 'center' }); flash(element); ok = true; }
+        // A user pick must keep its full markup; an agent target (no fingerprint) must still contain its text once.
+        if (typeof message.fingerprint === 'string' ? fingerprint(element) === message.fingerprint : !!message.exact && !!textMatch(element, message.exact)) { element.scrollIntoView({ block: 'center' }); flash(element); ok = true; }
       } else {
         var range = textMatch(element, message.exact);
         if (range) {

@@ -1,5 +1,5 @@
 import { viewerPath, isGateway, libraryPath } from './viewer-path.ts';
-import { HtmlControls, HtmlFileViewer, isHtmlViewValid, readHtmlView, useHtmlBridge } from './HtmlFile.tsx';
+import { HtmlControls, HtmlFileViewer, htmlFullPageUrl, isHtmlPath, revealParameter, isHtmlViewValid, readHtmlView, useHtmlBridge, type HtmlFile } from './HtmlFile.tsx';
 import { ViewerEvents } from './viewer-events.ts';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
@@ -20,7 +20,7 @@ import { useQuestionDrafts, forgetDocument, type QuestionDraft, type QuestionDra
 import { quoteIssue, quoteRange, selectionText, selectionSentence, excludedSelection } from './selection.ts';
 import { revealRange } from './reveal-target.ts';
 import { MarkdownDocument, WorkspaceLinks, type OpenWorkspaceLink } from './MarkdownDocument.tsx';
-import { resolveWorkspaceLink, splitLineSuffix, fileLineRange, type FileLineRange } from './links.ts';
+import { resolveWorkspaceLink, splitLineSuffix, fileLineRange, pageLinkTarget, type FileLineRange } from './links.ts';
 import { setDocPreviewFetcher } from '@plannotator/ui/components/InlineMarkdown';
 import { DocumentLibrary } from './DocumentLibrary.tsx';
 import { SettingsProvider, TextSettings } from './TextSettings.tsx';
@@ -74,15 +74,20 @@ function App() {
   const documentId = requestedDocument ?? Object.keys(state?.documents ?? {})[0] ?? '';
   const current = state?.documents[documentId];
   const [unreadCount, setUnreadCount] = useState(0);
-  const [htmlView] = useState(readHtmlView);
+  const [urlHtmlView] = useState(readHtmlView);
+  // A registered HTML file is itself the document: it always opens in the full-page HTML view.
+  const isHtmlDocument = !!current && isHtmlPath(current.path);
+  const htmlView: HtmlFile | null = urlHtmlView ?? (current && isHtmlDocument ? { documentId, path: current.path.slice(current.path.lastIndexOf('/') + 1), root: current.path.slice(0, current.path.lastIndexOf('/')) || '/', fragment: location.hash } : null);
   const htmlRoot = htmlView && (htmlView.root ?? current?.workspace);
   const htmlAbsolute = htmlView && htmlRoot ? `${htmlRoot.replace(/\/$/, '')}/${htmlView.path}` : undefined;
+  // Only an HTML file opened from another document binds its threads; a standalone HTML document is the file itself.
+  const threadFile = urlHtmlView ? htmlAbsolute : undefined;
   const [areScriptsEnabled, setScriptsEnabled] = useState(false), [isBridgeReady, setBridgeReady] = useState(false), [isPicking, setPicking] = useState(false);
   const [htmlSelection, setHtmlSelection] = useState<{ exact: string; selector: string } | null>(null), [htmlNotice, setHtmlNotice] = useState('');
   const frameRef = useRef<HTMLIFrameElement>(null);
   useEffect(() => {
     const prefix = unreadCount ? `(${unreadCount}) ` : '';
-    if (htmlView) document.title = `${prefix}${htmlView.path.split('/').pop() || 'HTML file'} — Sidecar`;
+    if (urlHtmlView) document.title = `${prefix}${urlHtmlView.path.split('/').pop() || 'HTML file'} — Sidecar`;
     else if (current && !closedDocument) document.title = `${prefix}${current.title}`;
   }, [current?.title, unreadCount, closedDocument]);
   const drafts = useQuestionDrafts(documentId);
@@ -95,7 +100,7 @@ function App() {
   useEffect(() => {
     if (current) void api(`/api/documents/${documentId}/opened`, {}).catch(reason => setError(errorText(reason)));
   }, [documentId, !!current]);
-  const threads = Object.values(state?.threads ?? {}).filter((thread) => thread.documentId === documentId && (!htmlView || (!!htmlAbsolute && thread.file === htmlAbsolute)));
+  const threads = Object.values(state?.threads ?? {}).filter((thread) => thread.documentId === documentId && (!urlHtmlView || (!!threadFile && thread.file === threadFile)));
   const [activeThreadId, setActiveThreadId] = useState<string | null | undefined>(undefined);
   const [activeMessageId, setActiveMessageId] = useState<string | null>(null);
   const [sentRequestId, setSentRequestId] = useState<string | null>(null);
@@ -734,7 +739,7 @@ function App() {
     try {
       let target = activeThreadId;
       if (!target) {
-        fileThread.current ??= api<Thread>('/api/threads', { id: randomId(), documentId, ...(htmlAbsolute ? { file: htmlAbsolute } : {}) });
+        fileThread.current ??= api<Thread>('/api/threads', { id: randomId(), documentId, ...(threadFile ? { file: threadFile } : {}) });
         const thread = await fileThread.current;
         setState(previous => previous ? { ...previous, threads: { ...previous.threads, [thread.id]: thread } } : previous);
         target = thread.id;
@@ -761,9 +766,25 @@ function App() {
     else if (message.type === 'selection') setHtmlSelection(message.exact ? message : null);
     else if (message.type === 'pick') { setPicking(false); attachHtml(message.exact, message.selector, message.fingerprint); }
     else if (message.type === 'picker') setPicking(false);
+    else if (message.type === 'open-file') openPageLink(message.href);
     else setHtmlNotice(message.ok ? '' : 'This part of the page changed or was removed since it was attached.');
   });
+  // Page links are untrusted input: open only files inside the registered workspace, never grant another root.
+  const openPageLink = (href: string) => {
+    const root = current?.workspace, target = root && htmlAbsolute ? pageLinkTarget(href, root, htmlAbsolute.replace(/\/[^/]*$/, '')) : null;
+    // A click in the frame activates this page too; a script posting on its own (e.g. at load) does not.
+    if (navigator.userActivation?.isActive === false) return;
+    // A standalone HTML document opened without a workspace grants no other file.
+    if (!root) return setHtmlNotice('Files open from the page only when this document has a workspace. Reopen it from your agent with one.');
+    if (!target) return;
+    if ('outside' in target) return setHtmlNotice(`Only files inside this document’s workspace open from the page: ${target.outside}`);
+    setHtmlNotice('');
+    openPreview(target.path, undefined, isAnnotatableDocPath(target.path) ? 'doc' : 'code', root, target.fragment, target.lineRange);
+  };
   const changeScripts = (enabled: boolean) => { setScriptsEnabled(enabled); setBridgeReady(false); setPicking(false); setHtmlSelection(null); setHtmlNotice(''); };
+  // Agent revisions to a standalone HTML document reload its frame, keeping the Run scripts choice.
+  const htmlRevision = isHtmlDocument && !urlHtmlView ? current?.version ?? '' : '';
+  useEffect(() => { if (htmlRevision) changeScripts(areScriptsEnabled); }, [htmlRevision]);
   const togglePicker = (on: boolean) => { setPicking(on); postBridge({ type: 'picker', on }); };
   useEffect(() => {
     if (!isPicking) return;
@@ -771,8 +792,25 @@ function App() {
     window.addEventListener('keydown', escape);
     return () => window.removeEventListener('keydown', escape);
   }, [isPicking]);
+  // A saved HTML target from another view opens its page's full-page view, which reveals it once Run scripts is on.
+  // The tab opens inside the click gesture; an outside root is granted first, then that tab navigates.
+  const [blockedPage, setBlockedPage] = useState<string | null>(null);
+  function openHtmlPage(path: string, revealId: string) {
+    const workspace = current?.workspace, inside = !!workspace && insideRoot(path, workspace);
+    const sourceRoot = inside ? workspace! : path.slice(0, path.lastIndexOf('/')) || '/';
+    const url = (root: string) => new URL(htmlFullPageUrl({ documentId, path: path.slice(sourceRoot.replace(/\/$/, '').length + 1), root }, revealId), location.href).href;
+    const tab = window.open(inside ? url(sourceRoot) : 'about:blank', '_blank');
+    if (tab) tab.opener = null;
+    setBlockedPage(null);
+    if (inside) { if (!tab) setBlockedPage(url(sourceRoot)); return; }
+    void allowRoot(sourceRoot).then(root => {
+      if (tab && !tab.closed) tab.location.href = url(root);
+      else setBlockedPage(url(root));
+    }, reason => { tab?.close(); setError(errorText(reason)); });
+  }
   const selectionActions = {
-    onOpenFileQuote: (quote: FileQuote) => {
+    onOpenFileQuote: (quote: FileQuote, revealId?: string) => {
+      if (quote.kind === 'html' && quote.selector && revealId && quote.path !== htmlAbsolute) return openHtmlPage(quote.path, revealId);
       if (!htmlView || quote.kind !== 'html' || quote.path !== htmlAbsolute || !quote.selector) return openLink(quote.kind === 'code' ? 'code' : 'doc', quote.path);
       if (innerWidth <= 850) setSidebarShown(false);
       if (!areScriptsEnabled) return setHtmlNotice('Turn on Run scripts to show this on the page.');
@@ -822,6 +860,21 @@ function App() {
       });
     },
   };
+  // ?reveal= from another view: open its thread now, reveal once the user turns on Run scripts and the page is ready.
+  const [revealId, setRevealId] = useState(() => urlHtmlView ? revealParameter() : null);
+  const revealTarget = revealId ? threads.flatMap(thread => thread.messages.flatMap(message => [
+    ...(message.id === revealId && message.fileQuote ? [message.fileQuote] : []), ...(message.fileSelections ?? []).filter(s => s.id === revealId).map(s => s.fileQuote),
+  ].filter(quote => quote.path === htmlAbsolute).map(quote => ({ thread, quote }))))[0] : undefined;
+  const revealThread = useRef<string | null>(null);
+  useEffect(() => {
+    if (!revealId || !state) return;
+    if (!revealTarget) { setRevealId(null); return; }
+    if (revealThread.current !== revealTarget.thread.id) { revealThread.current = revealTarget.thread.id; openThread(revealTarget.thread.id); }
+    if (!areScriptsEnabled) { setHtmlNotice('Turn on Run scripts to show this on the page.'); return; }
+    if (!isBridgeReady) return;
+    setRevealId(null);
+    selectionActions.onOpenFileQuote(revealTarget.quote);
+  }, [revealId, !!state, !!revealTarget, areScriptsEnabled, isBridgeReady]);
   const proposalReview = useProposalReview({
     documentId, proposals: Object.values(state?.proposals ?? {}).filter(p => p.documentId === documentId),
     selections: selectedMessages.map(item => item.selection), article, version: content.version,
@@ -872,7 +925,7 @@ function App() {
       {proposalReview.popover}
       <div className={`viewer${htmlView ? ' html-view' : ''}`} ref={viewer} data-chat-open={isSidebarShown}>
       <header className={`topbar${htmlView ? ' html-topbar' : ''}`}>
-        {htmlView ? <HtmlControls file={htmlView} areScriptsEnabled={areScriptsEnabled} onScripts={changeScripts} isReady={areScriptsEnabled && isBridgeReady}
+        {htmlView ? <HtmlControls file={htmlView} isDocument={!urlHtmlView} areScriptsEnabled={areScriptsEnabled} onScripts={changeScripts} isReady={areScriptsEnabled && isBridgeReady}
           isPicking={isPicking} onPick={() => togglePicker(!isPicking)} canAsk={!!htmlSelection} onAsk={() => { if (htmlSelection) { attachHtml(htmlSelection.exact, htmlSelection.selector); setHtmlSelection(null); } }} /> : <>
         <div className="brand">
           <Icon name="logo" />
@@ -923,6 +976,7 @@ function App() {
         aria-expanded={isFilesShown} aria-controls="files-panel"
         onClick={() => setFilesShown(shown => !shown)}
       ><Icon name="folder" /></button>}
+      {blockedPage && <p className="app-error" role="alert">The browser blocked the new tab. <a href={blockedPage} target="_blank" rel="noopener noreferrer" onClick={() => setBlockedPage(null)}>Open the HTML page</a></p>}
       {error && (
         <p className="app-error" role="alert">
           {error}
@@ -947,7 +1001,7 @@ function App() {
         <main className={`canvas${htmlView ? ' html-canvas' : ''}`}>
           {htmlView ? <>
             {htmlNotice && <p className="html-notice" role="status">{htmlNotice}</p>}
-            {htmlView.root || current?.workspace ? <HtmlFileViewer key={`${htmlView.path}:${htmlRoot}`} file={htmlView} areScriptsEnabled={areScriptsEnabled} bridge frameRef={frameRef} />
+            {htmlView.root || current?.workspace ? <HtmlFileViewer key={`${htmlView.path}:${htmlRoot}:${htmlRevision}`} file={htmlView} areScriptsEnabled={areScriptsEnabled} bridge frameRef={frameRef} />
               : state ? <p role="alert">This document has no recorded workspace. Reopen it from your agent.</p> : <p role="status">Loading HTML file…</p>}
           </> : <div className="reading-width">
             {originalMessage?.quote && activeThreadId && (
@@ -1043,7 +1097,7 @@ function App() {
           }}
           onGoToMessage={goToMessage}
           messageJump={messageJump}
-          threadFile={htmlAbsolute}
+          threadFile={threadFile}
         />
       </div>
       </div>

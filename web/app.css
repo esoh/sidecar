@@ -1483,7 +1483,8 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
 .html-topbar .agent-status { margin-left: 0; }
 .html-topbar .file-diff-toggle { min-height: 30px; }
 .html-topbar .html-action { width: auto; gap: 6px; padding: 0 8px; }
-.html-topbar .html-action[aria-pressed='true'] { color: var(--primary); background: var(--muted); }
+.html-topbar .html-action[aria-pressed='true'] { color: var(--primary); background: var(--muted); box-shadow: inset 0 0 0 1px var(--primary); }
+.html-topbar .html-modes { display: flex; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 8px; }
 .html-topbar :disabled { opacity: .45; cursor: not-allowed; }
 .document-workspace > .html-canvas { display: flex; flex-direction: column; padding: 0; overflow: hidden; background: var(--card) none; }
 .html-canvas > p { margin: 0; padding: 8px 12px; font-size: 12px; }

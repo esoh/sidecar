@@ -11,6 +11,7 @@ import { Icon, age } from './conversations.tsx';
 import { AgentSession } from './AgentSession.tsx';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
 import { TextSettings } from './TextSettings.tsx';
+import { isHtmlPath } from './HtmlFile.tsx';
 
 type Preview = { markdown: string; title: string };
 export function DocumentLibrary() {
@@ -99,7 +100,9 @@ export function DocumentLibrary() {
           {key && id ? (
             <>
               <p className="library-note"><a href={isGateway && alias ? viewerPath('/') : libraryPath()}>All documents</a> · Read-only preview. Open Sidecar from the original agent to continue the conversation.</p>
-              {preview && <article className="document-card w-full bg-card rounded-xl p-5 md:p-8 lg:p-10 xl:p-12 shadow-xl border border-border/50" aria-label="Document">
+              {/* A stopped agent's HTML document is not rendered here: its frame belongs to the live viewer. */}
+              {preview && isHtmlPath(session?.documents.find(document => document.id === id)?.path ?? '') ? <p>This is an HTML document. Open Sidecar from the original agent to view it with its conversations.</p>
+                : preview && <article className="document-card w-full bg-card rounded-xl p-5 md:p-8 lg:p-10 xl:p-12 shadow-xl border border-border/50" aria-label="Document">
                 <MarkdownDocument markdown={preview.markdown} documentId={id} libraryOwner={key} />
               </article>}
             </>
