@@ -971,7 +971,7 @@ test('HTML page file links open nested Sidecar file windows at their lines while
   await expect(frame.locator('#code')).toBeVisible();
   // Existing window controls: zoom, minimize and dock.
   await nested.getByRole('button', { name: 'Zoom in', exact: true }).click();
-  await expect(nested.getByRole('button', { name: 'Reset content zoom', exact: true })).toBeEnabled();
+  await expect(nested.getByRole('button', { name: 'Adjust content zoom', exact: true })).toBeEnabled();
   await nested.getByRole('button', { name: 'Minimize window', exact: true }).click();
   const dock = page.getByRole('region', { name: 'Window dock', exact: true });
   await expect(dock.getByRole('button', { name: 'Expand dock', exact: true })).toHaveText('1 window');
@@ -1049,8 +1049,20 @@ test('HTML full page header fits a phone and Chat swaps with the page', async ({
   await page.getByRole('button', { name: 'Settings' }).click();
   const settings = page.getByRole('dialog', { name: 'Reading settings' });
   await settings.getByRole('button', { name: 'Zoom out' }).click();
-  await expect(settings.getByRole('button', { name: 'Reset content zoom' })).toHaveText('75%');
+  await expect(settings.getByRole('button', { name: 'Adjust content zoom' })).toHaveText('75%');
   await expect.poll(pageWidth).toBe(Math.round(before / 0.75));
+  await settings.getByRole('button', { name: 'Adjust content zoom' }).click();
+  const popover = page.getByRole('dialog', { name: 'Content zoom', exact: true });
+  await popover.getByRole('slider', { name: 'Zoom level' }).fill('83');
+  await expect(settings.getByRole('button', { name: 'Adjust content zoom' })).toHaveText('83%');
+  await expect.poll(async () => Math.abs(await pageWidth() - before / 0.83)).toBeLessThan(1);
+  const bounds = (await popover.boundingBox())!;
+  expect(bounds.x).toBeGreaterThanOrEqual(0); expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
+  await popover.getByRole('button', { name: 'Reset content zoom' }).click();
+  await expect.poll(pageWidth).toBe(before);
+  await popover.press('Escape');
+  await expect(popover).toBeHidden();
+  await expect(settings).toBeVisible();
   expect(await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--sidecar-conversation-scale'))).toBe('1');
 });
 
@@ -1369,11 +1381,17 @@ test('the HTML full page offers settings and zooms the page without scaling the 
   const before = await pageWidth(), sidebar = (await page.locator('.sidebar').boundingBox())!.width;
   await page.getByRole('button', { name: 'Zoom in' }).click();
   await page.getByRole('button', { name: 'Zoom in' }).click();
-  await expect(page.getByRole('button', { name: 'Reset content zoom' })).toHaveText('150%');
+  await expect(page.getByRole('button', { name: 'Adjust content zoom' })).toHaveText('150%');
   await expect.poll(pageWidth).toBe(Math.round(before / 1.5));
   expect((await page.locator('.sidebar').boundingBox())!.width).toBe(sidebar);
-  await page.getByRole('button', { name: 'Reset content zoom' }).click();
+  await page.getByRole('button', { name: 'Adjust content zoom' }).click();
+  const popover = page.getByRole('dialog', { name: 'Content zoom', exact: true });
+  await popover.getByRole('slider', { name: 'Zoom level' }).fill('137');
+  await expect.poll(async () => Math.abs(await pageWidth() - before / 1.37)).toBeLessThan(1);
+  await popover.getByRole('button', { name: 'Reset content zoom' }).click();
   await expect.poll(pageWidth).toBe(before);
+  await page.locator('.html-filename').click();
+  await expect(popover).toBeHidden();
 });
 
 test('a fast sidebar drag across the HTML page keeps resizing and ends on release over the page', async ({ page }) => {

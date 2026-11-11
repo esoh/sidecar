@@ -4281,7 +4281,7 @@ test('window zoom scales HTML independently, keeps chrome fixed, and follows doc
   await expect(box).toBeVisible();
   const geometry = await first.boundingBox(), header = await first.locator('header').boundingBox();
   await first.getByRole('button', { name: 'Zoom out', exact: true }).click({ clickCount: 2 });
-  await expect(first.getByRole('button', { name: 'Reset content zoom', exact: true })).toHaveText('50%');
+  await expect(first.getByRole('button', { name: 'Adjust content zoom', exact: true })).toHaveText('50%');
   // Playwright reports iframe-child bounds in the child viewport's CSS pixels.
   // Map those pixels to the displayed frame; a 100px diagram should occupy 50 screen pixels.
   const frameWidth = (await first.locator('iframe').boundingBox())!.width;
@@ -4289,27 +4289,50 @@ test('window zoom scales HTML independently, keeps chrome fixed, and follows doc
   expect((await box.boundingBox())!.width * frameWidth / viewportWidth).toBeCloseTo(50, 0);
   expect(await first.boundingBox()).toEqual(geometry);
   expect(await first.locator('header').boundingBox()).toEqual(header);
+  await first.getByRole('button', { name: 'Adjust content zoom', exact: true }).click();
+  const popover = page.getByRole('dialog', { name: 'Content zoom', exact: true });
+  const slider = popover.getByRole('slider', { name: 'Zoom level' });
+  const track = (await slider.boundingBox())!;
+  await page.mouse.move(track.x + track.width / 4, track.y + track.height / 2); await page.mouse.down();
+  await page.mouse.move(track.x + track.width * 0.8, track.y + track.height / 2, { steps: 4 }); await page.mouse.up();
+  // Dragging the slider in a floating titlebar must not drag or resize its window.
+  expect(await first.boundingBox()).toEqual(geometry);
+  await slider.fill('137');
+  await expect(first.getByRole('button', { name: 'Adjust content zoom', exact: true })).toHaveText('137%');
+  await slider.press('ArrowRight');
+  await expect(slider).toHaveValue('138');
+  await popover.getByRole('button', { name: 'Reset content zoom' }).click();
+  await expect(slider).toHaveValue('100');
+  await expect(popover.getByRole('button', { name: 'Reset content zoom' })).toBeDisabled();
+  await slider.fill('50');
+  await slider.press('Escape');
+  await expect(popover).toBeHidden();
+  await expect(first.getByRole('button', { name: 'Adjust content zoom', exact: true })).toBeFocused();
   await first.getByRole('button', { name: 'Dock window', exact: true }).click();
   const dock = page.getByRole('region', { name: 'Window dock', exact: true });
-  await expect(dock.getByRole('button', { name: 'Reset content zoom', exact: true })).toHaveText('50%');
+  await expect(dock.getByRole('button', { name: 'Adjust content zoom', exact: true })).toHaveText('50%');
   await page.getByRole('link', { name: 'Other', exact: true }).click();
   const second = page.getByRole('dialog', { name: 'File: other.md', exact: true });
-  await expect(second.getByRole('button', { name: 'Reset content zoom', exact: true })).toHaveText('100%');
+  await expect(second.getByRole('button', { name: 'Adjust content zoom', exact: true })).toHaveText('100%');
   await second.getByRole('button', { name: 'Zoom in', exact: true }).click();
   await second.getByRole('button', { name: 'Dock window', exact: true }).click();
-  await expect(dock.getByRole('button', { name: 'Reset content zoom', exact: true })).toHaveText('125%');
+  await expect(dock.getByRole('button', { name: 'Adjust content zoom', exact: true })).toHaveText('125%');
   await dock.getByRole('tab', { name: 'diagram.html', exact: true }).click();
-  await expect(dock.getByRole('button', { name: 'Reset content zoom', exact: true })).toHaveText('50%');
-  await dock.getByRole('button', { name: 'Reset content zoom', exact: true }).click();
-  await expect(dock.getByRole('button', { name: 'Reset content zoom', exact: true })).toHaveText('100%');
+  await expect(dock.getByRole('button', { name: 'Adjust content zoom', exact: true })).toHaveText('50%');
+  await dock.getByRole('button', { name: 'Adjust content zoom', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Content zoom', exact: true }).getByRole('button', { name: 'Reset content zoom' }).click();
+  await page.getByRole('dialog', { name: 'Content zoom', exact: true }).press('Escape');
+  await expect(dock.getByRole('button', { name: 'Adjust content zoom', exact: true })).toHaveText('100%');
   await dock.getByRole('button', { name: 'Zoom out', exact: true }).click({ clickCount: 3 });
   await expect(dock.getByRole('button', { name: 'Zoom out', exact: true })).toBeDisabled();
-  await dock.getByRole('button', { name: 'Reset content zoom', exact: true }).click();
+  await dock.getByRole('button', { name: 'Adjust content zoom', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Content zoom', exact: true }).getByRole('button', { name: 'Reset content zoom' }).click();
+  await page.getByRole('dialog', { name: 'Content zoom', exact: true }).press('Escape');
   await dock.getByRole('button', { name: 'Zoom in', exact: true }).click({ clickCount: 4 });
   await expect(dock.getByRole('button', { name: 'Zoom in', exact: true })).toBeDisabled();
   await dock.getByRole('button', { name: 'Close file window', exact: true }).first().click();
   await page.getByRole('link', { name: 'Diagram', exact: true }).click();
-  await expect(first.getByRole('button', { name: 'Reset content zoom', exact: true })).toHaveText('100%');
+  await expect(first.getByRole('button', { name: 'Adjust content zoom', exact: true })).toHaveText('100%');
 });
 
 test('pinned reply zoom does not resize the conversation or main document', async ({ page }) => {
