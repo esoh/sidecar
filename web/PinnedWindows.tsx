@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import type { Thread } from '../src/store.ts';
 import { Icon, MessageContent, PinSymbol, type MessageContentProps } from './conversations.tsx';
@@ -8,6 +8,7 @@ import { FilePreview, type OpenFile } from './FilePreview.tsx';
 import type { FileQuote } from '../src/quote.ts';
 import { ChangedFiles } from './ChangedFiles.tsx';
 import type { Comparison, WorkspaceFileChange } from './useComparison.ts';
+import { usePosition } from './usePosition.ts';
 
 type WindowPosition = { id: string; x: number; y: number; width: number; height: number; layer: number; zoom: number };
 type Point = { x: number; y: number };
@@ -279,9 +280,21 @@ export function PinnedWindows({ workspace, threads, files, root, documentId, com
 }
 
 export function ZoomControls({ zoom, onZoom }: { zoom: number; onZoom: (zoom: number) => void }) {
+  const id = useId(), trigger = useRef<HTMLButtonElement>(null), popover = useRef<HTMLDivElement>(null);
+  const [isOpen, setOpen] = useState(false);
+  const anchor = useCallback(() => trigger.current?.getBoundingClientRect(), []);
+  usePosition(popover, isOpen ? anchor : null, 220);
   return <div className="window-zoom" role="group" aria-label="Content zoom">
     <button aria-label="Zoom out" title="Zoom out" disabled={zoom <= 25} onClick={() => onZoom(Math.max(25, zoom - 25))}>−</button>
-    <button className="window-zoom-reset" aria-label="Reset content zoom" title="Reset zoom to 100%" disabled={zoom === 100} onClick={() => onZoom(100)}>{zoom}%</button>
+    <button ref={trigger} className="window-zoom-value" aria-label="Adjust content zoom" title="Adjust zoom" aria-controls={id} aria-haspopup="dialog" aria-expanded={isOpen}
+      onClick={() => { const node = popover.current; if (node) { node.togglePopover(); setOpen(node.matches(':popover-open')); } }}>{zoom}%</button>
     <button aria-label="Zoom in" title="Zoom in" disabled={zoom >= 200} onClick={() => onZoom(Math.min(200, zoom + 25))}>+</button>
+    {/* The top layer keeps this usable inside the native Settings dialog and above floating windows. */}
+    <div ref={popover} id={id} popover="auto" role="dialog" aria-label="Content zoom" className="floating window-zoom-popover"
+      onToggle={event => setOpen(event.newState === 'open')} onPointerDown={event => event.stopPropagation()}
+      onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); event.currentTarget.hidePopover(); trigger.current?.focus(); } }}>
+      <div><output>{zoom}%</output><button aria-label="Reset content zoom" disabled={zoom === 100} onClick={() => onZoom(100)}>Reset</button></div>
+      <input type="range" aria-label="Zoom level" aria-valuetext={`${zoom}%`} min={25} max={200} step={1} value={zoom} onChange={event => onZoom(event.target.valueAsNumber)} />
+    </div>
   </div>;
 }
