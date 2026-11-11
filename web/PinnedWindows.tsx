@@ -204,14 +204,7 @@ export function PinnedWindows({ workspace, threads, files, root, documentId, com
   const isDockOpen = expanded || !!preview;
   const displayTabs = preview ? visibleDock.filter(id => id !== preview.id) : visibleDock;
   const zoomFor = (id: string | null) => windows.find(value => value.id === id)?.zoom ?? 100;
-  const zoomControls = (id: string) => {
-    const zoom = zoomFor(id);
-    return <div className="window-zoom" role="group" aria-label="Content zoom">
-      <button aria-label="Zoom out" title="Zoom out" disabled={zoom <= 25} onClick={() => updateWindow(id, { zoom: Math.max(25, zoom - 25) })}>−</button>
-      <button className="window-zoom-reset" aria-label="Reset content zoom" title="Reset zoom to 100%" disabled={zoom === 100} onClick={() => updateWindow(id, { zoom: 100 })}>{zoom}%</button>
-      <button aria-label="Zoom in" title="Zoom in" disabled={zoom >= 200} onClick={() => updateWindow(id, { zoom: Math.min(200, zoom + 25) })}>+</button>
-    </div>;
-  };
+  const zoomControls = (id: string) => <ZoomControls zoom={zoomFor(id)} onZoom={zoom => updateWindow(id, { zoom })} />;
   const renderContent = (id: string, prefix: string) => {
     const entry = find(id);
     if (entry?.kind === 'file') return <FilePreview key={entry.id} {...entry.file} documentId={documentId} root={entry.file.root ?? root} comparison={comparison} onQuoteFile={onQuoteFile} onRevealFile={onRevealFile} onSetLineRangeVisible={visible => onSetLineRangeVisible(entry.id, visible)} onSetScripts={enabled => onSetFileScripts(entry.id, enabled)} />;
@@ -283,4 +276,12 @@ export function PinnedWindows({ workspace, threads, files, root, documentId, com
     </section>}
     {ghost && dragging && createPortal(<div className="dock-drag-preview" style={{ left: ghost.x, top: ghost.y }} aria-hidden="true" inert>{renderContent(dragging, 'drag-preview')}</div>, document.body)}
   </>;
+}
+
+export function ZoomControls({ zoom, onZoom }: { zoom: number; onZoom: (zoom: number) => void }) {
+  return <div className="window-zoom" role="group" aria-label="Content zoom">
+    <button aria-label="Zoom out" title="Zoom out" disabled={zoom <= 25} onClick={() => onZoom(Math.max(25, zoom - 25))}>−</button>
+    <button className="window-zoom-reset" aria-label="Reset content zoom" title="Reset zoom to 100%" disabled={zoom === 100} onClick={() => onZoom(100)}>{zoom}%</button>
+    <button aria-label="Zoom in" title="Zoom in" disabled={zoom >= 200} onClick={() => onZoom(Math.min(200, zoom + 25))}>+</button>
+  </div>;
 }

@@ -1465,6 +1465,7 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
 .files-resize {
   z-index: 5;
 }
+[data-resizing] iframe { pointer-events: none; }
 .file-preview-frame {
   width: 100%;
   flex: 1;
@@ -1489,11 +1490,13 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
 .document-workspace > .html-canvas { display: flex; flex-direction: column; padding: 0; overflow: hidden; background: var(--card) none; }
 .html-canvas > p { margin: 0; padding: 8px 12px; font-size: 12px; }
 .html-canvas > .html-notice { flex-shrink: 0; border-bottom: 1px solid var(--border); color: var(--subtle); }
-.html-canvas > .file-preview-frame { height: 0; min-height: 0; border: 0; border-radius: 0; }
+.html-canvas > .file-preview-frame { height: 0; min-height: 0; border: 0; border-radius: 0; zoom: var(--html-zoom, 1); }
 .row-tag + .row-tag { margin-left: 8px; }
 @media (max-width: 850px) {
   .html-topbar .html-back > span, .html-topbar .html-action > span, .html-topbar .agent-status > span:last-child { display: none; }
   .html-topbar .html-back, .html-topbar .html-action { padding: 0; }
+  /* Phones pinch-zoom the page natively; the header keeps its room for the page controls. */
+  .html-topbar > .window-zoom { display: none; }
   .html-topbar .file-diff-toggle { white-space: nowrap; }
 }
 .file-preview-path:has(.html-full-page-link) { flex-wrap: wrap; }

@@ -22,7 +22,7 @@ import { libraryDocument, listLibrary, recordDocumentOpen, closeLibraryDocument,
 import { authorizePath, listDirectory, readCode, readDiff, readPreview, readStatus } from './files.ts';
 import { readTestFileRules, writeTestFileRules } from './test-file-rules.ts';
 import { getGitRepositoryInfoAsync, listBranches, type ComparisonRequest } from './workspace-status.ts';
-import { htmlBridge } from './html-bridge.ts';
+import { htmlBridge, shortcutHelper } from './html-bridge.ts';
 import { claim, createThread, closeDocument, discardEmptyThread, nameThread, pinMessage, DomainError, get, isObject, isQuote, isRepoInfo, isThreadFile, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, reanchorSelection, setBaseBranch, isBranchName, setSelectionVisibility, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput, type ReplyInput } from './store.ts';
 import { isPinStyle } from './pin-style.ts';
 import { stopRequest, prepareBatch, requestBatch, setMessageSelectionVisibility, type State } from './store.ts';
@@ -74,11 +74,14 @@ function requestContext(state: State, id: string) {
 // Right after the doctype (and any comments allowed before it), keeping standards mode, so the bridge's
 // listeners register before any page script. Without a doctype the page is already in quirks mode.
 // Each comment stops at its first --> so the prolog has one parse (no exponential backtracking).
-export function withBridge(html: string) {
+// The shortcut helper always; the selection/picker bridge only for scripted full pages.
+export function withBridge(html: string, nonce: string, isBridge: boolean) {
   const at = /^\uFEFF?(?:\s|<!--(?:(?!-->)[\s\S])*-->)*<!doctype[^>]*>/i.exec(html)?.[0].length ?? 0;
-  return `${html.slice(0, at)}<script data-sidecar-bridge>${htmlBridge}</script>${html.slice(at)}`;
+  return `${html.slice(0, at)}<script nonce="${nonce}" data-sidecar-bridge>${shortcutHelper}${isBridge ? htmlBridge : ''}</script>${html.slice(at)}`;
 }
 export async function startServer({ owner, directory, stateRoot, port = 0, pollMs = 1000 }: ServerOptions) {
+  // One-use Run scripts tickets, in memory only: ticket -> document/file key and expiry.
+  const scriptTickets = new Map<string, { key: string; expires: number }>();
   const ids = await openAgentIds(stateRoot), key = ownerKey(owner);
   await ids.allocate(key, []);
   const ownerAlias = ids.encode(key, 'o', key);
@@ -682,7 +685,7 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
         const testFiles = method === 'POST' ? await writeTestFileRules(repo.gitCommonDir, await bodyOf(request)) : await readTestFileRules(repo.gitCommonDir);
         json(response, { testFiles }); return;
       }
-      if ((method === 'GET' || method === 'HEAD' && path === '/api/files/html') && ['/api/files', '/api/files/content', '/api/files/html', '/api/files/code', '/api/files/status', '/api/files/branches', '/api/files/diff'].includes(path)) {
+      if ((method === 'GET' || (method === 'HEAD' || method === 'POST') && path === '/api/files/html') && ['/api/files', '/api/files/content', '/api/files/html', '/api/files/code', '/api/files/status', '/api/files/branches', '/api/files/diff'].includes(path)) {
         const document = get(store.read().documents, target.searchParams.get('document') ?? '');
         const param = (key: string, fallback?: string) => target.searchParams.get(key) ?? fallback;
         // A standalone HTML document's own registered file needs no workspace or browsing grant.
@@ -705,13 +708,29 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
           if (path === '/api/files/html') {
             const preview = await readPreview(root, file);
             if (preview.renderAs !== 'html') throw new DomainError('An HTML file is required', 415);
-            const scripts = param('scripts') === '1';
-            // Header sandbox also protects a preview opened outside its iframe.
+            // Run scripts: the viewer's POST (Origin-checked; a sandboxed frame can neither POST nor read the answer)
+            // mints a one-use ticket for this document and file, spent by the frame's scripted GET. A page cannot
+            // reach scripts by navigating to a scripted URL, nor reuse a URL it once ran under.
+            const ticketKey = `${document.id}\0${root}\0${preview.path}`, now = Date.now();
+            for (const [ticket, entry] of scriptTickets) if (entry.expires < now) scriptTickets.delete(ticket);
+            if (method === 'POST') {
+              const ticket = randomBytes(24).toString('base64url');
+              scriptTickets.set(ticket, { key: ticketKey, expires: now + 60_000 });
+              json(response, { ticket }); return;
+            }
+            const ticket = param('ticket'), entry = ticket ? scriptTickets.get(ticket) : undefined;
+            if (param('scripts') === '1' && method === 'GET') {
+              if (ticket) scriptTickets.delete(ticket);
+              if (entry?.key !== ticketKey) throw new DomainError('This scripted page needs a fresh load. Turn Run scripts off and on again.', 403);
+            }
+            const scripts = param('scripts') === '1' && method === 'GET', nonce = randomBytes(16).toString('base64');
+            // Header sandbox also protects a preview opened outside its iframe. Without Run scripts only Sidecar's
+            // nonced shortcut helper runs: author scripts, inline handlers and javascript: URLs stay blocked.
             // Trusted HTML only: CSP blocks resources, not self-navigation to another URL.
-            response.setHeader('Content-Security-Policy', `default-src 'none'; script-src ${scripts ? "'unsafe-inline'" : "'none'"}; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox${scripts ? ' allow-scripts' : ''};`);
+            response.setHeader('Content-Security-Policy', `default-src 'none'; script-src ${scripts ? "'unsafe-inline'" : `'nonce-${nonce}'`}; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox allow-scripts;`);
             response.setHeader('Content-Type', 'text/html; charset=utf-8');
             response.setHeader('Referrer-Policy', 'no-referrer');
-            sendBody(response, scripts && param('bridge') === '1' ? withBridge(preview.text) : preview.text);
+            sendBody(response, withBridge(preview.text, nonce, scripts && param('bridge') === '1'));
           } else json(response, path === '/api/files/code' ? await readCode(root, file) : await readPreview(root, file));
         }
         return;
@@ -1014,6 +1033,9 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
       if (method === 'POST' && path === '/api/questions') {
         const input: SubmitInput = { documentId: text(body, 'documentId'), text: text(body, 'text'), clientMessageId: text(body, 'clientMessageId') };
         if (body.threadId !== undefined) input.threadId = text(body, 'threadId');
+        // Like POST /api/threads: the file only tells the agent what the new conversation is about.
+        const file = optionalText(body, 'file');
+        if (file !== undefined) { if (!isThreadFile(file)) throw new DomainError('Expected an absolute file path'); input.file = file; }
         if (body.quote !== undefined) { if (!isQuote(body.quote)) throw new DomainError('Invalid selection'); input.quote = body.quote; }
         if (body.messageQuote !== undefined) { if (!isMessageQuote(body.messageQuote)) throw new DomainError('Invalid message quote'); input.messageQuote = body.messageQuote; }
         if (body.fileQuote !== undefined) { if (!isFileQuote(body.fileQuote)) throw new DomainError('Invalid file quote'); input.fileQuote = body.fileQuote; }

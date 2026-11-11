@@ -39,7 +39,7 @@ function readHighlightIntensity() {
   return Number.isInteger(value) && value >= 20 && value <= 100 && value % 5 === 0 ? value : 100;
 }
 
-export function TextSettings({ version }: { version?: string }) {
+export function TextSettings({ version, children }: { version?: string; children?: ReactNode }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [network, setNetwork] = useState<{ enabled: boolean; urls: string[]; isLocal: boolean; publicUrl: string | null; tunnelTarget?: string | null; passphrase?: string | null } | null>(null);
   const [passphrase, setPassphrase] = useState('');
@@ -152,6 +152,7 @@ export function TextSettings({ version }: { version?: string }) {
             />
           </label>
         ))}
+        {children}
         <div className="text-settings-heading brightness-heading">
           <span>Text brightness</span>
           <button type="button" aria-label="Reset text brightness" disabled={brightness === 100} onClick={() => setBrightness(100)}>Reset</button>

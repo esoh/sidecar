@@ -391,6 +391,9 @@ for (const access of ['direct', 'gateway', 'network'] as const) test(`HTML scrip
   const frame = dialog.frameLocator('iframe');
   await expect(toggle).not.toBeChecked();
   await expect(frame.locator('#result')).toHaveText('Static diagram');
+  // Run scripts off: the page's inline handlers stay blocked too.
+  await frame.getByRole('button', { name: 'Trace' }).click();
+  await expect(frame.locator('#result')).toHaveText('Static diagram');
   await page.getByLabel('Message', { exact: true }).fill('Keep this draft');
   await toggle.check();
   await expect(frame.locator('#result')).toHaveText('Tab #basic');
@@ -451,15 +454,53 @@ test('scripted HTML blocks resource requests and keeps the main viewer policy un
   await expect(frame.locator('body')).toHaveAttribute('data-blocked', '["connect-src","frame-src","img-src","script-src-elem","style-src-elem"]');
   expect(received).toEqual([]);
   // A direct open has no iframe attribute: the response header must still deny cookie access.
+  // The frame's own URL spent its one-use ticket, so the viewer mints a fresh one for this open.
   const standalone = await page.context().newPage();
   try {
-    const source = await page.locator('iframe[title="Preview of probe.html"]').getAttribute('src');
-    await standalone.goto(new URL(source!, page.url()).href);
+    const source = new URL((await page.locator('iframe[title="Preview of probe.html"]').getAttribute('src'))!, page.url());
+    expect((await standalone.goto(source.href))!.status()).toBe(403);
+    source.searchParams.delete('scripts'); source.searchParams.delete('ticket');
+    const ticket = await page.evaluate(async url => (await (await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).json()).ticket, source.href);
+    await standalone.goto(`${source.href}&scripts=1&ticket=${ticket}`);
     await expect(standalone.locator('#result')).toHaveText('Script ran');
     expect(await standalone.evaluate(() => { try { void document.cookie; return false; } catch { return true; } })).toBe(true);
   } finally { await standalone.close(); }
 });
 
+
+for (const access of ['gateway', 'network'] as const) test(`a page with Run scripts off cannot navigate itself into scripts by link or meta refresh, and Run scripts still works, through ${access}`, async ({ page }) => {
+  const owner = f.owners[1];
+  let base = `${f.gateway.url}/a/${owner.alias}`;
+  if (access === 'network') {
+    const network = await (await f.view('/api/network', { enabled: true })).json();
+    base = `${network.urls[0]}/a/${owner.alias}`;
+    // Plain HTTP on a LAN address: browsers send no fetch metadata here.
+    expect(new URL(base)).toMatchObject({ protocol: 'http:' });
+    expect(new URL(base).hostname).not.toMatch(/^(127\.|localhost$|\[::1\]$)/);
+    await page.goto(base + '/');
+    await page.getByLabel('Passphrase', { exact: true }).fill(network.passphrase);
+    await page.getByRole('button', { name: 'Unlock', exact: true }).click();
+  }
+  const scripted = `${base}/api/files/html?document=${owner.doc.id}&path=destination.html&scripts=1`;
+  await writeFile(join(owner.directory, 'destination.html'), '<!doctype html><p id="result">Destination</p><script>document.body.dataset.authorRan = "yes"</script>');
+  await writeFile(join(owner.directory, 'link.html'), `<!doctype html><a id="go" href="${scripted}">Open</a>`);
+  await writeFile(join(owner.directory, 'refresh.html'), `<!doctype html><meta http-equiv="refresh" content="0;url=${scripted}"><p>Refreshing</p>`);
+  const frame = page.frameLocator('.file-preview-frame');
+  for (const file of ['link.html', 'refresh.html']) {
+    const left = page.waitForRequest(request => request.url().includes('path=destination.html'));
+    await page.goto(`${base}/?view=html&document=${owner.doc.id}&path=${file}`);
+    if (file === 'link.html') await frame.locator('#go').click();
+    await left;
+    await page.waitForTimeout(500);
+    await expect(page.getByRole('checkbox', { name: 'Run scripts' })).not.toBeChecked();
+    expect(await frame.locator('body').getAttribute('data-author-ran')).toBeNull();
+  }
+  await page.goto(`${base}/?view=html&document=${owner.doc.id}&path=destination.html`);
+  await expect(frame.locator('#result')).toHaveText('Destination');
+  expect(await frame.locator('body').getAttribute('data-author-ran')).toBeNull();
+  await page.getByRole('checkbox', { name: 'Run scripts' }).check();
+  await expect(frame.locator('body')).toHaveAttribute('data-author-ran', 'yes');
+});
 
 for (const access of ['direct', 'gateway', 'network'] as const) test(`HTML full page opens from its preview through ${access}`, async ({ page, context }) => {
   const owner = f.owners[1], filename = 'full page.html';
@@ -561,6 +602,11 @@ test('HTML full page keeps file authorization and rejects non-HTML content', asy
   await expect(page.locator('iframe')).toHaveCount(0);
 });
 
+// Selects an element's text in the page and releases the pointer, as a user's drag ends.
+const selectInPage = (frame: import('@playwright/test').FrameLocator, selector: string) => frame.locator(selector).evaluate(node => {
+  getSelection()!.selectAllChildren(node);
+  node.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+});
 const pageHtml = '<!doctype html><body><h1 id="title">Title</h1><p>Alpha <b>beta</b>\n  gamma</p><a href="#nav" id="link">Link</a> <button id="go" onclick="document.body.dataset.clicked=\'yes\'">Go</button></body>';
 async function htmlThreads() {
   const owner = f.owners[1], base = `${f.gateway.url}/a/${owner.alias}`, file = join(owner.directory, 'page.html');
@@ -590,18 +636,24 @@ test('HTML full page lists only its file-bound threads and the document view tag
   await expect(page.locator('.thread-row', { hasText: 'Plain document question' }).locator('.row-tag')).toHaveCount(0);
 });
 
-test('HTML full page needs Run scripts to ask about a selection, then sends an html file quote on a file-bound thread', async ({ page }) => {
+test('HTML full page needs Run scripts to select, then attaches a finished selection as an html file quote on a file-bound thread', async ({ page }) => {
   const { full, file } = await htmlThreads();
   await page.goto(full);
-  const frame = page.frameLocator('.file-preview-frame'), pick = page.getByRole('button', { name: 'Pick element' }), ask = page.getByRole('button', { name: 'Ask about selection' });
+  const frame = page.frameLocator('.file-preview-frame'), pick = page.getByRole('button', { name: 'Pick element' });
   await expect(frame.locator('p')).toHaveText('Alpha beta gamma');
-  for (const button of [pick, ask]) { await expect(button).toBeDisabled(); await expect(button).toHaveAttribute('title', /Run scripts/); }
+  await expect(pick).toBeDisabled(); await expect(pick).toHaveAttribute('title', /Run scripts/);
+  await expect(page.getByRole('button', { name: 'Ask about selection' })).toHaveCount(0);
   await page.getByRole('checkbox', { name: 'Run scripts' }).check();
   await expect(pick).toBeEnabled();
-  await expect(ask).toBeDisabled();
-  await frame.locator('p').evaluate(p => getSelection()!.selectAllChildren(p));
-  await expect(ask).toBeEnabled();
-  await ask.click();
+  // A real drag across the page attaches on release, like selecting text in a thread message.
+  const box = (await frame.locator('p').boundingBox())!;
+  await page.mouse.move(box.x + 1, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width - 1, box.y + box.height / 2, { steps: 5 });
+  await page.mouse.up();
+  await expect(page.locator('.sidebar .selection-badge')).toHaveText('page.html');
+  // Page controls such as zoom keep the attachment.
+  await page.getByRole('button', { name: 'Zoom in' }).click();
   await expect(page.locator('.sidebar .selection-badge')).toHaveText('page.html');
   const sent = page.waitForRequest(request => request.url().endsWith('/api/questions'));
   await page.getByLabel('Message', { exact: true }).fill('What does this say?');
@@ -612,6 +664,99 @@ test('HTML full page needs Run scripts to ask about a selection, then sends an h
   expect(body.fileQuote.selector).toBe('html > body > p');
   const state = await (await f.view(`/a/${f.owners[1].alias}/api/state`)).json();
   expect(state.threads[body.threadId].file).toBe(file);
+});
+
+test('HTML text selection works like a Markdown passage: quick menu, visible-thread draft, floating comment on a new page thread', async ({ page }) => {
+  const { full, file, owner } = await htmlThreads();
+  await page.setViewportSize({ width: 1400, height: 800 });
+  await page.goto(full);
+  const frame = page.frameLocator('.file-preview-frame'), menu = page.locator('.selection-actions');
+  const comment = menu.getByRole('button', { name: 'Comment' }), badge = page.locator('.sidebar .selection-badge');
+  await page.getByRole('checkbox', { name: 'Run scripts' }).check();
+  await expect(page.getByRole('button', { name: 'Pick element' })).toBeEnabled();
+  const drag = async () => {
+    const box = (await frame.locator('p').boundingBox())!;
+    await page.mouse.move(box.x + 1, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width - 1, box.y + box.height / 2, { steps: 5 });
+    await page.mouse.up();
+    return box;
+  };
+  // The page's own thread is open: a selection attaches to its draft, keeping typed text, and offers the menu beside it.
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Keep this draft');
+  const text = await drag();
+  await expect(badge).toHaveText('page.html');
+  await expect(input).toHaveValue('Keep this draft');
+  const placed = (await menu.boundingBox())!;
+  expect(Math.abs(placed.y + placed.height / 2 - (text.y + text.height / 2))).toBeLessThan(80);
+  // Clicking away in the page dismisses the menu and the pending attachment, as an outside press does for Markdown.
+  await frame.locator('h1').click();
+  await expect(comment).toHaveCount(0);
+  await expect(badge).toHaveCount(0);
+  await expect(input).toHaveValue('Keep this draft');
+  // Cancel dismisses too.
+  await drag();
+  await menu.getByRole('button', { name: 'Cancel selection' }).click();
+  await expect(comment).toHaveCount(0);
+  await expect(badge).toHaveCount(0);
+  // From the thread list, Comment opens the floating form; the new thread belongs to this page.
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await drag();
+  await expect(badge).toHaveCount(0);
+  await comment.click();
+  const form = page.getByRole('dialog', { name: 'Comment on selection' }), field = form.getByRole('textbox');
+  await field.fill('First line');
+  await field.press('Shift+Enter');
+  await field.pressSequentially('second line');
+  const sent = page.waitForRequest(request => request.url().endsWith('/api/questions'));
+  await field.press('Enter');
+  const body = (await sent).postDataJSON();
+  expect(body).toMatchObject({ text: 'First line\nsecond line', file, fileQuote: { path: file, kind: 'html', selector: 'html > body > p' } });
+  expect(body.threadId).toBeUndefined();
+  await expect(form).toHaveCount(0);
+  const state = await (await f.view(`/a/${owner.alias}/api/state`)).json();
+  expect(state.threads[state.requests[Object.keys(state.requests).at(-1)!].threadId].file).toBe(file);
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await expect(page.locator('.thread-row', { hasText: 'First line' })).toHaveCount(1);
+});
+
+test('an HTML floating comment closes on a press in the page only when empty, survives a new selection with text, and Run scripts off clears the menu', async ({ page }) => {
+  const { full } = await htmlThreads();
+  await page.setViewportSize({ width: 1400, height: 800 });
+  await page.goto(full);
+  const frame = page.frameLocator('.file-preview-frame'), menu = page.locator('.selection-actions'), form = page.getByRole('dialog', { name: 'Comment on selection' });
+  await page.getByRole('checkbox', { name: 'Run scripts' }).check();
+  await expect(page.getByRole('button', { name: 'Pick element' })).toBeEnabled();
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  const drag = async (selector: string) => {
+    const box = (await frame.locator(selector).boundingBox())!;
+    await page.mouse.move(box.x + 1, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width - 1, box.y + box.height / 2, { steps: 5 });
+    await page.mouse.up();
+  };
+  await drag('p');
+  // The page keeps its own keys, so the menu does not advertise C.
+  await expect(menu.getByRole('button', { name: 'Comment' })).toHaveAttribute('title', 'Comment');
+  await expect(menu.getByRole('button', { name: 'Comment' })).not.toHaveAttribute('aria-keyshortcuts', /./);
+  await menu.getByRole('button', { name: 'Comment' }).click();
+  await frame.locator('h1').click();
+  await expect(form).toHaveCount(0);
+  await expect(menu).toHaveCount(0);
+  await drag('p');
+  await menu.getByRole('button', { name: 'Comment' }).click();
+  await form.getByRole('textbox').fill('Keep this comment');
+  await frame.locator('h1').click();
+  await drag('h1');
+  await expect(form.getByRole('textbox')).toHaveValue('Keep this comment');
+  await expect(menu).toHaveCount(0);
+  await form.getByRole('button', { name: 'Cancel' }).click();
+  await expect(form).toHaveCount(0);
+  await drag('p');
+  await expect(menu).toBeVisible();
+  await page.getByRole('checkbox', { name: 'Run scripts' }).uncheck();
+  await expect(menu).toHaveCount(0);
 });
 
 test('HTML element picking swallows page clicks until it ends', async ({ page }) => {
@@ -678,18 +823,35 @@ test('attached HTML parts reveal only while they still match the page', async ({
 test('attached HTML text reveals across inline markup and source whitespace', async ({ page }) => {
   const { full } = await htmlThreads();
   await page.goto(full);
-  const frame = page.frameLocator('.file-preview-frame'), ask = page.getByRole('button', { name: 'Ask about selection' });
+  const frame = page.frameLocator('.file-preview-frame');
   await page.getByRole('checkbox', { name: 'Run scripts' }).check();
   await expect(page.getByRole('button', { name: 'Pick element' })).toBeEnabled();
-  await frame.locator('p').evaluate(p => getSelection()!.selectAllChildren(p));
-  await expect(ask).toBeEnabled();
-  await ask.click();
+  await selectInPage(frame, 'p');
+  await expect(page.locator('.sidebar .selection-badge')).toHaveText('page.html');
   await page.getByLabel('Message', { exact: true }).fill('About this text');
   await page.getByLabel('Message', { exact: true }).press('Enter');
   await frame.locator('p').evaluate(() => getSelection()!.removeAllRanges());
   await page.getByRole('button', { name: /Open (quoted|queued) file: page.html$/ }).click();
   await expect.poll(() => frame.locator('p').evaluate(() => getSelection()!.toString().replace(/\s+/g, ' ').trim())).toBe('Alpha beta gamma');
   await expect(page.getByRole('status').filter({ hasText: 'changed' })).toHaveCount(0);
+  // Revealing a saved target, then a release with no gesture of its own, never offers or attaches it.
+  await frame.locator('p').dispatchEvent('mouseup');
+  await page.waitForTimeout(300);
+  await expect(page.locator('.sidebar .selection-badge')).toHaveCount(0);
+  await expect(page.locator('.selection-actions')).toHaveCount(0);
+  // Clicking away, then dragging over those same words, is a new selection and attaches.
+  // (Pressing on still-selected text would start a text drag-and-drop instead.)
+  await page.getByRole('button', { name: /Open (quoted|queued) file: page.html$/ }).click();
+  await expect.poll(() => frame.locator('p').evaluate(() => getSelection()!.toString().replace(/\s+/g, ' ').trim())).toBe('Alpha beta gamma');
+  await frame.locator('h1').click();
+  await expect.poll(() => frame.locator('p').evaluate(() => getSelection()!.isCollapsed)).toBe(true);
+  const box = (await frame.locator('p').boundingBox())!;
+  await page.mouse.move(box.x + 1, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width - 1, box.y + box.height / 2, { steps: 5 });
+  await page.mouse.up();
+  await expect(page.locator('.sidebar .selection-badge')).toHaveText('page.html');
+  await expect.poll(() => frame.locator('p').evaluate(() => getSelection()!.toString().replace(/\s+/g, ' ').trim())).toBe('Alpha beta gamma');
 });
 
 async function pickAndSend(page: import('@playwright/test').Page, html: string, selector: string) {
@@ -875,13 +1037,86 @@ test('HTML full page header fits a phone and Chat swaps with the page', async ({
   await page.goto(full);
   const frame = page.locator('.file-preview-frame');
   await expect(frame).toBeVisible();
-  for (const name of ['Back to document', 'Pick element', 'Ask about selection']) await expect(page.getByLabel(name, { exact: true })).toBeVisible();
+  for (const name of ['Back to document', 'Pick element', 'Settings']) await expect(page.getByLabel(name, { exact: true })).toBeVisible();
   expect(await page.evaluate(() => [document.documentElement.scrollWidth <= innerWidth, (() => { const bar = document.querySelector('.topbar')!; return bar.scrollWidth <= bar.clientWidth; })()])).toEqual([true, true]);
   await page.getByRole('button', { name: 'Show conversations' }).click();
   await expect(page.locator('.sidebar')).toBeVisible();
   await expect(frame).toBeHidden();
   await page.getByRole('button', { name: 'Hide conversations' }).click();
   await expect(frame).toBeVisible();
+  // The header has no room for page zoom on a phone; Settings offers it, scaling only the page.
+  const pageWidth = () => page.frameLocator('.file-preview-frame').locator('body').evaluate(() => innerWidth), before = await pageWidth();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const settings = page.getByRole('dialog', { name: 'Reading settings' });
+  await settings.getByRole('button', { name: 'Zoom out' }).click();
+  await expect(settings.getByRole('button', { name: 'Reset content zoom' })).toHaveText('75%');
+  await expect.poll(pageWidth).toBe(Math.round(before / 0.75));
+  expect(await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--sidecar-conversation-scale'))).toBe('1');
+});
+
+const conversationsShown = (page: import('@playwright/test').Page) => page.locator('.conversation-toggle').getAttribute('aria-expanded');
+
+test('Cmd/Ctrl+Backslash toggles the conversations from a focused field or button, once per press', async ({ page }) => {
+  const owner = f.owners[1];
+  await page.goto(`${f.gateway.url}/a/${owner.alias}/?document=${owner.doc.id}`);
+  const toggle = page.locator('.conversation-toggle'), input = page.getByLabel('Message', { exact: true });
+  await expect(toggle).toHaveAttribute('aria-keyshortcuts', /^(Meta|Control)\+\\$/);
+  await expect(toggle).toHaveAttribute('title', /\((⌘|Ctrl\+)\\\)$/);
+  await input.fill('Draft');
+  await input.press('ControlOrMeta+Backslash');
+  await expect.poll(() => conversationsShown(page)).toBe('false');
+  await toggle.focus();
+  await page.keyboard.press('ControlOrMeta+Backslash');
+  await expect.poll(() => conversationsShown(page)).toBe('true');
+  await expect(input).toHaveValue('Draft');
+  // Auto-repeat, composition and extra modifiers do nothing.
+  await input.evaluate(field => {
+    const mac = /Mac|iPhone|iPad/.test(navigator.platform), base = { code: 'Backslash', key: '\\', bubbles: true, cancelable: true, metaKey: mac, ctrlKey: !mac };
+    for (const extra of [{ repeat: true }, { isComposing: true }, { shiftKey: true }, { altKey: true }, mac ? { ctrlKey: true } : { metaKey: true }]) field.dispatchEvent(new KeyboardEvent('keydown', { ...base, ...extra }));
+  });
+  await page.waitForTimeout(100);
+  expect(await conversationsShown(page)).toBe('true');
+});
+
+test('Cmd/Ctrl+Backslash reaches the viewer from inside HTML frames with Run scripts off or on, and forged messages are ignored', async ({ page }) => {
+  const owner = f.owners[1];
+  await writeFile(join(owner.directory, 'form.html'), '<!doctype html><body><input id="field" aria-label="Page field"><button id="go" onclick="document.body.dataset.clicked=\'yes\'">Go</button><script>document.body.dataset.ran = "yes"</script></body>');
+  await writeFile(join(owner.directory, 'review.md'), '# Review\n\n[Form](form.html)');
+  // Floating file window, Run scripts off.
+  await page.goto(`${f.gateway.url}/a/${owner.alias}/?document=${owner.doc.id}`);
+  await page.getByRole('link', { name: 'Form', exact: true }).click();
+  const windowFrame = page.getByRole('dialog', { name: 'File: form.html', exact: true }).frameLocator('iframe');
+  await windowFrame.locator('#field').fill('typed');
+  await windowFrame.locator('#field').press('ControlOrMeta+Backslash');
+  await expect.poll(() => conversationsShown(page)).toBe('false');
+  await windowFrame.locator('#field').press('ControlOrMeta+Backslash');
+  await expect.poll(() => conversationsShown(page)).toBe('true');
+  await expect(windowFrame.locator('#field')).toHaveValue('typed');
+  await windowFrame.locator('#go').click();
+  expect(await windowFrame.locator('body').evaluate(body => [body.dataset.ran, body.dataset.clicked])).toEqual([undefined, undefined]);
+  // Full page, Run scripts off then on.
+  await page.goto(`${f.gateway.url}/a/${owner.alias}/?view=html&document=${owner.doc.id}&path=form.html`);
+  const frame = page.frameLocator('.file-preview-frame');
+  for (const scripts of [false, true]) {
+    if (scripts) { await page.getByRole('checkbox', { name: 'Run scripts' }).check(); await expect(frame.locator('body')).toHaveAttribute('data-ran', 'yes'); }
+    const before = await conversationsShown(page);
+    await frame.locator('#field').click();
+    await frame.locator('#field').press('ControlOrMeta+Backslash');
+    await expect.poll(() => conversationsShown(page)).toBe(before === 'true' ? 'false' : 'true');
+    await page.waitForTimeout(100);
+    expect(await conversationsShown(page)).toBe(before === 'true' ? 'false' : 'true');
+  }
+  // Only a current Sidecar HTML frame may forward it: messages from this window or another frame are ignored.
+  const before = await conversationsShown(page);
+  await page.evaluate(() => {
+    const message = { sidecar: 'html-shortcut', type: 'toggle-conversations' };
+    window.postMessage(message, '*');
+    const other = document.createElement('iframe');
+    other.srcdoc = `<script>parent.postMessage(${JSON.stringify(message)}, '*')<\/script>`;
+    document.body.appendChild(other);
+  });
+  await page.waitForTimeout(300);
+  expect(await conversationsShown(page)).toBe(before);
 });
 
 // A registered HTML file outside every workspace: the document itself, with no Markdown wrapper.
@@ -941,13 +1176,12 @@ test('a standalone HTML document keeps its own threads, selections, picked eleme
   const post = async (path: string, body: object) => (await f.view(`/a/${owner.alias}${path}`, body)).json();
   await post('/api/questions', { documentId: owner.doc.id, text: 'Markdown document question', clientMessageId: 'markdown' });
   await page.goto(`${f.gateway.url}/a/${owner.alias}/?document=${doc.id}`);
-  const frame = page.frameLocator('.file-preview-frame'), ask = page.getByRole('button', { name: 'Ask about selection' }), pick = page.getByRole('button', { name: 'Pick element' });
+  const frame = page.frameLocator('.file-preview-frame'), pick = page.getByRole('button', { name: 'Pick element' });
   await expect(frame.locator('#result')).toHaveText('Static diagram');
   await expect(pick).toBeDisabled();
   await page.getByRole('checkbox', { name: 'Run scripts' }).check();
   await expect(pick).toBeEnabled();
-  await frame.locator('#result').evaluate(p => getSelection()!.selectAllChildren(p));
-  await ask.click();
+  await selectInPage(frame, '#result');
   await expect(page.locator('.sidebar .selection-badge')).toHaveText('diagram.html');
   let sent = page.waitForRequest(request => request.url().endsWith('/api/questions'));
   await page.getByLabel('Message', { exact: true }).fill('What does this say?');
@@ -1061,6 +1295,106 @@ test('agent HTML targets reveal on a standalone HTML document; Markdown highligh
   await expect(page.locator('#document mark.annotation-highlight')).toBeFocused();
 });
 
+test('selector-less agent targets on a standalone HTML document reveal as page text, including replies saved before the fix', async ({ page }) => {
+  const { owner, doc } = await standaloneHtml();
+  // The title and a script repeat "Go" outside the page content; "Twice" is visible twice; "Hidden words" is only in a script.
+  await writeFile(doc.path, '<!doctype html><title>Go</title><body><h1 id="go">Go</h1><script>var label = "Go", note = "Hidden words";</script><p>Twice</p><p>Twice</p></body>');
+  await owner.agentCall('/agent/documents', { path: doc.path, generated: false });
+  const thread = Object.values((await (await f.view(`/a/${owner.alias}/api/state`)).json()).threads as Record<string, { id: string; documentId: string }>).find(thread => thread.documentId === doc.id)!;
+  await f.view(`/a/${owner.alias}/api/questions`, { documentId: doc.id, threadId: thread.id, text: 'Which button?', clientMessageId: 'which' });
+  await agentReply(owner, thread.id, [{ exact: 'Go', label: 'Go text' }, { exact: 'Twice', label: 'Repeated' }, { exact: 'Hidden words', label: 'Script only' }], 'It is [this one](#selection-1).');
+  const message = (await (await f.view(`/a/${owner.alias}/api/state`)).json()).threads[thread.id].messages.at(-1);
+  expect(message.selections).toBeUndefined();
+  expect(message.fileSelections[0].fileQuote).toEqual({ path: doc.path, kind: 'html', exact: 'Go', selector: 'body' });
+  // A reply saved earlier kept the target as a Markdown passage; the viewer shows it as page text without changing saved state.
+  const statePath = join(owner.directory, 'state.json'), saved = JSON.parse(await readFile(statePath, 'utf8'));
+  const legacy = saved.threads[thread.id].messages.at(-1);
+  legacy.selections = legacy.fileSelections.map(({ id, slug, label, fileQuote }: { id: string; slug: string; label: string; fileQuote: { exact: string } }) => ({ id, slug, label, isVisible: true, quote: { exact: fileQuote.exact, prefix: '', suffix: '', start: 0, end: fileQuote.exact.length, version: 'older' } }));
+  delete legacy.fileSelections;
+  await owner.stop();
+  await writeFile(statePath, JSON.stringify(saved));
+  await owner.restart();
+  await page.goto(`${f.gateway.url}/a/${owner.alias}/?document=${doc.id}`);
+  const frame = page.frameLocator('.file-preview-frame');
+  await expect(page.getByRole('button', { name: 'Show on page: Go text' })).toBeVisible();
+  await expect(page.locator('.sidebar')).not.toContainText('Passage changed');
+  await expect(page.getByRole('button', { name: /View original/ })).toHaveCount(0);
+  await page.getByRole('checkbox', { name: 'Run scripts' }).check();
+  await expect(page.getByRole('button', { name: 'Pick element' })).toBeEnabled();
+  await page.locator('.message-bubble a', { hasText: 'this one' }).click();
+  await expect.poll(() => frame.locator('#go').evaluate(() => getSelection()!.toString())).toBe('Go');
+  await expect(page.locator('.html-notice')).toHaveCount(0);
+  // Text visible more than once is never guessed, and text only in a script is never selected.
+  for (const name of ['Repeated', 'Script only']) {
+    await page.getByRole('button', { name: 'Show on page: Go text' }).click();
+    await expect(page.locator('.html-notice')).toHaveCount(0);
+    await page.getByRole('button', { name: `Show on page: ${name}` }).click();
+    await expect(page.locator('.html-notice')).toHaveText('This part of the page changed or was removed since it was attached.');
+  }
+  expect(JSON.parse(await readFile(statePath, 'utf8')).threads[thread.id].messages.at(-1).selections).toHaveLength(3);
+});
+
+test('an agent revision keeps the HTML reading position; revealing a target still scrolls to it', async ({ page }) => {
+  const { owner, doc } = await standaloneHtml();
+  const long = (label: string) => `<!doctype html><body><p id="top">Top marker</p><div style="height:3000px"></div><p id="end">${label}</p></body>`;
+  await writeFile(doc.path, long('First end'));
+  await owner.agentCall('/agent/documents', { path: doc.path, generated: false });
+  const thread = Object.values((await (await f.view(`/a/${owner.alias}/api/state`)).json()).threads as Record<string, { id: string; documentId: string }>).find(thread => thread.documentId === doc.id)!;
+  await f.view(`/a/${owner.alias}/api/questions`, { documentId: doc.id, threadId: thread.id, text: 'Where is the top?', clientMessageId: 'top' });
+  await agentReply(owner, thread.id, [{ selector: '#top', exact: 'Top marker', label: 'Top' }], 'See [the top](#selection-1).');
+  await page.goto(`${f.gateway.url}/a/${owner.alias}/?document=${doc.id}`);
+  const frame = page.frameLocator('.file-preview-frame'), scrollY = () => frame.locator('body').evaluate(() => scrollY);
+  await page.getByRole('checkbox', { name: 'Run scripts' }).check();
+  await expect(page.getByRole('button', { name: 'Pick element' })).toBeEnabled();
+  await frame.locator('#end').evaluate(() => scrollTo(0, 1500));
+  await page.waitForTimeout(300);
+  await writeFile(doc.path, long('Second end'));
+  await owner.agentCall('/agent/documents', { path: doc.path, generated: false });
+  await expect(frame.locator('#end')).toHaveText('Second end');
+  await expect.poll(scrollY).toBe(1500);
+  await page.locator('.message-bubble a', { hasText: 'the top' }).click();
+  await expect.poll(scrollY).toBeLessThan(500);
+});
+
+test('the HTML full page offers settings and zooms the page without scaling the conversation', async ({ page }) => {
+  const { full } = await htmlThreads();
+  await page.setViewportSize({ width: 1400, height: 800 });
+  await page.goto(full);
+  const frame = page.frameLocator('.file-preview-frame'), pageWidth = () => frame.locator('body').evaluate(() => innerWidth);
+  await expect(frame.locator('p')).toBeVisible();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('slider', { name: 'Conversation text size' }).fill('130');
+  await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--sidecar-conversation-scale'))).toBe('1.3');
+  await page.getByRole('button', { name: 'Close settings' }).click();
+  const before = await pageWidth(), sidebar = (await page.locator('.sidebar').boundingBox())!.width;
+  await page.getByRole('button', { name: 'Zoom in' }).click();
+  await page.getByRole('button', { name: 'Zoom in' }).click();
+  await expect(page.getByRole('button', { name: 'Reset content zoom' })).toHaveText('150%');
+  await expect.poll(pageWidth).toBe(Math.round(before / 1.5));
+  expect((await page.locator('.sidebar').boundingBox())!.width).toBe(sidebar);
+  await page.getByRole('button', { name: 'Reset content zoom' }).click();
+  await expect.poll(pageWidth).toBe(before);
+});
+
+test('a fast sidebar drag across the HTML page keeps resizing and ends on release over the page', async ({ page }) => {
+  const { full } = await htmlThreads();
+  await page.setViewportSize({ width: 1400, height: 800 });
+  await page.goto(full);
+  await expect(page.frameLocator('.file-preview-frame').locator('p')).toBeVisible();
+  const sidebar = page.locator('.sidebar'), handle = (await page.locator('.sidebar-resize > div').nth(1).boundingBox())!;
+  const before = (await sidebar.boundingBox())!.width, y = handle.y + 300;
+  await page.mouse.move(handle.x + 3, y);
+  await page.mouse.down();
+  // One jump lands the pointer over the page frame; the release happens there too.
+  await page.mouse.move(handle.x - 150, y);
+  await page.mouse.up();
+  await expect.poll(async () => (await sidebar.boundingBox())!.width).toBeGreaterThan(before + 100);
+  const after = (await sidebar.boundingBox())!.width;
+  await page.mouse.move(handle.x - 400, y);
+  await page.waitForTimeout(100);
+  expect((await sidebar.boundingBox())!.width).toBe(after);
+});
+
 test('an agent HTML target clicked from the Markdown document opens its full page and reveals there after Run scripts', async ({ page, context }) => {
   const { base, owner } = await htmlThreads();
   const thread = '00000000-0000-4000-8000-000000000001';
@@ -1121,8 +1455,8 @@ test('HTML selection modes are icon-only toggles with tooltips, accessible names
   const { full } = await htmlThreads();
   await page.goto(full);
   const modes = page.getByRole('group', { name: 'Selection mode' });
-  const text = modes.getByRole('button', { name: 'Select text' }), pick = modes.getByRole('button', { name: 'Pick element' }), ask = page.getByRole('button', { name: 'Ask about selection' });
-  for (const button of [text, pick, ask]) { await expect(button).toHaveText(''); await expect(button).toBeDisabled(); await expect(button).toHaveAttribute('title', /Run scripts/); }
+  const text = modes.getByRole('button', { name: 'Select text' }), pick = modes.getByRole('button', { name: 'Pick element' });
+  for (const button of [text, pick]) { await expect(button).toHaveText(''); await expect(button).toBeDisabled(); await expect(button).toHaveAttribute('title', /Run scripts/); }
   await page.getByRole('checkbox', { name: 'Run scripts' }).check();
   await expect(text).toHaveAttribute('aria-pressed', 'true');
   await expect(pick).toHaveAttribute('aria-pressed', 'false');
@@ -1134,11 +1468,12 @@ test('HTML selection modes are icon-only toggles with tooltips, accessible names
   await text.click();
   await expect(text).toHaveAttribute('aria-pressed', 'true');
   await expect(pick).toHaveAttribute('aria-pressed', 'false');
-  // Selected text still attaches through the labeled Ask button, by keyboard too.
-  await page.frameLocator('.file-preview-frame').locator('p').evaluate(p => getSelection()!.selectAllChildren(p));
-  await expect(ask).toBeEnabled();
-  await ask.focus();
-  await page.keyboard.press('Enter');
+  // A keyboard selection attaches when Shift is released.
+  const frame = page.frameLocator('.file-preview-frame');
+  await frame.locator('h1').evaluate(node => {
+    getSelection()!.selectAllChildren(node);
+    node.dispatchEvent(new KeyboardEvent('keyup', { key: 'Shift', bubbles: true }));
+  });
   await expect(page.locator('.sidebar .selection-badge')).toHaveText('page.html');
 });
 

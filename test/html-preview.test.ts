@@ -3,8 +3,19 @@ import { test } from 'node:test';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fixture } from './support.ts';
-import { htmlBridge } from '../src/html-bridge.ts';
+import { htmlBridge, shortcutHelper } from '../src/html-bridge.ts';
 import { withBridge } from '../src/server.ts';
+
+// The injected tag carries the response's CSP nonce; it always holds the shortcut helper.
+const nonceOf = (response: Response) => /script-src 'nonce-([^']+)'/.exec(response.headers.get('content-security-policy')!)?.[1];
+const helpers = (nonce: string, isBridge: boolean) => `<script nonce="${nonce}" data-sidecar-bridge>${shortcutHelper}${isBridge ? htmlBridge : ''}</script>`;
+// Run scripts: the viewer mints a one-use ticket, then the frame's GET spends it.
+type Fixture = Awaited<ReturnType<typeof fixture>>;
+async function scripted(f: Fixture, route: string, extra = '') {
+  const { ticket } = await (await f.view(route, {})).json();
+  return f.view(`${route}&scripts=1&ticket=${ticket}${extra}`);
+}
+const injectedNonce = (body: string) => /^(?:[\s\S]*?)<script nonce="([^"]+)" data-sidecar-bridge>/.exec(body)![1];
 
 test('HTML frame endpoint requires viewer auth and an authorized HTML file', async t => {
   const f = await fixture(t);
@@ -20,13 +31,19 @@ test('HTML frame endpoint requires viewer auth and an authorized HTML file', asy
   assert.equal(await checked.text(), '');
   const staticFrame = await f.view(route);
   assert.equal(staticFrame.status, 200);
-  assert.match(staticFrame.headers.get('content-security-policy')!, /script-src 'none'/);
-  const scripted = await f.view(route + '&scripts=1');
-  assert.equal(scripted.status, 200);
-  assert.match(scripted.headers.get('content-type')!, /text\/html/);
-  assert.match(scripted.headers.get('content-security-policy')!, /sandbox allow-scripts;/);
-  assert.doesNotMatch(scripted.headers.get('content-security-policy')!, /allow-same-origin/);
-  assert.match(await scripted.text(), /<script>/);
+  // Run scripts off: only the nonced shortcut helper may run; the author's script is served but blocked.
+  const nonce = nonceOf(staticFrame)!;
+  assert.match(nonce, /^[A-Za-z0-9+/]{22}==$/);
+  assert.doesNotMatch(staticFrame.headers.get('content-security-policy')!, /script-src[^;]*unsafe|allow-same-origin/);
+  assert.equal(await staticFrame.text(), `${helpers(nonce, false)}<p>Diagram</p><script>document.body.dataset.ran="yes"</script>`);
+  assert.notEqual(nonceOf(await f.view(route)), nonce);
+  const scriptedFrame = await scripted(f, route);
+  assert.equal(scriptedFrame.status, 200);
+  assert.match(scriptedFrame.headers.get('content-type')!, /text\/html/);
+  assert.match(scriptedFrame.headers.get('content-security-policy')!, /sandbox allow-scripts;/);
+  assert.doesNotMatch(scriptedFrame.headers.get('content-security-policy')!, /allow-same-origin/);
+  assert.equal(nonceOf(scriptedFrame), undefined);
+  assert.match(await scriptedFrame.text(), /<script>/);
   assert.equal((await f.view(`/api/files/html?document=${doc.id}&path=a.md&scripts=1`)).status, 415);
   assert.equal((await f.view(`/api/files/html?document=${doc.id}&path=a.md`, undefined, 'HEAD')).status, 415);
   assert.equal((await f.view(`/api/files/html?document=${doc.id}&path=../outside.html`, undefined, 'HEAD')).status, 403);
@@ -35,33 +52,70 @@ test('HTML frame endpoint requires viewer auth and an authorized HTML file', asy
   assert.equal((await f.view('/api/files/html?document=missing&path=diagram.html&scripts=1')).status, 404);
 });
 
+test('Run scripts tickets are minted only by the viewer POST, spent once, and bound to their document and file', async t => {
+  const f = await fixture(t), doc = await f.register();
+  await f.agent('/agent/documents', { path: doc.path, workspace: f.directory });
+  await writeFile(join(f.directory, 'diagram.html'), '<p>Diagram</p>');
+  await writeFile(join(f.directory, 'destination.html'), '<p>Destination</p>');
+  const route = (file: string) => `/api/files/html?document=${doc.id}&path=${file}`;
+  const isScripted = (response: Response) => /script-src 'unsafe-inline'/.test(response.headers.get('content-security-policy') ?? '');
+  // No ticket, a GET or HEAD (what a frame navigation can make), or a POST without the viewer's Origin: never scripts.
+  assert.equal((await f.view(route('diagram.html') + '&scripts=1')).status, 403);
+  assert.equal(isScripted(await f.view(route('diagram.html') + '&scripts=1', undefined, 'HEAD')), false);
+  assert.equal((await (await f.view(route('diagram.html'))).text()).includes('ticket'), false);
+  const foreign = await fetch(f.url + route('diagram.html'), { method: 'POST', headers: { Cookie: f.cookie, Origin: 'null', 'Content-Type': 'application/json' }, body: '{}' });
+  assert.equal(foreign.status, 403);
+  assert.match((await foreign.json()).error, /origin/i);
+  // A ticket works once, for its own file only.
+  const { ticket } = await (await f.view(route('diagram.html'), {})).json();
+  assert.match(ticket, /^[A-Za-z0-9_-]{32}$/);
+  assert.equal((await f.view(`${route('destination.html')}&scripts=1&ticket=${ticket}`)).status, 403);
+  assert.equal((await f.view(`${route('diagram.html')}&scripts=1&ticket=${ticket}`)).status, 403, 'a ticket tried on another file is spent');
+  const fresh = (await (await f.view(route('diagram.html'), {})).json()).ticket;
+  const first = await f.view(`${route('diagram.html')}&scripts=1&ticket=${fresh}`);
+  assert.equal(first.status, 200);
+  assert.equal(isScripted(first), true);
+  assert.equal((await f.view(`${route('diagram.html')}&scripts=1&ticket=${fresh}`)).status, 403, 'replay');
+  // An unspent ticket expires after a minute.
+  const late = (await (await f.view(route('diagram.html'), {})).json()).ticket;
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 60_001 });
+  try { assert.equal((await f.view(`${route('diagram.html')}&scripts=1&ticket=${late}`)).status, 403, 'expired'); }
+  finally { t.mock.timers.reset(); }
+  // Another document's ticket does not open this one's file.
+  const other = await f.register('other.md', '# Other');
+  await f.agent('/agent/documents', { path: other.path, workspace: f.directory });
+  const elsewhere = (await (await f.view(`/api/files/html?document=${other.id}&path=diagram.html`, {})).json()).ticket;
+  assert.equal((await f.view(`${route('diagram.html')}&scripts=1&ticket=${elsewhere}`)).status, 403);
+});
+
 test('the HTML bridge is injected only into scripted bridge requests, before page scripts, with the same CSP', async t => {
-  assert.doesNotMatch(htmlBridge, /<\/script/i);
-  assert.doesNotThrow(() => new Function(htmlBridge));
+  for (const code of [htmlBridge, shortcutHelper]) { assert.doesNotMatch(code, /<\/script/i); assert.doesNotThrow(() => new Function(code)); }
   const f = await fixture(t), doc = await f.register();
   await f.agent('/agent/documents', { path: doc.path, workspace: f.directory });
   await writeFile(join(f.directory, 'diagram.html'), '<p>Diagram</p>');
   const route = `/api/files/html?document=${doc.id}&path=diagram.html`;
   const policies = new Set<string>();
   for (const [query, bridged] of [['', false], ['&bridge=1', false], ['&scripts=1', false], ['&scripts=1&bridge=1', true]] as const) {
-    const response = await f.view(route + query), body = await response.text();
+    const response = query.startsWith('&scripts=1') ? await scripted(f, route, query.slice('&scripts=1'.length)) : await f.view(route + query), body = await response.text();
     assert.equal(body.includes(htmlBridge), bridged, query);
-    if (!bridged) assert.equal(body, '<p>Diagram</p>');
+    assert.equal(body, `${helpers(injectedNonce(body), bridged)}<p>Diagram</p>`, query);
     policies.add(response.headers.get('content-security-policy')!.replace(/script-src [^;]+;/, '').replace(' allow-scripts', ''));
   }
   assert.equal(policies.size, 1);
-  assert.doesNotMatch((await f.view(route + '&scripts=1&bridge=1')).headers.get('content-security-policy')!, /allow-same-origin/);
+  assert.doesNotMatch((await scripted(f, route, '&bridge=1')).headers.get('content-security-policy')!, /allow-same-origin/);
   // After the doctype (standards mode kept) and before any page script.
   await writeFile(join(f.directory, 'diagram.html'), '<!DOCTYPE html><html><head><script>1</script></head></html>');
-  assert.equal(await (await f.view(route + '&scripts=1&bridge=1')).text(), `<!DOCTYPE html><script data-sidecar-bridge>${htmlBridge}</script><html><head><script>1</script></head></html>`);
+  let body = await (await scripted(f, route, '&bridge=1')).text();
+  assert.equal(body, `<!DOCTYPE html>${helpers(injectedNonce(body), true)}<html><head><script>1</script></head></html>`);
   // A doctype-less file with many comments must not stall the owner server.
   const comments = '<!-- note -->\n'.repeat(50_000) + '<html><body>diagram</body></html>', started = performance.now();
-  assert.equal(withBridge(comments), `<script data-sidecar-bridge>${htmlBridge}</script>${comments}`);
-  assert.equal(withBridge(comments.replace('<html>', '<!doctype html><html>')).indexOf('<script data-sidecar-bridge>'), comments.indexOf('<html>') + '<!doctype html>'.length);
+  assert.equal(withBridge(comments, 'n', true), `${helpers('n', true)}${comments}`);
+  assert.equal(withBridge(comments.replace('<html>', '<!doctype html><html>'), 'n', false).indexOf('<script nonce="n" data-sidecar-bridge>'), comments.indexOf('<html>') + '<!doctype html>'.length);
   assert.ok(performance.now() - started < 1000, 'prolog scan must stay linear');
   // Comments may precede the doctype; injecting before them would force quirks mode.
   await writeFile(join(f.directory, 'diagram.html'), '<!-- Generated -->\n<!doctype html><p>x</p>');
-  assert.equal(await (await f.view(route + '&scripts=1&bridge=1')).text(), `<!-- Generated -->\n<!doctype html><script data-sidecar-bridge>${htmlBridge}</script><p>x</p>`);
+  body = await (await scripted(f, route, '&bridge=1')).text();
+  assert.equal(body, `<!-- Generated -->\n<!doctype html>${helpers(injectedNonce(body), true)}<p>x</p>`);
 });
 
 test('file-bound threads validate their file and deliver it with html file quotes', async t => {
@@ -78,6 +132,12 @@ test('file-bound threads validate their file and deliver it with html file quote
   assert.equal(prepared.thread.file, file);
   assert.deepEqual(prepared.fileQuote, fileQuote);
   assert.equal((await f.view('/api/questions', { documentId: doc.id, text: 'Bad', fileQuote: { ...fileQuote, selector: undefined }, clientMessageId: 'b' })).status, 400);
+  // A floating comment on an HTML page starts a new thread bound to that page; a file never re-routes an existing thread.
+  const started = await (await f.view('/api/questions', { documentId: doc.id, file, text: 'New page thread', fileQuote, clientMessageId: 'new' })).json();
+  assert.notEqual(started.threadId, id(1));
+  assert.equal((await (await f.view('/api/state')).json()).threads[started.threadId].file, file);
+  assert.equal((await f.view('/api/questions', { documentId: doc.id, threadId: id(1), file, text: 'Both', clientMessageId: 'both' })).status, 400);
+  assert.equal((await f.view('/api/questions', { documentId: doc.id, file: 'relative.html', text: 'Relative', clientMessageId: 'relative' })).status, 400);
 });
 
 test('a registered HTML file is its own document: titled from <title>, served without a workspace, file-bound threads', async t => {
@@ -91,11 +151,11 @@ test('a registered HTML file is its own document: titled from <title>, served wi
   assert.equal((await fetch(f.url + own)).status, 403);
   const frame = await f.view(own);
   assert.equal(frame.status, 200);
-  assert.match(frame.headers.get('content-security-policy')!, /script-src 'none'.*sandbox;/);
-  assert.equal(await frame.text(), '<!doctype html><title>Q&amp;A\n  Page &#x1F600;</title><p>Body</p><script>1</script>');
-  const scripted = await f.view(own + '&scripts=1&bridge=1');
-  assert.match(scripted.headers.get('content-security-policy')!, /sandbox allow-scripts;/);
-  assert.match(await scripted.text(), /data-sidecar-bridge/);
+  assert.match(frame.headers.get('content-security-policy')!, /script-src 'nonce-[^']+';.*sandbox allow-scripts;/);
+  assert.equal(await frame.text(), `<!doctype html>${helpers(nonceOf(frame)!, false)}<title>Q&amp;A\n  Page &#x1F600;</title><p>Body</p><script>1</script>`);
+  const scriptedFrame = await scripted(f, own, '&bridge=1');
+  assert.match(scriptedFrame.headers.get('content-security-policy')!, /script-src 'unsafe-inline'.*sandbox allow-scripts;/);
+  assert.match(await scriptedFrame.text(), /data-sidecar-bridge/);
   // Only the registered file itself: siblings and other directories still need a workspace or grant.
   for (const route of [`/api/files/html?document=${doc.id}&directory=${encodeURIComponent(directory)}&path=other.html`, `/api/files/html?document=${doc.id}&path=page.html`,
     `/api/files/content?document=${doc.id}&directory=${encodeURIComponent(directory)}&path=page.html`, `/api/files?document=${doc.id}&dir=${encodeURIComponent(directory)}`])
@@ -150,11 +210,13 @@ async function answer(f: Awaited<ReturnType<typeof fixture>>, documentId: string
 test('agent HTML targets attach to the thread page: standalone document, file-bound thread, never a plain Markdown thread', async t => {
   const f = await fixture(t);
   const page = await f.register('page.html', '<p id="result">Body</p><button id="go">Go</button>');
-  const standalone = await answer(f, page.id, undefined, [{ selector: '#result', exact: 'Body', label: 'Result' }, { selector: '#go', exact: 'Go', element: true }]);
+  const standalone = await answer(f, page.id, undefined, [{ selector: '#result', exact: 'Body', label: 'Result' }, { selector: '#go', exact: 'Go', element: true }, { exact: 'Body', label: 'Text' }]);
   assert.equal(standalone.selections, undefined);
+  // A standalone page has no Markdown text: a selector-less target matches its exact text anywhere on the page.
   assert.deepEqual(standalone.fileSelections.map(({ id, ...rest }: { id: string }) => rest), [
     { slug: 'selection-1', label: 'Result', fileQuote: { path: page.path, kind: 'html', exact: 'Body', selector: '#result' } },
-    { slug: 'selection-2', fileQuote: { path: page.path, kind: 'html', exact: 'Go', selector: '#go', isElement: true } }]);
+    { slug: 'selection-2', fileQuote: { path: page.path, kind: 'html', exact: 'Go', selector: '#go', isElement: true } },
+    { slug: 'selection-3', label: 'Text', fileQuote: { path: page.path, kind: 'html', exact: 'Body', selector: 'body' } }]);
   const doc = await f.register(), diagram = join(doc.path.slice(0, doc.path.lastIndexOf('/')), 'diagram.html');
   const bound = await (await f.view('/api/threads', { id: '00000000-0000-4000-8000-000000000007', documentId: doc.id, file: diagram })).json();
   const mixed = await answer(f, doc.id, bound.id, [{ exact: 'First heading' }, { selector: '#go', exact: 'Go' }]);

@@ -1,3 +1,16 @@
+// Cmd+Backslash on a Mac, Ctrl+Backslash elsewhere: shows or hides the conversation sidebar from any focus.
+// The viewer's own check is isConversationShortcut in web/shortcuts.ts; keep the two in step.
+// Injected into every HTML frame, even with Run scripts off (then the only script its CSP nonce allows).
+// Plain browser JS: no backticks, no "${", and no closing script tag.
+export const shortcutHelper = String.raw`(function () {
+'use strict';
+var isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+window.addEventListener('keydown', function (event) {
+  if (event.code !== 'Backslash' || event.repeat || event.isComposing || event.shiftKey || event.altKey || (isMac ? !event.metaKey || event.ctrlKey : !event.ctrlKey || event.metaKey)) return;
+  event.preventDefault(); event.stopImmediatePropagation();
+  window.parent.postMessage({ sidecar: 'html-shortcut', type: 'toggle-conversations' }, '*');
+}, true);
+})();`;
 // Inline script appended to scripted full-page HTML so the parent viewer can attach selections and picked elements.
 // Plain browser JS: no backticks, no "${", and no closing script tag.
 export const htmlBridge = String.raw`(function () {
@@ -38,17 +51,30 @@ function fingerprint(element) {
   return text.length + ':' + ('0000000' + hash.toString(16)).slice(-8);
 }
 function elementOf(node) { return node && node.nodeType === 1 ? node : node && node.parentElement; }
-var timer = 0;
+var timer = 0, revealed = null;
+function sameRange(a, b) { return a.compareBoundaryPoints(Range.START_TO_START, b) === 0 && a.compareBoundaryPoints(Range.END_TO_END, b) === 0; }
+// Reports a selection the user just finished with the pointer or keyboard (with its frame rectangle, for the
+// viewer's quick menu), or an empty one when the gesture left nothing selected. A range Sidecar itself revealed
+// is not reported, so navigating a saved target never offers or attaches it.
 function reportSelection() {
-  var selection = getSelection(), exact = '', selector = 'html';
-  if (selection && !selection.isCollapsed && selection.rangeCount) {
-    // Range text (raw node data), not Selection text (rendered), so reveal can match it again.
-    var range = selection.getRangeAt(0), text = range.toString(), element = elementOf(range.commonAncestorContainer);
-    if (text.trim() && element && !isOwn(element)) { exact = text.slice(0, 16000); selector = selectorOf(element); }
-  }
-  send({ type: 'selection', exact: exact, selector: selector });
+  var selection = getSelection();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) { send({ type: 'selection', exact: '', selector: 'html' }); return; }
+  // Range text (raw node data), not Selection text (rendered), so reveal can match it again.
+  var range = selection.getRangeAt(0), text = range.toString(), element = elementOf(range.commonAncestorContainer);
+  if (!text.trim() || !element || isOwn(element) || revealed && sameRange(range, revealed)) return;
+  var box = range.getBoundingClientRect();
+  send({ type: 'selection', exact: text.slice(0, 16000), selector: selectorOf(element), rect: { left: box.left, top: box.top, right: box.right, bottom: box.bottom } });
 }
-document.addEventListener('selectionchange', function () { clearTimeout(timer); timer = setTimeout(reportSelection, 250); });
+// Deferred so a click that collapses the selection is seen collapsed.
+function finished() { clearTimeout(timer); timer = setTimeout(reportSelection, 0); }
+document.addEventListener('mouseup', finished);
+document.addEventListener('touchend', finished);
+document.addEventListener('keyup', function (event) { if (event.key === 'Shift' || event.key.indexOf('Arrow') === 0) finished(); });
+// A new gesture may select the revealed words on purpose; only a release with no gesture of its own stays ignored.
+function started() { revealed = null; }
+document.addEventListener('mousedown', started);
+document.addEventListener('touchstart', started, { passive: true });
+document.addEventListener('keydown', function (event) { if (event.key === 'Shift' || event.key.indexOf('Arrow') === 0) started(); });
 
 var style, overlay, picking = false, hovered = null, flashTimer = 0;
 function ensureOverlay() {
@@ -99,6 +125,12 @@ window.addEventListener('pointermove', moved, true);
 window.addEventListener('scroll', refresh, true);
 window.addEventListener('resize', refresh, true);
 window.addEventListener('keydown', escape, true);
+// The viewer remembers the reading position so an agent's revision reload can return to it.
+var scrollTimer = 0;
+window.addEventListener('scroll', function () {
+  clearTimeout(scrollTimer);
+  scrollTimer = setTimeout(function () { send({ type: 'scroll', x: scrollX, y: scrollY }); }, 100);
+}, { passive: true });
 // Local file links open Sidecar file windows instead of navigating this frame. Registered after the picker
 // guards, so a pick wins. Same-page anchors, URL schemes and scheme-relative URLs keep their normal behavior;
 // the viewer re-validates every href and only opens files inside the document's workspace.
@@ -134,10 +166,12 @@ function flash(element) {
   clearTimeout(flashTimer);
   flashTimer = setTimeout(function () { if (!picking && overlay) overlay.style.display = 'none'; }, 1500);
 }
-function textMatch(root, exact) {
+// isContentOnly skips text that is not page content (head, script, style...): a page-text reference must match
+// visible words once. A user selection keeps all text, since its range text includes any inline script it spans.
+function textMatch(root, exact, isContentOnly) {
   var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), nodes = [], full = '';
   for (var node = walker.nextNode(); node; node = walker.nextNode()) {
-    if (isOwn(node.parentElement)) continue;
+    if (isOwn(node.parentElement) || isContentOnly && node.parentElement && node.parentElement.closest('head, script, style, template, noscript')) continue;
     nodes.push({ node: node, start: full.length }); full += node.data;
   }
   var at = full.indexOf(exact);
@@ -160,10 +194,11 @@ function reveal(message) {
         // A user pick must keep its full markup; an agent target (no fingerprint) must still contain its text once.
         if (typeof message.fingerprint === 'string' ? fingerprint(element) === message.fingerprint : !!message.exact && !!textMatch(element, message.exact)) { element.scrollIntoView({ block: 'center' }); flash(element); ok = true; }
       } else {
-        var range = textMatch(element, message.exact);
+        // 'body' marks an agent's page-text reference (pageTextSelector); a user selection never records it.
+        var range = textMatch(element, message.exact, message.selector === 'body');
         if (range) {
           var selection = getSelection();
-          selection.removeAllRanges(); selection.addRange(range);
+          selection.removeAllRanges(); selection.addRange(range); revealed = range.cloneRange();
           var start = elementOf(range.startContainer);
           if (start) start.scrollIntoView({ block: 'center' });
           ok = true;
@@ -178,6 +213,8 @@ window.addEventListener('message', function (event) {
   if (event.source !== window.parent || !data || data.sidecar !== MARK) return;
   if (data.type === 'picker' && typeof data.on === 'boolean') setPicker(data.on);
   else if (data.type === 'reveal' && typeof data.selector === 'string' && typeof data.exact === 'string') reveal(data);
+  else if (data.type === 'unselect') { var current = getSelection(); if (current) current.removeAllRanges(); }
+  else if (data.type === 'scroll' && typeof data.x === 'number' && typeof data.y === 'number') window.scrollTo(data.x, data.y);
 });
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { send({ type: 'ready' }); });
 else send({ type: 'ready' });

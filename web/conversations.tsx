@@ -64,6 +64,7 @@ export function Icon({ name }: { name: keyof typeof paths }) {
 export function QuestionForm({
   documentId,
   threadId,
+  threadFile,
   quote,
   messageQuote,
   fileQuote,
@@ -80,6 +81,8 @@ export function QuestionForm({
 }: {
   documentId: string;
   threadId?: string;
+  /** The HTML page a new conversation (no threadId) belongs to. */
+  threadFile?: string;
   quote?: Quote;
   messageQuote?: MessageQuote;
   fileQuote?: FileQuote;
@@ -127,7 +130,7 @@ export function QuestionForm({
       onSubmit={async (event) => {
         event.preventDefault();
         if (disabled || sending.current || !text.trim() || !documentId) return;
-        const body = { documentId, text, ...(threadId ? { threadId } : {}), ...attachment };
+        const body = { documentId, text, ...(threadId ? { threadId } : threadFile ? { file: threadFile } : {}), ...attachment };
         const signature = JSON.stringify(body);
         if (retry.current?.signature !== signature) retry.current = { signature, id: randomId() };
         const submittedDraft = { text, retry: retry.current, ...attachment };
