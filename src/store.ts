@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile, rename, unlink } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
-import { isQuote, isMessageQuote, isFileQuote, isHtmlPath, type FileQuote, type MessageQuote, type Quote } from './quote.ts';
+import { isQuote, isMessageQuote, isFileQuote, isHtmlPath, pageTextSelector, type FileQuote, type MessageQuote, type Quote } from './quote.ts';
 import type { ReplyMetadata } from './reply-metadata.ts';
 import { isPinStyle, type PinStyle } from './pin-style.ts';
 import { isPreparedProposal, isProposal, isProposalWrite, type PreparedProposal, type Proposal, type ProposalWrite } from './proposals.ts';
@@ -27,7 +27,7 @@ export type RequestRecord = {
 };
 export type State = { version: 5; owner: Owner; documents: Record<string, DocumentRecord>; threads: Record<string, Thread>; requests: Record<string, RequestRecord>; proposals: Record<string, Proposal>; proposalWrites: Record<string, ProposalWrite> };
 export type Store = { read(): State; update<T>(change: (draft: State) => T): Promise<T> };
-export type SubmitInput = { documentId: string; threadId?: string; text: string; quote?: Quote; messageQuote?: MessageQuote; fileQuote?: FileQuote; clientMessageId: string };
+export type SubmitInput = { documentId: string; threadId?: string; file?: string; text: string; quote?: Quote; messageQuote?: MessageQuote; fileQuote?: FileQuote; clientMessageId: string };
 export type ReplyInput = { requestId: string; documentId: string; threadId: string; text: string; isError?: boolean; metadata?: ReplyMetadata; selectionVersion?: string; proposalTargets?: Array<PreparedProposal | null> };
 export type ClaimResult = { claimStatus: 'claimed' | 'already-claimed' | 'completed' | 'uncertain'; request: RequestRecord };
 
@@ -236,7 +236,8 @@ export function submit(state: State, input: SubmitInput): RequestRecord {
     if (source.documentId !== input.documentId) throw new DomainError('Quoted message belongs to another document', 409);
     if (!source.messages.some(message => message.id === input.messageQuote?.messageId)) throw new DomainError('Message not found', 404);
   }
-  const signature = JSON.stringify([input.documentId, input.threadId ?? null, input.text, input.quote ?? null, ...(input.messageQuote ? [input.messageQuote] : []), ...(input.fileQuote ? [{ fileQuote: input.fileQuote }] : [])]);
+  if (input.threadId && input.file !== undefined) throw new DomainError('A file names only a new thread', 400);
+  const signature = JSON.stringify([input.documentId, input.threadId ?? null, ...(input.file !== undefined ? [{ file: input.file }] : []), input.text, input.quote ?? null, ...(input.messageQuote ? [input.messageQuote] : []), ...(input.fileQuote ? [{ fileQuote: input.fileQuote }] : [])]);
   const previous = Object.values(state.requests).find(r => r.clientMessageId === input.clientMessageId);
   if (previous) {
     if (previous.submission !== signature) throw new DomainError('Message ID was already used for different content', 409);
@@ -247,7 +248,8 @@ export function submit(state: State, input: SubmitInput): RequestRecord {
     thread = get(state.threads, input.threadId);
     if (thread.documentId !== input.documentId) throw new DomainError('Thread belongs to another document', 409);
   } else {
-    thread = createThread(state, { documentId: input.documentId });
+    // A new conversation started on an HTML page opened from a Markdown document belongs to that page.
+    thread = createThread(state, { documentId: input.documentId, ...(input.file !== undefined ? { file: input.file } : {}) });
   }
   const request: RequestRecord = { id: randomUUID(), documentId: input.documentId, threadId: thread.id, text: input.text, clientMessageId: input.clientMessageId, submission: signature, status: 'queued', createdAt: Date.now() };
   if (input.quote) request.quote = structuredClone(input.quote);
@@ -325,8 +327,9 @@ export function reply(state: State, input: ReplyInput): void {
   const selections: MessageSelection[] = [], fileSelections: FileSelection[] = [];
   for (const [index, h] of (input.metadata?.highlights ?? []).entries()) {
     const base = { id: index ? `${id}-${index + 1}` : id, slug: `selection-${index + 1}`, ...(h.label ? { label: h.label.trim() } : {}) };
-    if (h.selector !== undefined) {
-      if (page) fileSelections.push({ ...base, fileQuote: { path: page, kind: 'html', exact: h.exact, selector: h.selector, ...(h.element ? { isElement: true } : {}) } });
+    // A standalone HTML document has no Markdown text: a selector-less target matches its exact text once anywhere on the page.
+    if (h.selector !== undefined || isHtmlPath(document.path) && !h.proposal && !h.proposalError) {
+      if (page) fileSelections.push({ ...base, fileQuote: { path: page, kind: 'html', exact: h.exact, selector: h.selector ?? pageTextSelector, ...(h.element ? { isElement: true } : {}) } });
       continue;
     }
     if (input.selectionVersion === undefined) throw new DomainError('Document version required for highlights');

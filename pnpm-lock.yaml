@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@plannotator/ui@0.47.0': 614a6ff942a66654a9ff8bbfe1e1384e2fc794adcb1ff50c5b02605a64d4f6f8
+
 importers:
 
   .:
@@ -16,7 +19,7 @@ importers:
         version: 0.25.7
       '@plannotator/ui':
         specifier: 0.47.0
-        version: 0.47.0(@codemirror/lang-css@6.3.1)(@codemirror/lang-html@6.4.12)(@lezer/markdown@1.7.2)(@shikijs/themes@4.4.3)(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(tailwindcss@4.3.3)(typescript@7.0.2)
+        version: 0.47.0(patch_hash=614a6ff942a66654a9ff8bbfe1e1384e2fc794adcb1ff50c5b02605a64d4f6f8)(@codemirror/lang-css@6.3.1)(@codemirror/lang-html@6.4.12)(@lezer/markdown@1.7.2)(@shikijs/themes@4.4.3)(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(tailwindcss@4.3.3)(typescript@7.0.2)
       '@plannotator/web-highlighter':
         specifier: 0.8.1
         version: 0.8.1
@@ -1782,7 +1785,7 @@ snapshots:
       '@codemirror/lang-yaml': 6.1.3
       '@codemirror/legacy-modes': 6.5.4
 
-  '@plannotator/ui@0.47.0(@codemirror/lang-css@6.3.1)(@codemirror/lang-html@6.4.12)(@lezer/markdown@1.7.2)(@shikijs/themes@4.4.3)(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(tailwindcss@4.3.3)(typescript@7.0.2)':
+  '@plannotator/ui@0.47.0(patch_hash=614a6ff942a66654a9ff8bbfe1e1384e2fc794adcb1ff50c5b02605a64d4f6f8)(@codemirror/lang-css@6.3.1)(@codemirror/lang-html@6.4.12)(@lezer/markdown@1.7.2)(@shikijs/themes@4.4.3)(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(tailwindcss@4.3.3)(typescript@7.0.2)':
     dependencies:
       '@base-ui/react': 1.8.0(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       '@codemirror/autocomplete': 6.20.3

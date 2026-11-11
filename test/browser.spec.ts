@@ -3699,7 +3699,12 @@ test('files panel previews workspace files read-only and keeps drafts', async ({
   await panel.getByTitle('page.html', { exact: true }).click();
   const frame = page.frameLocator('iframe[title="Preview of page.html"]');
   await expect(frame.locator('#static')).toHaveText('Static HTML');
-  await expect(page.locator('iframe[title="Preview of page.html"]')).toHaveAttribute('sandbox', '');
+  // Only the nonced shortcut helper may run; the response CSP still blocks the page's own scripts.
+  await expect(page.locator('iframe[title="Preview of page.html"]')).toHaveAttribute('sandbox', 'allow-scripts');
+  // That block is reported once on the console; every other page error still fails the test.
+  const blocked = pageErrors.filter(message => /^Executing inline script violates the following Content Security Policy directive 'script-src 'nonce-[^']+''/.test(message));
+  expect(blocked).toHaveLength(1);
+  pageErrors = pageErrors.filter(message => !blocked.includes(message));
   await page.getByRole('dialog', { name: 'File: page.html', exact: true }).getByRole('button', { name: 'Close file window' }).click();
   await panel.getByTitle('flow.mmd', { exact: true }).click();
   await expect(preview.locator('svg').first()).toBeVisible();

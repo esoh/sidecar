@@ -1,0 +1,23 @@
+diff --git a/hooks/useResizablePanel.ts b/hooks/useResizablePanel.ts
+index a0a3aab260c90b3d66cd8795074e4ed7d80d1ce1..ce953527de7d76bef158f080a0121739028ac0d9 100644
+--- a/hooks/useResizablePanel.ts
++++ b/hooks/useResizablePanel.ts
+@@ -152,6 +152,18 @@ export function useResizablePanel({
+         // system gesture, focus loss). It is NOT a completed click — only clean
+         // up drag state, never treat it as a click-to-collapse.
+         const cancelled = e?.type === 'pointercancel';
++        // Apply the release position now: a release in the same frame as the last
++        // move would otherwise cancel that move's queued flush and drop it.
++        if (!cancelled && draggingRef.current) {
++          if (rafRef.current != null) {
++            cancelAnimationFrame(rafRef.current);
++            rafRef.current = null;
++          }
++          latestXRef.current = axis === 'y' ? e.clientY : e.clientX;
++          if (Math.abs(latestXRef.current - startXRef.current) > clickThreshold)
++            movedRef.current = true;
++          if (movedRef.current) flush();
++        }
+         const wasSnapped = snappedRef.current;
+         draggingRef.current = false;
+         snappedRef.current = false;

@@ -24,14 +24,15 @@ import { resolveWorkspaceLink, splitLineSuffix, fileLineRange, pageLinkTarget, t
 import { setDocPreviewFetcher } from '@plannotator/ui/components/InlineMarkdown';
 import { DocumentLibrary } from './DocumentLibrary.tsx';
 import { SettingsProvider, TextSettings } from './TextSettings.tsx';
-import { PinnedWindows, changesWindowId } from './PinnedWindows.tsx';
+import { PinnedWindows, ZoomControls, changesWindowId } from './PinnedWindows.tsx';
+import { conversationShortcut, isConversationShortcut, isFrameShortcut } from './shortcuts.ts';
 import { DocumentHeader } from './DocumentHeader.tsx';
 import { OriginalDocument } from './OriginalDocument.tsx';
 import { FilesPanel } from './FilesPanel.tsx';
 import { useComparison, type WorkspaceFileChange } from './useComparison.ts';
 import { isAnnotatableDocPath } from '@plannotator/core/annotatable';
 import type { OpenFile } from './FilePreview.tsx';
-import type { FileQuote } from '../src/quote.ts';
+import { pageTextSelector, type FileQuote } from '../src/quote.ts';
 import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
 import { ResizeHandle } from '@plannotator/ui/components/ResizeHandle';
 import { onCodeHighlightSwap } from '@plannotator/ui/utils/codeHighlight';
@@ -43,7 +44,7 @@ type Content = { html: string; markdown: string; version: string };
 const insideRoot = (path: string, root: string) => path.startsWith(`${root.replace(/\/$/, '')}/`);
 
 function keepsAttachment(target: EventTarget | null) {
-  return target instanceof Element && !!target.closest('.sidebar .composer, .sidebar-header, .thread-row, .sidebar-toggle, .files-edge-toggle, .files-panel, .file-preview');
+  return target instanceof Element && !!target.closest('.sidebar .composer, .sidebar-header, .thread-row, .sidebar-toggle, .files-edge-toggle, .files-panel, .file-preview, .html-topbar, .html-canvas');
 }
 
 function App() {
@@ -57,6 +58,8 @@ function App() {
   const [selection, setSelection] = useState<Quote>(),
     [composing, setComposing] = useState(false);
   const [choices, setChoices] = useState<{ ids: string[]; rect: DOMRect } | null>(null);
+  // A finished text selection in the HTML page: the same quick menu and floating comment as a Markdown passage.
+  const [htmlPending, setHtmlPending] = useState<{ quote: FileQuote; rect: DOMRect } | null>(null);
   const article = useRef<HTMLElement>(null),
     workspace = useRef<HTMLDivElement>(null),
     viewer = useRef<HTMLDivElement>(null),
@@ -69,7 +72,7 @@ function App() {
     pendingFocus = useRef<string | null>(null),
     sendingComment = useRef(false);
   const passageDrafts = useRef(new Map<string, QuestionDraft>());
-  const draftKey = JSON.stringify(selection);
+  const draftKey = JSON.stringify(selection ?? htmlPending?.quote);
   const requestedDocument = new URL(location.href).searchParams.get('document');
   const documentId = requestedDocument ?? Object.keys(state?.documents ?? {})[0] ?? '';
   const current = state?.documents[documentId];
@@ -83,7 +86,7 @@ function App() {
   // Only an HTML file opened from another document binds its threads; a standalone HTML document is the file itself.
   const threadFile = urlHtmlView ? htmlAbsolute : undefined;
   const [areScriptsEnabled, setScriptsEnabled] = useState(false), [isBridgeReady, setBridgeReady] = useState(false), [isPicking, setPicking] = useState(false);
-  const [htmlSelection, setHtmlSelection] = useState<{ exact: string; selector: string } | null>(null), [htmlNotice, setHtmlNotice] = useState('');
+  const [htmlNotice, setHtmlNotice] = useState(''), [htmlZoom, setHtmlZoom] = useState(100);
   const frameRef = useRef<HTMLIFrameElement>(null);
   useEffect(() => {
     const prefix = unreadCount ? `(${unreadCount}) ` : '';
@@ -100,7 +103,18 @@ function App() {
   useEffect(() => {
     if (current) void api(`/api/documents/${documentId}/opened`, {}).catch(reason => setError(errorText(reason)));
   }, [documentId, !!current]);
-  const threads = Object.values(state?.threads ?? {}).filter((thread) => thread.documentId === documentId && (!urlHtmlView || (!!threadFile && thread.file === threadFile)));
+  const threads = useMemo(() => {
+    const listed = Object.values(state?.threads ?? {}).filter((thread) => thread.documentId === documentId && (!urlHtmlView || (!!threadFile && thread.file === threadFile)));
+    if (!current || !isHtmlPath(current.path)) return listed;
+    // Replies saved before HTML documents stored selector-less targets as page targets show them as page text, not stale Markdown passages.
+    const proposed = new Set(Object.values(state?.proposals ?? {}).map(proposal => proposal.selectionId));
+    return listed.map(thread => ({ ...thread, messages: thread.messages.map(message => {
+      const legacy = message.role === 'agent' ? message.selections?.filter(selection => !proposed.has(selection.id)) ?? [] : [];
+      if (!legacy.length) return message;
+      const selections = message.selections!.filter(selection => !legacy.includes(selection));
+      return { ...message, selections: selections.length ? selections : undefined, fileSelections: [...message.fileSelections ?? [], ...legacy.map(({ id, slug, label, quote }) => ({ id, slug, ...(label ? { label } : {}), fileQuote: { path: thread.file ?? current.path, kind: 'html' as const, exact: quote.exact, selector: pageTextSelector } }))] };
+    }) }));
+  }, [state?.threads, state?.proposals, documentId, urlHtmlView, threadFile, current?.path]);
   const [activeThreadId, setActiveThreadId] = useState<string | null | undefined>(undefined);
   const [activeMessageId, setActiveMessageId] = useState<string | null>(null);
   const [sentRequestId, setSentRequestId] = useState<string | null>(null);
@@ -173,6 +187,9 @@ function App() {
   useLayoutEffect(() => {
     document.documentElement.style.setProperty('--sidecar-files-width', `${filesResize.width}px`);
   }, [filesResize.width]);
+  // An iframe (an HTML page or file window) would take a fast drag's moves and release, ending the resize early.
+  const isResizing = panelResize.isDragging || filesResize.isDragging;
+  useLayoutEffect(() => { document.documentElement.toggleAttribute('data-resizing', isResizing); }, [isResizing]);
   const openThread = useCallback(
     (id: string | null) => {
       fileSelectionVisit.current++;
@@ -180,6 +197,7 @@ function App() {
       setOriginalMessageId(null);
       drafts.flush();
       setSelection(id ? drafts.get(id)?.quote : undefined);
+      setHtmlPending(null);
       setComposing(false);
       setChoices(null);
       setActiveThreadId(id);
@@ -254,6 +272,9 @@ function App() {
     highlighter.current?.remove('selection');
     painted.current.delete('selection');
     setSelection(undefined);
+    setHtmlPending(null);
+    // The HTML page's own selection goes too, as a captured Markdown passage leaves no native selection.
+    frameRef.current?.contentWindow?.postMessage({ sidecar: 'html-bridge', type: 'unselect' }, '*');
     setComposing(false);
     setChoices(null);
   }, []);
@@ -608,7 +629,7 @@ function App() {
   }, [selection, composing, choices, openComment, isSidebarShown]);
   // Plannotator dismisses the quick menu and pending highlight on an outside press.
   useEffect(() => {
-    if (!selection || composing) return;
+    if (!(selection || htmlPending) || composing) return;
     const outside = (event: MouseEvent) => {
       // Preserve double/triple-click selection gestures before removing highlight nodes.
       if (event.detail >= 2) return;
@@ -622,7 +643,7 @@ function App() {
     };
     document.addEventListener('mousedown', outside, true);
     return () => document.removeEventListener('mousedown', outside, true);
-  }, [selection, composing, clearSelection]);
+  }, [selection, htmlPending, composing, clearSelection]);
   // Like Plannotator, dismiss an empty composer without stealing the clicked target's focus.
   useEffect(() => {
     if (!composing) return;
@@ -644,13 +665,14 @@ function App() {
   }, [threads, openThread]);
   const anchor = useCallback(() => {
     if (choices) return highlighter.current?.getDoms(choices.ids[0])[0]?.getBoundingClientRect() ?? choices.rect;
+    if (htmlPending) return htmlPending.rect;
     const root = article.current;
     const range = root && selection && quoteRange(root, selection, content.version);
     if (range) lastRect.current = range.getBoundingClientRect();
     return lastRect.current;
-  }, [selection, choices, content.version]);
+  }, [selection, htmlPending, choices, content.version]);
   usePosition(composer, composing ? anchor : null, 384);
-  usePosition(toolbar, (selection && !composing) || choices ? anchor : null, choices ? 300 : 76, !choices);
+  usePosition(toolbar, ((selection || htmlPending) && !composing) || choices ? anchor : null, choices ? 300 : 76, !choices);
 
   function captureSelection() {
     if (sendingComment.current) return;
@@ -756,14 +778,62 @@ function App() {
     if (isSidebarShown) return;
     const pending = captureSelection() ?? selection;
     if (pending && !composing) void attachToConversation({ quote: pending });
+    else if (htmlPending && !composing) void attachToConversation({ fileQuote: htmlPending.quote });
     else setSidebarShown(true);
   }
+  const toggleConversations = () => isSidebarShown ? setSidebarShown(false) : showConversations();
+  const latestToggle = useRef(toggleConversations);
+  latestToggle.current = toggleConversations;
+  // Window capture runs before any field, editor or button handler; HTML frames forward the key themselves.
+  useEffect(() => {
+    const key = (event: KeyboardEvent) => {
+      if (!isConversationShortcut(event)) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      latestToggle.current();
+    };
+    const frame = (event: MessageEvent) => { if (isFrameShortcut(event)) latestToggle.current(); };
+    window.addEventListener('keydown', key, true);
+    window.addEventListener('message', frame);
+    return () => { window.removeEventListener('keydown', key, true); window.removeEventListener('message', frame); };
+  }, []);
   const attachHtml = (exact: string, selector: string, fingerprint?: string) => {
     if (htmlAbsolute) void attachToConversation({ fileQuote: { path: htmlAbsolute, kind: 'html', exact, selector, ...(fingerprint ? { isElement: true, fingerprint } : {}) } });
   };
+  // The last reported page position, restored only after an agent revision reloads the frame (never after a user's own change).
+  const pageScroll = useRef<{ type: 'scroll'; x: number; y: number } | null>(null), restoreScroll = useRef<typeof pageScroll.current>(null);
   const postBridge = useHtmlBridge(frameRef, message => {
-    if (message.type === 'ready') { setBridgeReady(true); setPicking(false); }
-    else if (message.type === 'selection') setHtmlSelection(message.exact ? message : null);
+    if (message.type === 'ready') {
+      setBridgeReady(true); setPicking(false);
+      if (restoreScroll.current) postBridge(restoreScroll.current);
+      restoreScroll.current = null;
+    }
+    else if (message.type === 'scroll') {
+      pageScroll.current = message;
+      // The quick menu would no longer sit beside the text; an attached quote stays on the draft.
+      if (htmlPending && !composing) setHtmlPending(null);
+    }
+    else if (message.type === 'selection') {
+      // As captureSelection does for a Markdown passage: offer the quick menu and attach to the visible thread.
+      // Page events never reach this document, so a press in the page is the outside press here: it dismisses the
+      // menu, or an empty floating comment, and a new selection replaces them; typed comment text is never dropped.
+      const hasText = composing && (sendingComment.current || !!passageDrafts.current.get(draftKey)?.text.trim());
+      if (!message.exact || !message.rect) {
+        if (htmlPending && !hasText) { if (composing) passageDrafts.current.delete(draftKey); clearSelection(); }
+        return;
+      }
+      const frame = frameRef.current?.getBoundingClientRect(), zoom = htmlZoom / 100, box = message.rect;
+      if (!htmlAbsolute || !frame || hasText) return;
+      if (composing) passageDrafts.current.delete(draftKey);
+      const quote: FileQuote = { path: htmlAbsolute, kind: 'html', exact: message.exact, selector: message.selector };
+      fileSelectionVisit.current++;
+      setHtmlPending({ quote, rect: new DOMRect(frame.left + box.left * zoom, frame.top + box.top * zoom, (box.right - box.left) * zoom, (box.bottom - box.top) * zoom) });
+      if (activeThreadId && isSidebarShown) {
+        const { quote: _, messageQuote, fileQuote, ...rest } = drafts.get(activeThreadId) ?? { text: '', retry: null };
+        drafts.set(activeThreadId, { ...rest, fileQuote: quote });
+      }
+      setComposing(false);
+      setChoices(null);
+    }
     else if (message.type === 'pick') { setPicking(false); attachHtml(message.exact, message.selector, message.fingerprint); }
     else if (message.type === 'picker') setPicking(false);
     else if (message.type === 'open-file') openPageLink(message.href);
@@ -781,10 +851,19 @@ function App() {
     setHtmlNotice('');
     openPreview(target.path, undefined, isAnnotatableDocPath(target.path) ? 'doc' : 'code', root, target.fragment, target.lineRange);
   };
-  const changeScripts = (enabled: boolean) => { setScriptsEnabled(enabled); setBridgeReady(false); setPicking(false); setHtmlSelection(null); setHtmlNotice(''); };
+  const changeScripts = (enabled: boolean) => {
+    setScriptsEnabled(enabled); setBridgeReady(false); setPicking(false); setHtmlNotice(''); pageScroll.current = null; restoreScroll.current = null;
+    // The reloaded page has no selection; only typed floating-comment text keeps its quote.
+    if (htmlPending && !(composing && passageDrafts.current.get(draftKey)?.text.trim())) clearPendingSelection();
+  };
   // Agent revisions to a standalone HTML document reload its frame, keeping the Run scripts choice.
   const htmlRevision = isHtmlDocument && !urlHtmlView ? current?.version ?? '' : '';
-  useEffect(() => { if (htmlRevision) changeScripts(areScriptsEnabled); }, [htmlRevision]);
+  useEffect(() => {
+    if (!htmlRevision) return;
+    const position = pageScroll.current;
+    changeScripts(areScriptsEnabled);
+    restoreScroll.current = position;
+  }, [htmlRevision]);
   const togglePicker = (on: boolean) => { setPicking(on); postBridge({ type: 'picker', on }); };
   useEffect(() => {
     if (!isPicking) return;
@@ -926,7 +1005,7 @@ function App() {
       <div className={`viewer${htmlView ? ' html-view' : ''}`} ref={viewer} data-chat-open={isSidebarShown}>
       <header className={`topbar${htmlView ? ' html-topbar' : ''}`}>
         {htmlView ? <HtmlControls file={htmlView} isDocument={!urlHtmlView} areScriptsEnabled={areScriptsEnabled} onScripts={changeScripts} isReady={areScriptsEnabled && isBridgeReady}
-          isPicking={isPicking} onPick={() => togglePicker(!isPicking)} canAsk={!!htmlSelection} onAsk={() => { if (htmlSelection) { attachHtml(htmlSelection.exact, htmlSelection.selector); setHtmlSelection(null); } }} /> : <>
+          isPicking={isPicking} onPick={() => togglePicker(!isPicking)} zoom={htmlZoom} onZoom={setHtmlZoom} /> : <>
         <div className="brand">
           <Icon name="logo" />
           <span>Sidecar</span>
@@ -951,15 +1030,19 @@ function App() {
         )}
         </>}
         <AgentStatus state={state} connected={connected} />
-        {!htmlView && <TextSettings version={state?.appVersion} />}
+        <TextSettings version={state?.appVersion}>
+          {/* Also here because a phone header has no room for the page's zoom controls. */}
+          {htmlView && <div className="text-settings-heading brightness-heading"><span>HTML page zoom</span><ZoomControls zoom={htmlZoom} onZoom={setHtmlZoom} /></div>}
+        </TextSettings>
         <button
           className="sidebar-toggle conversation-toggle"
           aria-label={isSidebarShown ? 'Hide conversations' : 'Show conversations'}
-          title={isSidebarShown ? 'Hide conversations' : 'Show conversations'}
+          title={`${isSidebarShown ? 'Hide conversations' : 'Show conversations'} (${conversationShortcut.label})`}
+          aria-keyshortcuts={conversationShortcut.aria}
           aria-expanded={isSidebarShown}
           aria-controls="conversation-sidebar"
           onPointerDown={() => { if (!isSidebarShown) captureSelection(); }}
-          onClick={() => isSidebarShown ? setSidebarShown(false) : showConversations()}
+          onClick={toggleConversations}
         >
           <Icon name="panel" />
           <span>{isSidebarShown ? 'Document' : 'Chat'}</span>
@@ -998,7 +1081,7 @@ function App() {
           </>
         )}
         <div className="document-workspace" id="document-workspace" ref={workspace}>
-        <main className={`canvas${htmlView ? ' html-canvas' : ''}`}>
+        <main className={`canvas${htmlView ? ' html-canvas' : ''}`} style={htmlView ? { '--html-zoom': htmlZoom / 100 } as React.CSSProperties : undefined}>
           {htmlView ? <>
             {htmlNotice && <p className="html-notice" role="status">{htmlNotice}</p>}
             {htmlView.root || current?.workspace ? <HtmlFileViewer key={`${htmlView.path}:${htmlRoot}:${htmlRevision}`} file={htmlView} areScriptsEnabled={areScriptsEnabled} bridge frameRef={frameRef} />
@@ -1101,7 +1184,7 @@ function App() {
         />
       </div>
       </div>
-      {((selection && !composing) || choices) &&
+      {(((selection || htmlPending) && !composing) || choices) &&
         createPortal(
           <div
             ref={toolbar}
@@ -1129,12 +1212,13 @@ function App() {
               })
             ) : (
               <>
+                {/* C reaches this document only from a Markdown passage; an HTML page keeps its own keys. */}
                 <button
                   className="comment-action"
                   onClick={openComment}
                   aria-label="Comment"
-                  aria-keyshortcuts="c"
-                  title="Comment (C)"
+                  aria-keyshortcuts={htmlPending ? undefined : 'c'}
+                  title={htmlPending ? 'Comment' : 'Comment (C)'}
                 >
                   <Icon name="comment" />
                 </button>
@@ -1148,14 +1232,16 @@ function App() {
           document.body,
         )}
       {composing &&
-        selection &&
+        (selection || htmlPending) &&
         createPortal(
           <section ref={composer} className={`floating comment-popover${isSidebarShown ? ' chat-open' : ''}`} role="dialog" aria-label="Comment on selection">
             <QuestionForm
               key={draftKey}
               documentId={documentId}
               quote={selection}
-              quoteIssue={passageIssue(selection)}
+              fileQuote={htmlPending?.quote}
+              threadFile={htmlPending ? threadFile : undefined}
+              quoteIssue={selection ? passageIssue(selection) : null}
               disabled={!current}
               floating
               onCancel={cancel}

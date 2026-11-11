@@ -11,6 +11,8 @@ export function isFileQuote(value: unknown, isAgentTarget = false): value is Fil
       : value.selector === undefined && value.isElement === undefined && value.fingerprint === undefined)
     && ((value.startLine === undefined && value.endLine === undefined) || (number(value.startLine) && Number.isInteger(value.startLine) && value.startLine > 0 && number(value.endLine) && Number.isInteger(value.endLine) && value.endLine >= value.startLine));
 }
+// A standalone HTML page's agent target without a selector: its exact text, matched once in the page body.
+export const pageTextSelector = 'body';
 export const isSelector = (v: unknown): v is string => typeof v === 'string' && v.length >= 1 && v.length <= 1024 && !/[\x00-\x1f]/.test(v);
 export function fileQuoteLabel(quote: FileQuote) {
   return (quote.path.split('/').pop() ?? quote.path) + (quote.isElement ? ' element' : '') + (quote.startLine ? `:${quote.startLine}${quote.endLine !== quote.startLine ? `–${quote.endLine}` : ''}` : '');

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import { isSelector } from '../src/quote.ts';
 import { Icon } from './conversations.tsx';
+import { ZoomControls } from './PinnedWindows.tsx';
 import { isGateway, libraryPath, viewerBase, viewerPath } from './viewer-path.ts';
+import { api, errorText } from './api.ts';
 export const revealParameter = () => new URLSearchParams(location.search).get('reveal');
 
 export { isHtmlPath } from '../src/quote.ts';
@@ -26,17 +28,32 @@ export function readHtmlView(): HtmlFile | null {
 export const isHtmlViewValid = (file: HtmlFile) => !!file.documentId && !!file.path && !(isGateway && !viewerBase());
 
 export function HtmlFileFrame({ areScriptsEnabled, revision = 0, bridge = false, ref, ...file }: HtmlFile & { areScriptsEnabled: boolean; revision?: number; bridge?: boolean; ref?: RefObject<HTMLIFrameElement | null> }) {
+  // Every scripted load spends a fresh one-use ticket from the viewer (enable, fragment, revision or remount),
+  // so a page can never reach scripts by navigating to a scripted URL.
+  const query = fileQuery(file).toString(), load = `${query}:${file.fragment ?? ''}:${revision}:${bridge}`;
+  const [ticket, setTicket] = useState<{ load: string; value?: string; error?: string } | null>(null);
+  useEffect(() => {
+    if (!areScriptsEnabled) return;
+    let isCurrent = true;
+    api<{ ticket: string }>(`/api/files/html?${query}`, {}).then(
+      result => { if (isCurrent) setTicket({ load, value: result.ticket }); },
+      reason => { if (isCurrent) setTicket({ load, error: errorText(reason) }); });
+    return () => { isCurrent = false; setTicket(null); };
+  }, [areScriptsEnabled, load]);
+  if (areScriptsEnabled && ticket?.load !== load) return <p role="status">Starting scripts…</p>;
+  if (areScriptsEnabled && ticket?.error) return <p role="alert">Could not run scripts: {ticket.error}</p>;
   // A separate response keeps inline-script permission out of the viewer's CSP.
-  return <iframe ref={ref} key={`${areScriptsEnabled}:${revision}:${file.fragment ?? ''}`} className="file-preview-frame" title={`Preview of ${file.path}`}
-    sandbox={areScriptsEnabled ? 'allow-scripts' : ''} referrerPolicy="no-referrer"
-    src={viewerPath(`/api/files/html?${fileQuery(file)}${areScriptsEnabled ? `&scripts=1${bridge ? '&bridge=1' : ''}` : ''}`) + (file.fragment ?? '')} />;
+  return <iframe ref={ref} key={`${areScriptsEnabled}:${revision}:${file.fragment ?? ''}:${ticket?.value ?? ''}`} className="file-preview-frame" title={`Preview of ${file.path}`}
+    // Scripts stay off by the response CSP unless Run scripts is on; the sandbox only lets the nonced shortcut helper run.
+    sandbox="allow-scripts" referrerPolicy="no-referrer"
+    src={viewerPath(`/api/files/html?${query}${areScriptsEnabled ? `&scripts=1&ticket=${ticket!.value}${bridge ? '&bridge=1' : ''}` : ''}`) + (file.fragment ?? '')} />;
 }
 
 export function RunHtmlScripts({ enabled, onChange }: { enabled: boolean; onChange: (enabled: boolean) => void }) {
   return <label className="file-diff-toggle" title={scriptWarning}><input type="checkbox" checked={enabled} onChange={event => onChange(event.target.checked)} />Run scripts</label>;
 }
 
-export type BridgeMessage = { type: 'ready' } | { type: 'selection'; exact: string; selector: string } | { type: 'pick'; exact: string; selector: string; fingerprint: string } | { type: 'picker'; on: false } | { type: 'revealed'; ok: boolean } | { type: 'open-file'; href: string };
+export type BridgeMessage = { type: 'ready' } | { type: 'selection'; exact: string; selector: string; rect?: { left: number; top: number; right: number; bottom: number } } | { type: 'pick'; exact: string; selector: string; fingerprint: string } | { type: 'picker'; on: false } | { type: 'revealed'; ok: boolean } | { type: 'open-file'; href: string } | { type: 'scroll'; x: number; y: number };
 const isExact = (v: unknown): v is string => typeof v === 'string' && v.length <= 128 * 1024;
 // Scripted pages could forge these; Run scripts is the trusted opt-in and the parent supplies the file path itself.
 export function useHtmlBridge(frame: RefObject<HTMLIFrameElement | null>, onMessage: (message: BridgeMessage) => void) {
@@ -47,10 +64,15 @@ export function useHtmlBridge(frame: RefObject<HTMLIFrameElement | null>, onMess
       const data: unknown = event.data;
       if (!frame.current || event.source !== frame.current.contentWindow || typeof data !== 'object' || data === null || !('sidecar' in data) || data.sidecar !== 'html-bridge' || !('type' in data)) return;
       if (data.type === 'ready') latest.current({ type: 'ready' });
-      else if (data.type === 'selection' && 'exact' in data && 'selector' in data && isExact(data.exact) && isSelector(data.selector)) latest.current({ type: 'selection', exact: data.exact, selector: data.selector });
+      else if (data.type === 'selection' && 'exact' in data && 'selector' in data && isExact(data.exact) && isSelector(data.selector)) {
+        const rect = 'rect' in data && typeof data.rect === 'object' && data.rect !== null ? data.rect as Record<string, unknown> : null;
+        const box = rect && ['left', 'top', 'right', 'bottom'].every(side => Number.isFinite(rect[side])) ? rect as { left: number; top: number; right: number; bottom: number } : undefined;
+        latest.current({ type: 'selection', exact: data.exact, selector: data.selector, ...(box ? { rect: box } : {}) });
+      }
       else if (data.type === 'pick' && 'exact' in data && 'selector' in data && 'fingerprint' in data && isExact(data.exact) && isSelector(data.selector) && typeof data.fingerprint === 'string' && /^\d{1,9}:[0-9a-f]{8}$/.test(data.fingerprint)) latest.current({ type: 'pick', exact: data.exact, selector: data.selector, fingerprint: data.fingerprint });
       else if (data.type === 'picker' && 'on' in data && data.on === false) latest.current({ type: 'picker', on: false });
       else if (data.type === 'revealed' && 'ok' in data && typeof data.ok === 'boolean') latest.current({ type: 'revealed', ok: data.ok });
+      else if (data.type === 'scroll' && 'x' in data && 'y' in data && Number.isFinite(data.x) && Number.isFinite(data.y)) latest.current({ type: 'scroll', x: data.x as number, y: data.y as number });
       else if (data.type === 'open-file' && 'href' in data && typeof data.href === 'string' && data.href.length <= 4096 && !/[\x00-\x1f]/.test(data.href)) latest.current({ type: 'open-file', href: data.href });
     };
     window.addEventListener('message', listen);
@@ -77,8 +99,8 @@ export function HtmlFileViewer({ file, areScriptsEnabled, bridge, frameRef }: { 
 }
 
 const needScripts = 'Turn on Run scripts to select or pick elements';
-export function HtmlControls({ file, isDocument, areScriptsEnabled, onScripts, isReady, isPicking, onPick, canAsk, onAsk }: {
-  file: HtmlFile; isDocument: boolean; areScriptsEnabled: boolean; onScripts: (enabled: boolean) => void; isReady: boolean; isPicking: boolean; onPick: () => void; canAsk: boolean; onAsk: () => void;
+export function HtmlControls({ file, isDocument, areScriptsEnabled, onScripts, isReady, isPicking, onPick, zoom, onZoom }: {
+  file: HtmlFile; isDocument: boolean; areScriptsEnabled: boolean; onScripts: (enabled: boolean) => void; isReady: boolean; isPicking: boolean; onPick: () => void; zoom: number; onZoom: (zoom: number) => void;
 }) {
   const title = isReady ? '' : needScripts;
   return <>
@@ -86,12 +108,12 @@ export function HtmlControls({ file, isDocument, areScriptsEnabled, onScripts, i
     {isDocument ? <a className="html-back sidebar-toggle" href={isGateway ? viewerPath('/') : libraryPath()} aria-label="All documents" title="All documents"><Icon name="back" /><span>All documents</span></a>
       : <a className="html-back sidebar-toggle" href={viewerPath(`/?document=${encodeURIComponent(file.documentId)}`)} aria-label="Back to document" title="Back to document"><Icon name="back" /><span>Back to document</span></a>}
     <code className="html-filename" title={file.path}>{file.path.split('/').pop()}</code>
+    <ZoomControls zoom={zoom} onZoom={onZoom} />
     <RunHtmlScripts enabled={areScriptsEnabled} onChange={onScripts} />
     {/* Icon-only mode switch: select text (the default) or pick an element; labels live in tooltips and accessible names. */}
     <div className="html-modes" role="group" aria-label="Selection mode">
-      <button className="sidebar-toggle html-action" aria-label="Select text" aria-pressed={isReady && !isPicking} disabled={!isReady} title={title || 'Select text: drag across the page, then ask about it'} onClick={() => { if (isPicking) onPick(); }}><Icon name="annotation" /></button>
+      <button className="sidebar-toggle html-action" aria-label="Select text" aria-pressed={isReady && !isPicking} disabled={!isReady} title={title || 'Select text: drag across the page to attach it to your message'} onClick={() => { if (isPicking) onPick(); }}><Icon name="annotation" /></button>
       <button className="sidebar-toggle html-action" aria-label="Pick element" aria-pressed={isPicking} disabled={!isReady} title={title || 'Pick element: click a part of the page to ask about it'} onClick={onPick}><Icon name="target" /></button>
     </div>
-    <button className="sidebar-toggle html-action" aria-label="Ask about selection" disabled={!isReady || !canAsk} title={title || (canAsk ? 'Ask about the selected text' : 'Select text in the page first')} onClick={onAsk}><Icon name="comment" /></button>
   </>;
 }

@@ -1,2 +1,4 @@
 allowBuilds:
   esbuild: true
+patchedDependencies:
+  '@plannotator/ui@0.47.0': patches/@plannotator__ui@0.47.0.patch
