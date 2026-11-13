@@ -5011,9 +5011,16 @@ test('Save anyway does not override a newer change than the one reviewed', async
   await page.locator('.cm-content').click();
   await page.keyboard.press('ControlOrMeta+s');
   await expect(page.getByRole('button', { name: 'Save anyway', exact: true })).toBeVisible();
+  const refetched = page.waitForResponse(async response => response.request().method() === 'GET'
+    && new URL(response.url()).pathname === `/api/documents/${doc.id}` && (await response.text()).includes('Newest agent'));
   await writeFile(doc.path, '# Newest agent\n\nBody text.\n');
-  await page.waitForTimeout(1000);
+  await refetched;
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  const saves: Promise<unknown>[] = [];
+  page.on('request', request => { if (request.url().endsWith('/source')) saves.push(request.response()); });
   await page.getByRole('button', { name: 'Save anyway', exact: true }).click();
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
+  await Promise.all(saves);
   await expect(page.getByText('This file changed on disk.')).toBeVisible();
   expect(await readFile(doc.path, 'utf8')).toBe('# Newest agent\n\nBody text.\n');
 });
