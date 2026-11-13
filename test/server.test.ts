@@ -458,3 +458,13 @@ test('request payload carries 1-based source lines for a source quote', async t 
   assert.deepEqual(await ask('**world**', 'one'), { exact: '**world**', startLine: 3, endLine: 3 });
   assert.deepEqual(await ask('here\nand more', 'two'), { exact: 'here\nand more', startLine: 3, endLine: 4 });
 });
+
+test('a traversal-style quote version never reads outside the versions directory', async t => {
+  const f = await fixture(t), doc = await f.register('trav.md', 'nothing relevant here\n');
+  await writeFile(join(f.directory, 'x.md'), 'one\nSECRET\n'); // versions/<doc>/../../x.md
+  const quote = { exact: 'SECRET', prefix: '', suffix: '', start: 4, end: 10, version: '../../x' };
+  const response = await f.view('/api/questions', { documentId: doc.id, text: 'Why?', quote, clientMessageId: 'trav' });
+  const request = await response.json();
+  const prepared = await (await f.agent(`/agent/requests/${request.id}/prepare`, {})).json();
+  assert.deepEqual(prepared.quote, { exact: 'SECRET' });
+});

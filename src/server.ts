@@ -64,7 +64,8 @@ function markAccepted(state: State, id: string, nativeTurnId?: string) {
 // Without either source the lines are omitted rather than guessed.
 function quoteLines(directory: string, state: State, request: RequestRecord) {
   const quote = request.quote!;
-  const sources = [join(directory, 'versions', request.documentId, `${quote.version}.md`), state.documents[request.documentId]?.path];
+  // Versions are content hashes; anything else must never reach the filesystem path.
+  const sources = [/^[0-9a-f]{64}$/.test(quote.version) ? join(directory, 'versions', request.documentId, `${quote.version}.md`) : '', state.documents[request.documentId]?.path];
   for (const path of sources) {
     let source: string;
     try { source = readFileSync(path ?? '', 'utf8'); } catch { continue; }

@@ -232,7 +232,7 @@ When the user asks you to propose changes or get approval before editing, attach
 ```text
 [[sidecar:THREAD_ID]]
 [[sidecar-reply:REQUEST_ID]]
-[[sc-meta {"highlights":[{"exact":"The client retries failed requests three times.","label":"Retry policy","proposal":{"before":"The client retries **failed requests** three times.","after":"The client retries **temporary connection failures** up to three times."}}]}]]
+[[sc-meta {"highlights":[{"exact":"The client retries **failed requests** three times.","label":"Retry policy","proposal":{"before":"The client retries **failed requests** three times.","after":"The client retries **temporary connection failures** up to three times."}}]}]]
 Review [the retry policy](#selection-1).
 [[/sidecar:THREAD_ID]]
 ```

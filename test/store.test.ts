@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isFileQuote, isQuote } from '../src/quote.ts';
+import { prepareProposal } from '../src/proposals.ts';
+import { readSourceFile } from '../src/documents.ts';
 import { createState, createThread, registerDocument, submit, claim, reply, resolveThread, setTitle, setBaseBranch, openStore, readSavedState } from '../src/store.ts';
 
 for (const order of ['combined', 'older-first'] as const) test(`mid-turn receipts preserve immutable batches: ${order}`, () => {
@@ -302,39 +304,58 @@ test('threads may be bound to an absolute file and html file quotes need a selec
   assert.deepEqual(readSavedState(JSON.parse(JSON.stringify(state))), state);
 });
 
-test('version 5 state migrates to source anchors and keeps non-Markdown references', () => {
-  const { state } = (() => { const state = createState(owner); return { state }; })();
-  const md = registerDocument(state, { path: '/tmp/a.md', generated: false, workspace: '/tmp' }), html = registerDocument(state, { path: '/tmp/p.html', generated: false });
-  const base = { clientMessageId: 'c' };
-  const quote = { exact: 'hello', prefix: '', suffix: ' world', start: 0, end: 5, version: 'v1' };
+test('version 5 state migrates to source anchors, keeps other references, and a pending proposal still accepts', async t => {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'sidecar-migrate-')));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = join(directory, 'a.md'), htmlFile = join(directory, 'p.html');
+  await writeFile(file, 'hello world\n'); await writeFile(htmlFile, '<p>page</p>');
+  const source = await readSourceFile(file);
+  const state = createState(owner);
+  const md = registerDocument(state, { path: file, generated: false, workspace: directory }), html = registerDocument(state, { path: htmlFile, generated: false });
+  const quote = { exact: 'hello', prefix: '', suffix: ' world', start: 0, end: 5, version: source.version };
   const first = submit(state, { documentId: md.id, text: 'Q', quote, clientMessageId: 'q1' });
   const thread = state.threads[first.threadId];
-  const html1 = { path: '/tmp/p.html', kind: 'html', exact: 'x', selector: 'body' }, code = { path: '/tmp/c.ts', kind: 'code', exact: 'y', startLine: 1, endLine: 1 };
-  const doc1 = { path: '/tmp/b.md', kind: 'doc', exact: 'z' }, own = { path: '/tmp/a.md', kind: 'doc', exact: 'w', startLine: 2, endLine: 2 };
-  const withFile = (fileQuote: object, id: string) => submit(state, { documentId: md.id, threadId: thread.id, text: id, fileQuote: fileQuote as any, clientMessageId: id });
-  const reqs = [withFile(html1, 'h'), withFile(code, 'c'), withFile(doc1, 'd'), withFile(own, 'o')];
+  const ask = (fileQuote: object, id: string) => submit(state, { documentId: md.id, threadId: thread.id, text: id, fileQuote: fileQuote as any, clientMessageId: id });
+  const reqs = [
+    ask({ path: htmlFile, kind: 'html', exact: 'x', selector: 'body' }, 'h'), ask({ path: join(directory, 'c.ts'), kind: 'code', exact: 'y', startLine: 1, endLine: 1 }, 'c'),
+    ask({ path: join(directory, 'b.md'), kind: 'doc', exact: 'z' }, 'd'), ask({ path: file, kind: 'doc', exact: 'w', startLine: 2, endLine: 2 }, 'o'),
+  ];
   const msgQuote = submit(state, { documentId: md.id, threadId: thread.id, text: 'm', messageQuote: { threadId: thread.id, messageId: thread.messages[0].id, exact: 'Q' }, clientMessageId: 'm' });
-  const answer = (requestId: string) => { claim(state, requestId, {}); reply(state, { requestId, documentId: md.id, threadId: thread.id, text: 'A', selectionVersion: 'v1', metadata: { highlights: [{ exact: 'hello' }] } as any }); };
-  answer(first.id);
-  const selection = thread.messages.filter(m => m.role === 'agent').flatMap(m => m.selections ?? [])[0];
-  assert.ok(selection);
+  claim(state, first.id, {});
+  reply(state, { requestId: first.id, documentId: md.id, threadId: thread.id, text: 'A', selectionVersion: source.version, metadata: { highlights: [{ exact: 'hello' }, { exact: 'world' }] } as any });
+  const agent = thread.messages.find(m => m.role === 'agent')!, [proposed, unproposed] = agent.selections!;
+  const htmlRequest = submit(state, { documentId: html.id, text: 'Q', clientMessageId: 'hq' });
+  claim(state, htmlRequest.id, {}); reply(state, { requestId: htmlRequest.id, documentId: html.id, threadId: htmlRequest.threadId, text: 'A' });
+  const htmlThread = state.threads[htmlRequest.threadId], htmlMessage = htmlThread.messages.find(m => m.role === 'agent')!;
+  htmlMessage.selections = [{ id: 'html-selection', slug: 'selection-1', isVisible: true, quote: { exact: 'page', prefix: '', suffix: '', start: 3, end: 7, version: 'v' } }];
   const saved: any = structuredClone({ ...state, version: 5 });
+  for (const m of saved.threads[thread.id].messages) for (const sel of m.selections ?? []) sel.quote.sentence = 'hello world.';
+  saved.threads[htmlThread.id].messages.find((m: any) => m.role === 'agent').selections[0].quote.sentence = 'page';
   saved.requests[first.id].quote.sentence = 'hello world.';
-  saved.proposals['00000000-0000-4000-8000-000000000001'] = { id: '00000000-0000-4000-8000-000000000001', documentId: md.id, threadId: thread.id, messageId: thread.messages.find(m => m.role === 'agent' && m.selections?.length)!.id, selectionId: selection.id, before: 'hello', after: 'bye', prefix: '', suffix: '', baseRange: { start: 0, end: 5 }, status: 'pending', baseVersion: 'v1', createdAt: 1 };
-  const migrated = (() => { try { return readSavedState(saved); } catch (error) { return error as Error; } })();
-  assert.ok(!(migrated instanceof Error), String(migrated));
+  const id = '00000000-0000-4000-8000-000000000001';
+  saved.proposals[id] = { id, documentId: md.id, threadId: thread.id, messageId: agent.id, selectionId: proposed.id, ...prepareProposal(source.markdown, source.version, { before: 'hello', after: 'bye' }), status: 'pending', createdAt: 1 };
+  await writeFile(join(directory, 'state.json'), JSON.stringify(saved));
+
+  const store = await openStore(directory, owner), migrated = store.read();
   assert.equal(migrated.version, 6);
   assert.equal(migrated.requests[first.id].quote, undefined);
   assert.equal(migrated.requests[reqs[0].id].fileQuote?.kind, 'html');
   assert.equal(migrated.requests[reqs[1].id].fileQuote?.kind, 'code');
-  assert.equal(migrated.requests[reqs[2].id].fileQuote, undefined);
-  assert.equal(migrated.requests[reqs[3].id].fileQuote, undefined);
-  assert.ok(migrated.requests[msgQuote.id].messageQuote);
+  const messageOf = (requestId: string) => migrated.threads[thread.id].messages.find(m => m.requestId === requestId)!;
+  assert.equal(messageOf(reqs[0].id).fileQuote?.kind, 'html'); assert.equal(messageOf(reqs[1].id).fileQuote?.kind, 'code');
+  for (const request of [reqs[2], reqs[3]]) { assert.equal(migrated.requests[request.id].fileQuote, undefined); assert.equal(messageOf(request.id).fileQuote, undefined); }
+  assert.ok(migrated.requests[msgQuote.id].messageQuote); assert.ok(messageOf(msgQuote.id).messageQuote);
   assert.equal(migrated.threads[thread.id].messages.length, thread.messages.length);
+  assert.deepEqual(migrated.threads[thread.id].messages.flatMap(m => m.selections ?? []).map(sel => [sel.id, sel.isVisible]), [[proposed.id, false]]);
+  assert.ok(unproposed);
+  const htmlKept = migrated.threads[htmlThread.id].messages.flatMap(m => m.selections ?? []);
+  assert.equal(htmlKept.length, 1); assert.equal(htmlKept[0].isVisible, true); assert.equal((htmlKept[0].quote as any).sentence, undefined);
   assert.ok(!JSON.stringify(migrated).includes('sentence'));
-  assert.equal(html.id.length > 0, true); void base;
-  const kept = migrated.threads[thread.id].messages.flatMap(m => m.selections ?? []);
-  assert.deepEqual(kept.map(s => [s.id, s.isVisible]), [[selection.id, false]]);
-  assert.equal(Object.keys(migrated.proposals).length, 1);
-  assert.equal(isQuote({ ...selection.quote, sentence: 'hello' }), false);
+  assert.equal(isQuote({ ...proposed.quote, sentence: 'hello' }), false);
+
+  const { createProposalService } = await import('../src/proposal-service.ts');
+  assert.deepEqual((await createProposalService({ store, directory, changed() {} }).decide(id, 'accept')).accepted, [id]);
+  assert.equal(await readFile(file, 'utf8'), 'bye world\n');
+  const reopened = (await openStore(directory, owner)).read();
+  assert.equal(reopened.version, 6); assert.equal(reopened.proposals[id].status, 'accepted');
 });
