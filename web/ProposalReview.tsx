@@ -22,7 +22,7 @@ const explanations: Record<ProposalReason, string> = {
 const statusLabel = (proposal: Proposal) => ({ pending: 'Pending', accepted: 'Accepted', rejected: 'Rejected', outdated: 'Outdated' })[proposal.status];
 type Options = {
   documentId: string; proposals: Proposal[]; selections: MessageSelection[]; article: RefObject<HTMLElement | null>;
-  version: string; isHistorical: boolean; decisionBlocked?: string; onShowSelection: (selection: MessageSelection) => void;
+  version: string; isHistorical: boolean; decisionBlocked?: string; onShowSelection: (selection: MessageSelection) => boolean | Promise<boolean>;
   onShowOriginal: (selectionId: string) => void; onReturnToCurrent: () => void;
 };
 type ReviewContext = {
@@ -50,8 +50,10 @@ export function useProposalReview(options: Options) {
     const { proposals, selections, onShowSelection, isHistorical } = latest.current;
     const proposal = proposals.find(p => p.selectionId === selectionId), selection = selections.find(s => s.id === selectionId);
     if (!proposal || !selection) return false;
-    if (!isHistorical && !invoker?.closest('#document')) onShowSelection(selection);
-    setActive({ id: proposal.id, invoker }); return true;
+    const shown = !isHistorical && !invoker?.closest('#document') ? onShowSelection(selection) : true;
+    // Leaving the editor can be cancelled; the window opens only once the passage is shown.
+    if (typeof shown === 'boolean') { if (shown) setActive({ id: proposal.id, invoker }); } else void shown.then(ok => { if (ok) setActive({ id: proposal.id, invoker }); });
+    return true;
   }, []);
   useEffect(() => {
     if (!active) return;

@@ -5180,24 +5180,36 @@ test('edit-mode quotes are not called changed while the document loads', async (
   await expect(page.getByText('Selection changed')).toHaveCount(0);
 });
 
-test('clicking an edit-mode quote in view mode opens the editor at its lines', async ({ page }) => {
+const markInView = (page: Page) => page.evaluate(() => {
+  const mark = document.querySelector('.cm-content .edit-quote')?.getBoundingClientRect(), box = document.querySelector('.cm-scroller')!.getBoundingClientRect();
+  return !!mark && mark.top >= box.top && mark.bottom <= box.bottom;
+});
+async function longDocWithQuote(page: Page) {
   const lines = Array.from({ length: 60 }, (_, i) => i === 19 ? 'Line twenty has a marker word.' : `Filler line ${i + 1}.`);
   const doc = await f.register('reveal-edit.md', lines.join('\n\n') + '\n');
   await page.goto(`${f.url}/?document=${doc.id}`);
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
-  const source = (await readFile(doc.path, 'utf8')).split('\n');
-  const line = source.findIndex(text => text.includes('marker word')) + 1;
-  await page.evaluate(() => document.querySelector('.cm-scroller')!.scrollTo(0, 0));
+  const line = (await readFile(doc.path, 'utf8')).split('\n').findIndex(text => text.includes('marker word')) + 1;
   await quoteInEditor(page, line, 'Line twenty has a '.length, 'marker');
+  return line;
+}
+
+test('clicking an edit-mode quote in view mode opens the editor at its lines', async ({ page }) => {
+  const line = await longDocWithQuote(page);
   await page.getByRole('button', { name: 'Done', exact: true }).click();
   await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await page.locator('main.canvas').evaluate(node => node.scrollTo(0, 0));
   await page.locator('.sidebar').getByRole('button', { name: new RegExp(`Open quoted file: .*reveal-edit\\.md:${line}`) }).first().click();
   await expect(page.locator('.cm-content .edit-quote')).toContainText('marker');
-  await expect(page.locator('.cm-editor')).toBeVisible();
-  await expect.poll(() => page.evaluate(() => {
-    const mark = document.querySelector('.cm-content .edit-quote')!.getBoundingClientRect(), box = document.querySelector('.cm-scroller')!.getBoundingClientRect();
-    return mark.top >= box.top && mark.bottom <= box.bottom;
-  })).toBe(true);
+  await expect.poll(() => markInView(page)).toBe(true);
+});
+
+test('clicking an edit-mode quote while editing scrolls the editor to its lines', async ({ page }) => {
+  const line = await longDocWithQuote(page);
+  await page.evaluate(() => document.querySelector('.cm-scroller')!.scrollTo(0, 0));
+  await expect.poll(() => markInView(page)).toBe(false);
+  await page.locator('.sidebar').getByRole('button', { name: new RegExp(`Open quoted file: .*reveal-edit\\.md:${line}`) }).first().click();
+  await expect.poll(() => markInView(page)).toBe(true);
 });
 
 async function passageThread(page: Page) {
@@ -5237,17 +5249,20 @@ test('accepting a proposal while dirty is blocked; once clean it flows into the 
   const original = await readFile(doc.path, 'utf8');
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
   await typeAtEndOfFirstLine(page, ' typed');
+  // Cancelling the leave prompt keeps the editor and opens no proposal window.
   await page.locator('.sidebar .proposal-card').getByRole('button', { name: 'Review change', exact: true }).click();
   await page.getByRole('dialog', { name: 'Unsaved changes' }).getByRole('button', { name: 'Cancel', exact: true }).click();
-  const accept = page.getByRole('button', { name: 'Accept', exact: true });
-  await accept.click();
-  await expect(page.getByRole('alert').filter({ hasText: 'Save or discard your edits first' })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Proposed change' })).toHaveCount(0);
+  await expect(page.locator('.cm-content')).toContainText('Retry policy typed');
+  const acceptAll = page.locator('.sidebar').getByRole('button', { name: /^Accept all/ });
+  await acceptAll.click();
+  await expect(page.locator('.sidebar').getByRole('alert').filter({ hasText: 'Save or discard your edits first' })).toBeVisible();
   expect(await readFile(doc.path, 'utf8')).toBe(original);
   // Undoing the typing makes the editor clean again, which allows the accept.
   await page.locator('.cm-content').focus();
   await page.keyboard.press('ControlOrMeta+z');
   await expect(page.getByText('● Unsaved')).toHaveCount(0);
-  await accept.click();
+  await acceptAll.click();
   await expect(page.locator('.cm-content')).toContainText('temporary failures');
   expect(await readFile(doc.path, 'utf8')).toContain('temporary failures');
 });

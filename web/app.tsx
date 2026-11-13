@@ -388,18 +388,16 @@ function App() {
     [message.fileQuote, ...(message.fileSelections ?? []).map(selection => selection.fileQuote)]
       .flatMap(quote => quote && quote.kind === 'doc' && quote.path === current?.path ? [{ id: thread.id, quote }] : [])));
   const saveFirst = editStatus.dirty ? { beforeSend: () => editMode.current?.save() ?? Promise.resolve(true), sendLabel: 'Save & send' } : {};
-  const leaveEditingFirst = async () => editStartLine === null || !editMode.current || await editMode.current.requestExit();
-  // A quote made in the editor reveals in the editor: enter edit mode if needed, then scroll to its lines once it has mounted.
+  // Only while editing: asks to save or discard, and says whether the editor was left. View mode never waits.
+  const leaveEditingFirst = () => editStartLine === null || !editMode.current ? Promise.resolve(true) : editMode.current.requestExit();
+  const [editReveal, setEditReveal] = useState<{ start: number; end: number } | null>(null);
+  // A quote made in the editor reveals in the editor: scroll there, or enter edit mode and let it scroll once mounted.
   const revealEditQuote = (quote: FileQuote) => {
-    if (editStartLine === null) setEditStartLine(quote.startLine ?? 1);
-    let tries = 0;
-    const reveal = () => {
-      if (editMode.current) editMode.current.revealLines(quote.startLine ?? 1, quote.endLine ?? quote.startLine ?? 1);
-      else if (++tries < 60) requestAnimationFrame(reveal);
-    };
-    requestAnimationFrame(reveal);
+    const span = { start: quote.startLine ?? 1, end: quote.endLine ?? quote.startLine ?? 1 };
+    if (editStartLine !== null) editMode.current?.revealLines(span.start, span.end);
+    else { setEditReveal(span); startEditing(); }
   };
-  const leaveEditing = useCallback((line: number) => { returnLine.current = line; setEditStartLine(null); }, []);
+  const leaveEditing = useCallback((line: number) => { returnLine.current = line; setEditStartLine(null); setEditReveal(null); }, []);
   useEffect(() => {
     if (editStartLine !== null || returnLine.current === null) return;
     const line = returnLine.current; returnLine.current = null;
@@ -1108,7 +1106,7 @@ function App() {
   }
   const selectionActions = {
     onOpenFileQuote: (quote: FileQuote, revealId?: string) => {
-      if (quote.kind === 'doc' && quote.path === current?.path && !htmlView && !hasCarriageReturn) return revealEditQuote(quote);
+      if (quote.kind === 'doc' && quote.path === current?.path && !htmlView && !hasCarriageReturn && !documentError) return revealEditQuote(quote);
       if (quote.kind === 'html' && quote.selector && revealId && quote.path !== htmlAbsolute) return openHtmlPage(quote.path, revealId);
       if (!htmlView || quote.kind !== 'html' || quote.path !== htmlAbsolute || !quote.selector) return openLink(quote.kind === 'code' ? 'code' : 'doc', quote.path);
       if (innerWidth <= 850) setSidebarShown(false);
@@ -1129,8 +1127,8 @@ function App() {
     activeSelectionId: activeMessageId,
     passageIssue,
     fileQuoteIssue,
-    showOriginal: async (selectionId: string) => {
-      if (!(await leaveEditingFirst())) return;
+    showOriginal: (selectionId: string, afterLeave = false): boolean | Promise<boolean> => {
+      if (editStartLine !== null && !afterLeave) return leaveEditingFirst().then(left => { if (left) selectionActions.showOriginal(selectionId, true); return left; });
       const entry = selectedMessages.find(({ selection }) => selection.id === selectionId);
       if (entry) setActiveThreadId(entry.thread.id);
       clearSelection();
@@ -1139,10 +1137,10 @@ function App() {
       setPreviewPath(null);
       setActiveMessageId(selectionId);
       if (innerWidth <= 850) setSidebarShown(false);
+      return true;
     },
-    showPassage: async (selection: import('../src/store.ts').MessageSelection) => {
-      const wasEditing = editStartLine !== null;
-      if (!(await leaveEditingFirst())) return;
+    showPassage: (selection: import('../src/store.ts').MessageSelection, wasEditing = false): boolean | Promise<boolean> => {
+      if (editStartLine !== null && !wasEditing) return leaveEditingFirst().then(left => { if (left) selectionActions.showPassage(selection, true); return left; });
       const entry = selectedMessages.find(item => item.selection.id === selection.id);
       if (entry) setActiveThreadId(entry.thread.id);
       setActiveMessageId(selection.id);
@@ -1164,6 +1162,7 @@ function App() {
         }
       };
       requestAnimationFrame(reveal);
+      return true;
     },
   };
   // ?reveal= from another view: open its thread now, reveal once the user turns on Run scripts and the page is ready.
@@ -1344,7 +1343,7 @@ function App() {
             )}
             {editStartLine !== null && current ? (
               <MarkdownEditMode documentId={documentId} path={current.path} markdown={content.markdown} version={content.version} diskMarkdown={content.markdown} diskVersion={content.version}
-                startLine={editStartLine} handleRef={editMode} quotes={editQuotes} onSelect={selectInEditor} onOpenQuote={openThread} onExit={leaveEditing} onError={setError} onStatus={setEditStatus} />
+                startLine={editStartLine} reveal={editReveal} handleRef={editMode} quotes={editQuotes} onSelect={selectInEditor} onOpenQuote={openThread} onExit={leaveEditing} onError={setError} onStatus={setEditStatus} />
             ) : (
             <article
               className="document-card w-full bg-card rounded-xl p-5 md:p-8 lg:p-10 xl:p-12 shadow-xl border border-border/50"

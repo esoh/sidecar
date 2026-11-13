@@ -17,10 +17,12 @@ export type EditModeHandle = {
 const CHANGED = 'The document changed on disk. Review it again.';
 type Choice = 'save' | 'discard' | 'cancel';
 
-export function MarkdownEditMode({ documentId, path, markdown, version, diskMarkdown, diskVersion, startLine, handleRef, quotes, onSelect, onOpenQuote, onExit, onError, onStatus }: {
+export function MarkdownEditMode({ documentId, path, markdown, version, diskMarkdown, diskVersion, startLine, reveal, handleRef, quotes, onSelect, onOpenQuote, onExit, onError, onStatus }: {
   documentId: string; path: string; markdown: string; version: string;
   /** The live file content from the app; it changes whenever the file changes on disk. */
   diskMarkdown: string; diskVersion: string; startLine: number;
+  /** Lines to scroll into view once the editor has mounted (a quote opened from the reading view). */
+  reveal?: { start: number; end: number } | null;
   handleRef: MutableRefObject<EditModeHandle | null>;
   /** Quotes of this file to paint; `id` is what a click on the mark reports. */
   quotes: Array<{ id: string; quote: FileQuote }>;
@@ -168,6 +170,17 @@ export function MarkdownEditMode({ documentId, path, markdown, version, diskMark
     frame = requestAnimationFrame(apply);
     return () => cancelAnimationFrame(frame);
   }, [mountId]);
+  const revealed = useRef<typeof reveal>(null);
+  useEffect(() => {
+    if (!reveal || revealed.current === reveal) return;
+    let frame = 0, tries = 0;
+    const apply = () => {
+      if (view.current) { revealed.current = reveal; revealLineRange(view.current, reveal.start, reveal.end); }
+      else if (++tries < 60) frame = requestAnimationFrame(apply);
+    };
+    frame = requestAnimationFrame(apply);
+    return () => cancelAnimationFrame(frame);
+  }, [mountId, reveal]);
 
   return (
     <div className="markdown-edit-mode">
