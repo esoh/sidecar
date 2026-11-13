@@ -685,7 +685,7 @@ select {
 }
 .floating {
   position: fixed;
-  z-index: 60; /* above the editor card (50) */
+  z-index: 10;
   box-sizing: border-box;
   border: 1px solid var(--border);
   border-radius: 9px;
@@ -1252,7 +1252,7 @@ pre code.pn-code[data-keep-layout] {
 .document-tools > div { min-width: 0; }
 .document-tools > div > div { min-width: 0; }
 .document-copy { margin-left: auto; flex-shrink: 0; }
-.markdown-edit-mode { display: flex; flex-direction: column; height: calc(100vh - 110px); min-height: 320px; background: var(--card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.markdown-edit-mode { isolation: isolate; display: flex; flex-direction: column; height: calc(100vh - 110px); min-height: 320px; background: var(--card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
 .topbar .edit-action { width: auto; padding: 0 10px; font-size: 13px; }
 .topbar .markdown-edit-dirty { white-space: nowrap; color: var(--primary); font-size: 12px; }
 .markdown-edit-leave { background: var(--popover); color: var(--foreground); border: 1px solid var(--border); border-radius: 8px; }

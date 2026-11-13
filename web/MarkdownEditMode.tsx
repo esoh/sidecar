@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type MutableRefObject } from 'react';
 import { Prec, Transaction } from '@codemirror/state';
-import { EditorView, keymap } from '@codemirror/view';
+import { EditorView, ViewPlugin, keymap } from '@codemirror/view';
 import { MarkdownEditor, type MarkdownEditorHandle } from '@plannotator/ui/components/MarkdownEditor';
 import { errorText, saveSource } from './api.ts';
 import type { FileQuote } from '../src/quote.ts';
@@ -113,8 +113,8 @@ export function MarkdownEditMode({ documentId, path, markdown, version, diskMark
   const mountId = `${documentId}:${mountKey}`;
   const latest = useRef({ quotes, onSelect, onOpenQuote, path });
   latest.current = { quotes, onSelect, onOpenQuote, path };
-  const paint = useCallback(() => {
-    const target = view.current;
+  const dragging = useRef(false);
+  const paint = useCallback((target = view.current) => {
     if (!target) return;
     const text = target.state.doc.toString();
     const marks = latest.current.quotes.flatMap(({ id, quote }) => { const at = locateFileQuote(text, quote); return at ? [{ ...at, id }] : []; });
@@ -123,14 +123,28 @@ export function MarkdownEditMode({ documentId, path, markdown, version, diskMark
   const extensions = useMemo(() => [
     viewCapture(view),
     quoteMarks(),
-    EditorView.updateListener.of(update => { if (update.docChanged) queueMicrotask(paint); }),
+    // A new view (first mount or Reload) paints itself; the ref may still hold the old one for a frame.
+    ViewPlugin.define(created => { queueMicrotask(() => paint(created)); return {}; }),
+    EditorView.updateListener.of(update => {
+      if (update.docChanged) queueMicrotask(() => paint());
+      // Typing over a selection, Mod-a and the like change what is selected; a pointer drag reports on release.
+      if ((update.docChanged || update.selectionSet) && !dragging.current) queueMicrotask(() => latest.current.onSelect(selectionQuote(update.view, latest.current.path)));
+    }),
     EditorView.domEventHandlers({
+      mousedown: () => {
+        dragging.current = true;
+        window.addEventListener('mouseup', () => { dragging.current = false; }, { once: true });
+      },
       mouseup: (_, editor) => { latest.current.onSelect(selectionQuote(editor, latest.current.path)); },
       touchend: (_, editor) => { latest.current.onSelect(selectionQuote(editor, latest.current.path)); },
       keyup: (event, editor) => { if (event.key.startsWith('Arrow') || event.key === 'Shift') latest.current.onSelect(selectionQuote(editor, latest.current.path)); },
       click: event => {
         const id = event.target instanceof Element ? event.target.closest<HTMLElement>('.edit-quote')?.dataset.quoteId : undefined;
-        if (id) latest.current.onOpenQuote(id);
+        if (!id) return;
+        latest.current.onOpenQuote(id);
+        // The opened thread claims focus when it mounts; the click was to edit, so hand it back.
+        const refocus = () => view.current?.focus();
+        queueMicrotask(refocus); requestAnimationFrame(refocus);
       },
     }),
     Prec.high(keymap.of([{ key: 'Mod-s', preventDefault: true, run: () => { void save(); return true; } }])),

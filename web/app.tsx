@@ -1061,7 +1061,7 @@ function App() {
   // null means fine or unknown; a quote is never called changed without evidence.
   const fileQuoteIssue = (quote: FileQuote): string | null => {
     if (quote.kind === 'html') return isBridgeReady && quote.path === htmlAbsolute && htmlChecks[htmlQuoteKey(quote)] === false ? 'Selection changed' : null;
-    if (quote.kind === 'doc' && quote.startLine && quote.path === current?.path) return locateFileQuote(content.markdown, quote) ? null : 'Selection changed';
+    if (quote.kind === 'doc' && quote.startLine && quote.path === current?.path) return !content.version || documentError ? null : locateFileQuote(content.markdown, quote) ? null : 'Selection changed';
     const file = files.find(file => !file.refusal && `${(file.root ?? current?.workspace ?? '').replace(/\/$/, '')}/${file.path}` === quote.path), entry = file && watched[file.id];
     if (entry?.status === 404) return 'File unavailable';
     if (!file || entry?.data === undefined) return null;

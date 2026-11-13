@@ -21,3 +21,9 @@ test('returns null when the text is gone', () => {
 test('handles a multi-line exact', () => {
   assert.deepEqual(locateFileQuote('a\nb\nc\nd\n', quote('b\nc', 2)), { from: 2, to: 5 });
 });
+test('a one-character quote in a large document resolves quickly and correctly', () => {
+  const source = 'a\n'.repeat(100000) + 'b';
+  const started = Date.now();
+  assert.deepEqual(locateFileQuote(source, quote('a', 100000)), { from: 199998, to: 199999 });
+  assert.ok(Date.now() - started < 2000);
+});

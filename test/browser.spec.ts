@@ -5119,3 +5119,63 @@ test('view-mode selection still works unchanged in view mode', async ({ page }) 
   await expect(page.getByRole('button', { name: 'Comment', exact: true })).toBeVisible();
   await expect(page.locator('.cm-editor')).toHaveCount(0);
 });
+
+async function quoteInEditor(page: Page, line: number, offset: number, word: string) {
+  await selectEditorText(page, line, offset, word.length);
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('About this');
+  await page.getByRole('button', { name: 'Send comment' }).click();
+  await expect(page.locator('.cm-content .edit-quote')).toContainText(word);
+}
+
+test('clicking a painted mark keeps typing in the editor and opens its thread', async ({ page }) => {
+  const doc = await f.register('mark-click.md', '# Title\n\nDelete this phrase soon.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await quoteInEditor(page, 3, 'Delete this '.length, 'phrase');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Thread conversation' })).toHaveCount(0);
+  await page.locator('.cm-content .edit-quote').click();
+  await expect(page.getByRole('region', { name: 'Thread conversation' })).toBeVisible();
+  await page.keyboard.type('ZZ');
+  await expect(page.locator('.cm-content')).toContainText('ZZ');
+});
+
+test('typing over a selection removes the stale selection toolbar', async ({ page }) => {
+  const doc = await f.register('stale.md', '# Title\n\nReplace this word now.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await selectEditorText(page, 3, 'Replace this '.length, 'word'.length);
+  await expect(page.getByRole('button', { name: 'Comment', exact: true })).toBeVisible();
+  await page.keyboard.type('thing');
+  await expect(page.getByRole('button', { name: 'Comment', exact: true })).toHaveCount(0);
+});
+
+test('edit-mode marks are painted again after Reload remounts the editor', async ({ page }) => {
+  const doc = await f.register('reload-marks.md', '# Title\n\nDelete this phrase soon.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await quoteInEditor(page, 3, 'Delete this '.length, 'phrase');
+  await typeAtEndOfFirstLine(page, ' draft');
+  await writeFile(doc.path, '# Agent title\n\nDelete this phrase soon.\n');
+  await expect(page.getByText('This file changed on disk.')).toBeVisible();
+  await page.getByRole('button', { name: 'Reload', exact: true }).click();
+  await expect(page.locator('.cm-content')).toContainText('Agent title');
+  await expect(page.locator('.cm-content .edit-quote')).toContainText('phrase');
+});
+
+test('edit-mode quotes are not called changed while the document loads', async ({ page }) => {
+  const doc = await f.register('early.md', '# Title\n\nDelete this phrase soon.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await quoteInEditor(page, 3, 'Delete this '.length, 'phrase');
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  await page.route(`**/api/documents/${doc.id}`, async route => { await held; await route.continue(); });
+  await page.reload();
+  await expect(page.getByText('early.md:3').first()).toBeVisible();
+  await expect(page.getByText('Selection changed')).toHaveCount(0);
+  release();
+  await expect(page.locator('#document')).toContainText('Delete this phrase soon.');
+  await expect(page.getByText('Selection changed')).toHaveCount(0);
+});
