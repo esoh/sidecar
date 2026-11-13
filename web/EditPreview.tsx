@@ -18,6 +18,7 @@ export function scrollPreviewToLine(scroller: HTMLElement, root: HTMLElement, li
 }
 
 const HIGHLIGHT = 'sidecar-quote';
+const canPaint = () => typeof CSS !== 'undefined' && 'highlights' in CSS && typeof Highlight !== 'undefined';
 
 /**
  * The rendered Markdown of the editor's text, with the threads' quotes painted. The quotes use the CSS Custom
@@ -39,7 +40,8 @@ export function EditPreview({ text, documentId, linkBase, quotes, version, rootR
   const quoteKey = JSON.stringify(quotes);
   useLayoutEffect(() => {
     const root = rootRef.current;
-    if (!root) return;
+    // Browsers without the Custom Highlight API lose the preview paint; nothing else depends on it.
+    if (!root || !canPaint()) return;
     const painted = new Map<string, Range[]>();
     for (const { id, quote } of quotes) {
       const match = locateQuote(text, quote, version), ranges = match ? sourceToRanges(root, text, match.start, match.end) : [];
@@ -47,7 +49,7 @@ export function EditPreview({ text, documentId, linkBase, quotes, version, rootR
     }
     rangesRef.current = painted;
     CSS.highlights.set(HIGHLIGHT, new Highlight(...[...painted.values()].flat()));
-    return () => { CSS.highlights.delete(HIGHLIGHT); rangesRef.current = new Map(); };
+    return () => { if (canPaint()) CSS.highlights.delete(HIGHLIGHT); rangesRef.current = new Map(); };
   }, [text, quoteKey, version]);
   const capture = () => {
     const selected = window.getSelection(), root = rootRef.current;

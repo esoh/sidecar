@@ -49,7 +49,7 @@ type Content = { html: string; markdown: string; version: string };
 const insideRoot = (path: string, root: string) => path.startsWith(`${root.replace(/\/$/, '')}/`);
 
 function keepsAttachment(target: EventTarget | null) {
-  return target instanceof Element && !!target.closest('.sidebar .composer, .sidebar-header, .thread-row, .sidebar-toggle, .files-edge-toggle, .files-panel, .file-preview, .html-topbar, .html-canvas');
+  return target instanceof Element && !!target.closest('.markdown-edit-leave, .sidebar .composer, .sidebar-header, .thread-row, .sidebar-toggle, .files-edge-toggle, .files-panel, .file-preview, .html-topbar, .html-canvas');
 }
 
 function App() {
@@ -403,7 +403,29 @@ function App() {
   }, sendLabel: editStatus.dirty ? 'Save & send' : undefined } : {};
   // Only while editing: asks to save or discard, and says whether the editor was left. View mode never waits.
   const leaveEditingFirst = () => editAnchor === null || !editMode.current ? Promise.resolve(true) : editMode.current.requestExit();
-  const leaveEditing = useCallback((line: number) => { returnLine.current = line; setEditAnchor(null); }, []);
+  // Leaving edit mode: a pending editor quote (in the toolbar, the floating composer or any thread's draft) was made against the
+  // editor's text. After Save it is restamped with the saved version; after Discard, or if its text is gone, it is dropped.
+  const afterLeaving = useRef<(line: number, stamped: Quote | null) => void>(() => {});
+  afterLeaving.current = (line, stamped) => {
+    returnLine.current = line; setEditAnchor(null);
+    const old = editorQuote.current;
+    if (!old) return;
+    const same = (quote?: Quote) => !!quote && sameQuote(quote, old);
+    for (const id of new Set([...threads.map(thread => thread.id), ...(activeThreadId ? [activeThreadId] : [])])) {
+      const draft = drafts.get(id);
+      if (!draft || !same(draft.quote)) continue;
+      const { quote: _, ...rest } = draft;
+      drafts.set(id, stamped ? { ...rest, quote: stamped } : rest);
+    }
+    if (!same(selection)) return;
+    if (!stamped) { clearSelection(); return; }
+    const floating = passageDrafts.current.get(draftKey);
+    passageDrafts.current.delete(draftKey);
+    editorQuote.current = stamped;
+    if (floating) passageDrafts.current.set(JSON.stringify(stamped), { ...floating, quote: stamped });
+    setSelection(stamped);
+  };
+  const leaveEditing = useCallback((line: number, stamped: Quote | null) => afterLeaving.current(line, stamped), []);
   useEffect(() => {
     if (editAnchor !== null || returnLine.current === null) return;
     const line = returnLine.current; returnLine.current = null;

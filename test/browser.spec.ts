@@ -5442,6 +5442,75 @@ test('typing in the source pane patches the preview in place: same article, same
   await expect.poll(() => paintedInPreview(page)).toBe('marker');
 });
 
+test('a pending editor quote made while dirty is restamped when Done saves, then sent from the reading view', async ({ page }) => {
+  const doc = await f.register('done-restamp.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const sent: any[] = [], saved: string[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  page.on('response', async response => { if (response.url().endsWith('/source') && response.request().method() !== 'GET') saved.push((await response.json()).version); });
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  await selectEditorText(page, 3, 'Body with a '.length, 'marker'.length);
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('Check this');
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('button', { name: /send/i }).click();
+  await expect.poll(() => sent.length).toBe(1);
+  const text = await readFile(doc.path, 'utf8');
+  expect(sent[0].quote.version).toBe(saved.at(-1));
+  expect(text.slice(sent[0].quote.start, sent[0].quote.end)).toBe('marker');
+  await expect(page.getByRole('dialog', { name: 'Comment on selection' })).toHaveCount(0);
+});
+
+test('a thread draft holding a dirty editor quote is restamped on Done, and dropped on Discard', async ({ page }) => {
+  const doc = await f.register('done-draft.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Start'); await input.press('Enter'); await expect(input).toHaveValue('');
+  await answer('Ok.');
+  const sent: any[] = [], saved: string[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  page.on('response', async response => { if (response.url().endsWith('/source') && response.request().method() !== 'GET') saved.push((await response.json()).version); });
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  await selectEditorText(page, 3, 'Body with a '.length, 'marker'.length);
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await input.fill('About it'); await input.press('Enter');
+  await expect.poll(() => sent.length).toBe(1);
+  const text = await readFile(doc.path, 'utf8');
+  expect(sent[0].quote.version).toBe(saved.at(-1));
+  expect(text.slice(sent[0].quote.start, sent[0].quote.end)).toBe('marker');
+  await answer('Ok again.');
+  // Discard: the quote made against unsaved text is dropped from the draft.
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' more');
+  await selectEditorText(page, 3, 'Body with a '.length, 'marker'.length);
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Unsaved changes' }).getByRole('button', { name: 'Discard', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await expect(page.locator('.draft-selection')).toHaveCount(0);
+});
+
+test('without the Custom Highlight API, edit mode still renders both panes', async ({ page }) => {
+  await page.addInitScript(() => { delete (CSS as any).highlights; delete (window as any).Highlight; });
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await longDocWithQuote(page);
+  await expect(page.locator('.cm-editor')).toBeVisible();
+  await expect(page.locator('.edit-preview')).toContainText('Filler line 1.');
+  await expect(page.locator('.cm-content .edit-quote')).toContainText('marker');
+  await typeAtEndOfFirstLine(page, ' x');
+  await expect(page.locator('.edit-preview')).toContainText('Filler line 1. x');
+  await page.locator('.edit-preview').getByText('Filler line 2.').click();
+  expect(errors).toEqual([]);
+});
+
 test('Save & send is blocked with Passage changed once the quoted text was edited away', async ({ page }) => {
   const doc = await f.register('deleted-passage.md', '# Title\n\nBody with a marker inside.\n');
   await page.goto(`${f.url}/?document=${doc.id}`);

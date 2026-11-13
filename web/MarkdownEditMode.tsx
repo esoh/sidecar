@@ -36,7 +36,8 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
   /** Returns false when the app kept its earlier selection instead (a comment is being written). */
   onSelect: (selection: Picked) => boolean | void;
   onOpenQuote: (id: string) => void;
-  onExit: (line: number) => void; onError: (message: string) => void;
+  /** `quote` is the pending selection restamped against the saved text (null when discarded or edited away). */
+  onExit: (line: number, quote: Quote | null) => void; onError: (message: string) => void;
   /** Dirty and saving state, shown by the app header's controls. */
   onStatus: (status: { dirty: boolean; saving: boolean }) => void;
 }) {
@@ -100,14 +101,14 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
   const showingPreview = narrow && pane === 'preview';
   const topLine = () => showingPreview && previewScroller.current && previewRoot.current ? previewTopLine(previewScroller.current, previewRoot.current)
     : view.current ? topVisibleLine(view.current) : 1;
-  const leave = useCallback(() => onExit(topLine()), [onExit, showingPreview]);
+  const leave = useCallback((keep: boolean) => onExit(topLine(), keep && view.current ? trackedQuote(view.current.state, baseVersion.current) : null), [onExit, showingPreview]);
   const requestExit = useCallback(async () => {
-    if (!dirtyNow.current) { leave(); return true; }
+    if (!dirtyNow.current) { leave(true); return true; }
     const choice = await new Promise<Choice>(resolve => { choose.current = resolve; setAsking(true); });
     setAsking(false);
     if (choice === 'cancel' || (choice === 'save' && !await save())) return false;
     dirtyNow.current = false;
-    leave();
+    leave(choice === 'save');
     return true;
   }, [leave, save]);
 
