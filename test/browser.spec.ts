@@ -5054,7 +5054,7 @@ test('unsaved edits prompt before switching documents and on unload', async ({ p
   expect(kinds).toContain('beforeunload');
 });
 
-test('entering edit mode opens near the reading position and Done returns near the editor position', async ({ page }) => {
+test('Enter and leave: edit mode opens at the reading passage in both panes and Done returns the preview\'s passage', async ({ page }) => {
   const markdown = Array.from({ length: 40 }, (_, i) => `## Heading ${i + 1}\n\n${'Filler paragraph text.\n\n'.repeat(6)}`).join('');
   const doc = await f.register('long-edit.md', markdown);
   await page.goto(`${f.url}/?document=${doc.id}`);
@@ -5065,11 +5065,12 @@ test('entering edit mode opens near the reading position and Done returns near t
     canvas.scrollTo({ top: canvas.scrollTop + target.getBoundingClientRect().top - canvas.getBoundingClientRect().top, behavior: 'instant' });
   }, 30);
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
-  const topLine = () => page.locator('.cm-scroller').evaluate(scroller => {
-    const top = scroller.getBoundingClientRect().top;
-    return [...scroller.querySelectorAll('.cm-line')].find(line => line.getBoundingClientRect().bottom > top + 1)?.textContent ?? '';
+  const inView = () => page.locator('.cm-scroller').evaluate(scroller => {
+    const box = scroller.getBoundingClientRect();
+    return [...scroller.querySelectorAll('.cm-line')].some(line => line.textContent === '## Heading 30' && line.getBoundingClientRect().top >= box.top && line.getBoundingClientRect().bottom <= box.bottom);
   });
-  await expect.poll(async () => { const m = (await topLine()).match(/^## Heading (\d+)$/); return m ? Number(m[1]) : 0; }).toBe(30);
+  await expect.poll(inView).toBe(true);
+  await expect(page.locator('.edit-preview').getByRole('heading', { name: 'Heading 30', exact: true })).toBeInViewport({ ratio: 1 });
   // Scroll the editor up until Heading 10 is rendered, then put it at the top.
   await expect.poll(() => page.locator('.cm-scroller').evaluate(scroller => {
     const line = [...scroller.querySelectorAll('.cm-line')].find(l => l.textContent === '## Heading 10');
@@ -5106,6 +5107,105 @@ test('Phone toggle: one pane with Source | Preview, and switching keeps the pass
     const top = scroller.getBoundingClientRect().top;
     return /^## Heading (11|12|13)$/.test([...scroller.querySelectorAll('.cm-line')].find(line => line.getBoundingClientRect().bottom > top + 1)?.textContent ?? '');
   })).toBe(true);
+});
+
+const syncDoc = (image = '') => Array.from({ length: 24 }, (_, i) => `## Section ${i + 1}\n\n${i === 2 ? image : ''}Para ${i + 1} ${'lorem ipsum dolor sit amet '.repeat(24)}\n\nShort ${i + 1}.\n\n`).join('');
+async function openSplit(page: Page, name: string, markdown: string) {
+  const doc = await f.register(name, markdown);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.cm-content')).toBeVisible();
+  await expect(page.locator('.edit-preview').getByRole('heading', { name: 'Section 1', exact: true })).toBeVisible();
+}
+// Where the leader's anchor sits in a paragraph, and how far (px) the other pane's anchor is from the same point of that paragraph.
+const syncGap = (page: Page, leader: 'source' | 'preview') => page.evaluate(side => {
+  const pane = (name: string) => document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!;
+  const anchor = (name: string) => { const el = pane(name), r = el.getBoundingClientRect(); return r.top + el.clientHeight * el.scrollTop / Math.max(1, el.scrollHeight - el.clientHeight); };
+  const blocks = (name: string) => [...pane(name).querySelectorAll<HTMLElement>(name === 'source' ? '.cm-line' : 'p')].filter(e => /^Para \d+ /.test(e.textContent ?? ''));
+  const other = side === 'source' ? 'preview' : 'source', y = anchor(side);
+  const hit = blocks(side).find(e => e.getBoundingClientRect().top <= y && y < e.getBoundingClientRect().bottom);
+  if (!hit) return null;
+  const a = hit.getBoundingClientRect(), twin = blocks(other).find(e => e.textContent!.slice(0, 9) === hit.textContent!.slice(0, 9));
+  if (!twin) return { key: hit.textContent!.slice(0, 9), gap: Infinity };
+  const b = twin.getBoundingClientRect();
+  return { key: hit.textContent!.slice(0, 9), gap: Math.abs(anchor(other) - (b.top + (y - a.top) / a.height * b.height)) };
+}, leader);
+// Scrolls the leader to a fraction of its range, nudging until its anchor is inside a paragraph, then waits for the other pane.
+async function scrollLeader(page: Page, leader: 'source' | 'preview', fraction: number) {
+  let attempt = 0;
+  await expect.poll(async () => {
+    await page.evaluate(([side, f, extra]) => {
+      const el = document.querySelector<HTMLElement>(side === 'source' ? '.cm-scroller' : '.edit-preview')!;
+      el.scrollTop = f * (el.scrollHeight - el.clientHeight) + extra;
+    }, [leader, fraction, 25 * attempt++] as const);
+    return (await syncGap(page, leader)) !== null;
+  }).toBe(true);
+  await expect.poll(async () => (await syncGap(page, leader))?.gap ?? Infinity).toBeLessThan(24);
+}
+const nudge = (page: Page, leader: 'source' | 'preview', by: number) => page.evaluate(([side, d]) => { document.querySelector<HTMLElement>(side === 'source' ? '.cm-scroller' : '.edit-preview')!.scrollTop += d; }, [leader, by] as const);
+
+for (const [name, leader] of [['Sync source to preview', 'source'], ['Sync preview to source', 'preview']] as const) {
+  test(`${name}: a wrapped paragraph's middle sits at the anchor in both panes`, async ({ page }) => {
+    await openSplit(page, `sync-${leader}.md`, syncDoc());
+    for (const fraction of [0.3, 0.5, 0.7]) {
+      await scrollLeader(page, leader, fraction);
+      expect((await syncGap(page, leader))!.gap).toBeLessThan(24);
+      // Nudging keeps it aligned: the pane just scrolled leads.
+      await nudge(page, leader, 40);
+      await expect.poll(async () => (await syncGap(page, leader))?.gap ?? 0).toBeLessThan(24);
+    }
+  });
+}
+
+test('Ends align: scrolling either pane to its bottom (and top) puts the other there too', async ({ page }) => {
+  await openSplit(page, 'sync-ends.md', syncDoc());
+  const atEnd = (side: 'source' | 'preview') => page.evaluate(name => { const el = document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!; return el.scrollHeight - el.clientHeight - el.scrollTop; }, side);
+  const atTop = (side: 'source' | 'preview') => page.evaluate(name => document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!.scrollTop, side);
+  for (const [leader, follower] of [['source', 'preview'], ['preview', 'source']] as const) {
+    // A pane the sync just scrolled ignores scroll events for 100 ms; a person takes longer than that to switch panes.
+    await page.waitForTimeout(150);
+    await page.evaluate(name => { const el = document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!; el.scrollTop = el.scrollHeight; }, leader);
+    await expect.poll(() => atEnd(follower)).toBeLessThan(3);
+    await page.evaluate(name => { document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!.scrollTop = 0; }, leader);
+    await expect.poll(() => atTop(follower)).toBeLessThan(3);
+  }
+});
+
+test('No feedback loop: one programmatic scroll settles with no further scroll events', async ({ page }) => {
+  await openSplit(page, 'sync-loop.md', syncDoc());
+  await page.evaluate(() => { const el = document.querySelector<HTMLElement>('.cm-scroller')!; el.scrollTop = 0.5 * (el.scrollHeight - el.clientHeight); });
+  const tops = () => page.evaluate(() => [document.querySelector<HTMLElement>('.cm-scroller')!.scrollTop, document.querySelector<HTMLElement>('.edit-preview')!.scrollTop]);
+  await expect.poll(async () => { const a = await tops(); await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))); return JSON.stringify(a) === JSON.stringify(await tops()) && a[1] > 0; }).toBe(true);
+  const events = await page.evaluate(() => new Promise<number>(resolve => {
+    let count = 0;
+    for (const pane of [document.querySelector('.cm-scroller')!, document.querySelector('.edit-preview')!]) pane.addEventListener('scroll', () => { count++; });
+    setTimeout(() => resolve(count), 300);
+  }));
+  expect(events).toBe(0);
+});
+
+test('Late image: an image that arrives after the scroll realigns the panes', async ({ page }) => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  await page.route('https://images.test/late.svg', async route => {
+    await gate;
+    await route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="300" height="500"><rect width="300" height="500" fill="gray"/></svg>' });
+  });
+  await openSplit(page, 'sync-late.md', syncDoc('![late](https://images.test/late.svg)\n\n'));
+  await scrollLeader(page, 'source', 0.5);
+  release();
+  await expect.poll(() => page.locator('.edit-preview img').evaluate(img => (img as HTMLImageElement).complete && (img as HTMLImageElement).naturalHeight > 0)).toBe(true);
+  await expect.poll(async () => (await syncGap(page, 'source'))?.gap ?? Infinity).toBeLessThan(24);
+});
+
+test('Typing leads: the preview keeps showing the block being typed at the end', async ({ page }) => {
+  await openSplit(page, 'sync-typing.md', syncDoc());
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+End');
+  await page.keyboard.type('\n\nTyped marker paragraph');
+  await expect(page.locator('.edit-preview').getByText('Typed marker paragraph')).toBeInViewport();
+  await page.keyboard.type(' and more words so the document keeps growing');
+  await expect(page.locator('.edit-preview').getByText('Typed marker paragraph and more')).toBeInViewport();
 });
 
 test('rendered H1 and last-paragraph spacing match the pre-editor layout in the document and chat', async ({ page }) => {
@@ -5429,16 +5529,15 @@ test('a send that fails after the save is retried with the same correct quote an
   await expect(page.getByRole('dialog', { name: 'Comment on selection' })).toHaveCount(0);
 });
 
-test('typing in the source pane patches the preview in place: same article, same scroll, quote still painted', async ({ page }) => {
+test('typing in the source pane patches the preview in place: same article, quote still painted, scroll following the source', async ({ page }) => {
   await longDocWithQuote(page);
   await expect.poll(() => paintedInPreview(page)).toBe('marker');
-  await page.locator('.edit-preview').evaluate(scroller => { scroller.scrollTop = 600; (window as any).__article = document.querySelector('.edit-preview-article'); });
-  const before = await page.locator('.edit-preview').evaluate(scroller => scroller.scrollTop);
-  expect(before).toBeGreaterThan(300);
+  await page.locator('.edit-preview').evaluate(() => { (window as any).__article = document.querySelector('.edit-preview-article'); });
   await typeAtEndOfFirstLine(page, ' extra');
   await expect(page.locator('.edit-preview')).toContainText('Filler line 1. extra');
   expect(await page.evaluate(() => (window as any).__article === document.querySelector('.edit-preview-article'))).toBe(true);
-  expect(await page.locator('.edit-preview').evaluate(scroller => scroller.scrollTop)).toBe(before);
+  // Typing leads: the source is at its top, so the preview is too (it is not reset by the patch, it follows).
+  await expect.poll(() => page.locator('.edit-preview').evaluate(scroller => scroller.scrollTop)).toBeLessThan(30);
   await expect.poll(() => paintedInPreview(page)).toBe('marker');
 });
 

@@ -5,7 +5,8 @@ import { errorText, saveSource } from './api.ts';
 import type { Quote } from '../src/store.ts';
 import { EditPreview, previewTopLine, scrollPreviewToLine } from './EditPreview.tsx';
 import { SourceEditor } from './SourceEditor.tsx';
-import { applyExternalText, minimalChange, quoteMarks, revealRange, scrollToLine, selectionQuote, setQuoteMarks, setTracked, topVisibleLine, trackedQuote, trackedRange } from './editor-view.ts';
+import { syncScroll } from './scroll-sync.ts';
+import { applyExternalText, minimalChange, quoteMarks, revealRange, selectionQuote, setQuoteMarks, setTracked, trackedQuote, trackedRange } from './editor-view.ts';
 import { locateQuote, sourceQuote } from './selection.ts';
 import { rangeToSource } from './source-dom.ts';
 
@@ -99,11 +100,9 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
   const keepMine = () => { dismissed.current = disk.current.version; setBanner(false); };
   useEffect(reconcile, [diskVersion, diskMarkdown]);
 
-  // The hand-off between the panes (and to and from the reading view) is by the source line at the top.
-  const showingPreview = narrow && pane === 'preview';
-  const topLine = () => showingPreview && previewScroller.current && previewRoot.current ? previewTopLine(previewScroller.current, previewRoot.current)
-    : view.current ? topVisibleLine(view.current) : 1;
-  const leave = useCallback((keep: boolean) => onExit(topLine(), keep && view.current ? trackedQuote(view.current.state, baseVersion.current) : null), [onExit, showingPreview]);
+  // Done returns the reader to the passage at the top of the preview (it follows the source even while hidden).
+  const topLine = () => previewScroller.current && previewRoot.current ? previewTopLine(previewScroller.current, previewRoot.current) : 1;
+  const leave = useCallback((keep: boolean) => onExit(topLine(), keep && view.current ? trackedQuote(view.current.state, baseVersion.current) : null), [onExit]);
   const requestExit = useCallback(async () => {
     if (!dirtyNow.current) { leave(true); return true; }
     const choice = await new Promise<Choice>(resolve => { choose.current = resolve; setAsking(true); });
@@ -209,26 +208,18 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
   // Marks follow the threads and a remounted editor.
   const quoteKey = JSON.stringify(quotes);
   useEffect(() => { paint(); }, [mountId, quoteKey]);
-  // Open at the reading position.
+  // The panes scroll together; the one not shown (narrow) stays laid out and keeps following.
+  useEffect(() => view.current && previewScroller.current ? syncScroll(view.current, previewScroller.current) : undefined, [mountId]);
+  // Open at the reading position: the preview takes it and the source follows.
   useEffect(() => {
     if (anchor <= 0) return;
     const frame = requestAnimationFrame(() => {
       if (!view.current) return;
       const line = view.current.state.doc.lineAt(Math.min(anchor, view.current.state.doc.length)).number;
-      scrollToLine(view.current, line);
       if (previewScroller.current && previewRoot.current) scrollPreviewToLine(previewScroller.current, previewRoot.current, line);
     });
     return () => cancelAnimationFrame(frame);
   }, [mountId]);
-  const switchPane = (next: 'source' | 'preview') => {
-    if (next === pane) return;
-    const line = topLine();
-    setPane(next);
-    requestAnimationFrame(() => {
-      if (next === 'source' && view.current) scrollToLine(view.current, line);
-      else if (previewScroller.current && previewRoot.current) scrollPreviewToLine(previewScroller.current, previewRoot.current, line);
-    });
-  };
 
   return (
     <div className="markdown-edit-mode" data-narrow={narrow || undefined}>
@@ -242,15 +233,15 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
       )}
       {narrow && (
         <div className="edit-pane-toggle" role="group" aria-label="Editor pane">
-          <button aria-pressed={pane === 'source'} onClick={() => switchPane('source')}>Source</button>
-          <button aria-pressed={pane === 'preview'} onClick={() => switchPane('preview')}>Preview</button>
+          <button aria-pressed={pane === 'source'} onClick={() => setPane('source')}>Source</button>
+          <button aria-pressed={pane === 'preview'} onClick={() => setPane('preview')}>Preview</button>
         </div>
       )}
       <div className="edit-panes">
-        <div className="edit-pane" hidden={narrow && pane !== 'source'}>
+        <div className="edit-pane" data-hidden={narrow && pane !== 'source' || undefined}>
           <SourceEditor key={mountId} initial={seed} extensions={extensions} onChange={typed} viewRef={view} />
         </div>
-        <div className="edit-pane" hidden={narrow && pane !== 'preview'}>
+        <div className="edit-pane" data-hidden={narrow && pane !== 'preview' || undefined}>
           <EditPreview text={preview} documentId={documentId} linkBase={linkBase} quotes={quotes} version={preview === synced.current ? baseVersion.current : undefined}
             rootRef={previewRoot} scrollRef={previewScroller} rangesRef={previewRanges} onRange={previewRange} onOpenQuote={id => latest.current.onOpenQuote(id)} />
         </div>

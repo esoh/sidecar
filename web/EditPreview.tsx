@@ -6,10 +6,10 @@ import { sourceToRanges } from './source-dom.ts';
 
 const wrappers = (root: HTMLElement) => [...root.querySelectorAll<HTMLElement>('[data-source-line]')].filter(node => (node.firstElementChild?.getClientRects().length ?? 0) > 0);
 
-/** The source line of the first block that starts at or below the pane's top edge. */
+/** The source line of the first block that reaches the pane's top edge. */
 export function previewTopLine(scroller: HTMLElement, root: HTMLElement): number {
   const top = scroller.getBoundingClientRect().top;
-  const first = wrappers(root).find(node => node.firstElementChild!.getBoundingClientRect().top >= top - 1);
+  const first = wrappers(root).find(node => node.firstElementChild!.getBoundingClientRect().bottom > top + 1);
   return Number(first?.dataset.sourceLine) || 1;
 }
 export function scrollPreviewToLine(scroller: HTMLElement, root: HTMLElement, line: number): void {

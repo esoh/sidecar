@@ -3,15 +3,6 @@ import { Decoration, EditorView, ViewPlugin, type DecorationSet } from '@codemir
 import type { Quote } from '../src/store.ts';
 import { sourceQuote } from './selection.ts';
 
-export function topVisibleLine(view: EditorView): number {
-  return view.state.doc.lineAt(view.lineBlockAtHeight(view.scrollDOM.scrollTop).from).number;
-}
-
-export function scrollToLine(view: EditorView, line: number): void {
-  const { from } = view.state.doc.line(Math.min(Math.max(line, 1), view.state.doc.lines));
-  view.dispatch({ effects: EditorView.scrollIntoView(from, { y: 'start', yMargin: 0 }) });
-}
-
 /** Centers the range in the viewport (its start, when it is taller than the editor). */
 export function revealRange(view: EditorView, from: number, to: number): void {
   view.dispatch({ effects: EditorView.scrollIntoView(EditorSelection.range(from, to), { y: 'center' }) });
