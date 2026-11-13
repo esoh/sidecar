@@ -179,7 +179,9 @@ it would match rendered text into link URLs. Required results:
 | `click here` (a link) | `[click here](https://…)` |
 | `here` (part of a link) | `here` |
 | text inside inline code | the same text, backticks only if the whole code span is selected |
-| `&` rendered from `&amp;`, `*` from `\*` | `&amp;`, `\*` |
+| `*` rendered from `\*` | `\*` |
+| `&amp;` (Plannotator renders entities literally) | `&amp;` |
+| `…` rendered from `...`, `—` from `---`, emoji from `:rocket:` | `...`, `---`, `:rocket:` |
 | curly quote rendered from a straight quote (Plannotator smartens) | the straight quote |
 | across two blocks (end of a paragraph into a heading) | the source between, including `\n\n## ` |
 | inside a fenced code block | the same characters, 1:1 |
