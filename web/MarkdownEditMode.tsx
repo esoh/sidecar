@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type MutableRefObject } from 'react';
-import { Prec } from '@codemirror/state';
+import { Prec, Transaction } from '@codemirror/state';
 import { EditorView, keymap } from '@codemirror/view';
 import { MarkdownEditor, type MarkdownEditorHandle } from '@plannotator/ui/components/MarkdownEditor';
 import { errorText, saveSource } from './api.ts';
-import { applyExternalText, scrollToLine, topVisibleLine, viewCapture } from './editor-view.ts';
+import type { FileQuote } from '../src/quote.ts';
+import { locateFileQuote } from './edit-quotes.ts';
+import { applyExternalText, quoteMarks, scrollToLine, selectionQuote, setQuoteMarks, topVisibleLine, viewCapture } from './editor-view.ts';
 
 export type EditModeHandle = {
   isDirty(): boolean;
@@ -15,11 +17,16 @@ export type EditModeHandle = {
 const CHANGED = 'The document changed on disk. Review it again.';
 type Choice = 'save' | 'discard' | 'cancel';
 
-export function MarkdownEditMode({ documentId, path, markdown, version, diskMarkdown, diskVersion, startLine, handleRef, onExit, onError, onStatus }: {
+export function MarkdownEditMode({ documentId, path, markdown, version, diskMarkdown, diskVersion, startLine, handleRef, quotes, onSelect, onOpenQuote, onExit, onError, onStatus }: {
   documentId: string; path: string; markdown: string; version: string;
   /** The live file content from the app; it changes whenever the file changes on disk. */
   diskMarkdown: string; diskVersion: string; startLine: number;
   handleRef: MutableRefObject<EditModeHandle | null>;
+  /** Quotes of this file to paint; `id` is what a click on the mark reports. */
+  quotes: Array<{ id: string; quote: FileQuote }>;
+  /** A finished selection (or null once there is none). */
+  onSelect: (selection: ReturnType<typeof selectionQuote>) => void;
+  onOpenQuote: (id: string) => void;
   onExit: (line: number) => void; onError: (message: string) => void;
   /** Dirty and saving state, shown by the app header's controls. */
   onStatus: (status: { dirty: boolean; saving: boolean }) => void;
@@ -104,10 +111,38 @@ export function MarkdownEditMode({ documentId, path, markdown, version, diskMark
   }, [dirty]);
 
   const mountId = `${documentId}:${mountKey}`;
+  const latest = useRef({ quotes, onSelect, onOpenQuote, path });
+  latest.current = { quotes, onSelect, onOpenQuote, path };
+  const paint = useCallback(() => {
+    const target = view.current;
+    if (!target) return;
+    const text = target.state.doc.toString();
+    const marks = latest.current.quotes.flatMap(({ id, quote }) => { const at = locateFileQuote(text, quote); return at ? [{ ...at, id }] : []; });
+    target.dispatch({ effects: setQuoteMarks.of(marks), annotations: Transaction.addToHistory.of(false) });
+  }, []);
   const extensions = useMemo(() => [
     viewCapture(view),
+    quoteMarks(),
+    EditorView.updateListener.of(update => { if (update.docChanged) queueMicrotask(paint); }),
+    EditorView.domEventHandlers({
+      mouseup: (_, editor) => { latest.current.onSelect(selectionQuote(editor, latest.current.path)); },
+      touchend: (_, editor) => { latest.current.onSelect(selectionQuote(editor, latest.current.path)); },
+      keyup: (event, editor) => { if (event.key.startsWith('Arrow') || event.key === 'Shift') latest.current.onSelect(selectionQuote(editor, latest.current.path)); },
+      click: event => {
+        const id = event.target instanceof Element ? event.target.closest<HTMLElement>('.edit-quote')?.dataset.quoteId : undefined;
+        if (id) latest.current.onOpenQuote(id);
+      },
+    }),
     Prec.high(keymap.of([{ key: 'Mod-s', preventDefault: true, run: () => { void save(); return true; } }])),
   ], [mountId]);
+  // Marks follow the threads and a remounted editor; its view appears a frame after mount.
+  const quoteKey = JSON.stringify(quotes);
+  useEffect(() => {
+    let frame = 0, tries = 0;
+    const apply = () => { if (view.current) paint(); else if (++tries < 60) frame = requestAnimationFrame(apply); };
+    frame = requestAnimationFrame(apply);
+    return () => cancelAnimationFrame(frame);
+  }, [mountId, quoteKey]);
   // Open at the reading position as soon as the engine has created its view.
   useEffect(() => {
     if (startLine <= 1) return;

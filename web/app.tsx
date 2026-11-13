@@ -40,6 +40,7 @@ import { ResizeHandle } from '@plannotator/ui/components/ResizeHandle';
 import { onCodeHighlightSwap } from '@plannotator/ui/utils/codeHighlight';
 import { usePosition } from './usePosition.ts';
 import { messagePreview } from './message-copy.ts';
+import { locateFileQuote } from './edit-quotes.ts';
 import { MarkdownEditMode, type EditModeHandle } from './MarkdownEditMode.tsx';
 import { ProposalReviewContext, useProposalReview } from './ProposalReview.tsx';
 
@@ -366,6 +367,26 @@ function App() {
     });
     setEditStartLine(Number(first?.dataset.sourceLine) || 1);
   };
+  // The editor offers the same quick menu as an HTML page's selection, with a raw-source line quote.
+  const selectInEditor = (picked: { quote: FileQuote; rect: DOMRect } | null) => {
+    const hasText = composing && (sendingComment.current || !!passageDrafts.current.get(draftKey)?.text.trim());
+    if (hasText) return;
+    if (!picked) { if (htmlPending) { if (composing) passageDrafts.current.delete(draftKey); clearSelection(); } return; }
+    if (composing) passageDrafts.current.delete(draftKey);
+    fileSelectionVisit.current++;
+    setHtmlPending(picked);
+    if (activeThreadId && isSidebarShown) {
+      const { quote: _, messageQuote, fileQuote, ...rest } = drafts.get(activeThreadId) ?? { text: '', retry: null };
+      drafts.set(activeThreadId, { ...rest, fileQuote: picked.quote });
+    }
+    setComposing(false);
+    setChoices(null);
+  };
+  // Source-line quotes of the open document, painted in the editor; a click opens the thread they belong to.
+  const editQuotes = threads.flatMap(thread => thread.messages.flatMap(message =>
+    [message.fileQuote, ...(message.fileSelections ?? []).map(selection => selection.fileQuote)]
+      .flatMap(quote => quote && quote.kind === 'doc' && quote.path === current?.path ? [{ id: thread.id, quote }] : [])));
+  const saveFirst = editStatus.dirty ? { beforeSend: () => editMode.current?.save() ?? Promise.resolve(true), sendLabel: 'Save & send' } : {};
   const leaveEditing = useCallback((line: number) => { returnLine.current = line; setEditStartLine(null); }, []);
   useEffect(() => {
     if (editStartLine !== null || returnLine.current === null) return;
@@ -667,6 +688,7 @@ function App() {
     const outside = (event: MouseEvent) => {
       if (
         ignoreClick.current || keepsAttachment(event.target) ||
+        (event.target instanceof Element && event.target.closest('.markdown-edit-mode')) ||
         (event.target instanceof Node &&
           (toolbar.current?.contains(event.target) || composer.current?.contains(event.target)))
       )
@@ -1039,6 +1061,7 @@ function App() {
   // null means fine or unknown; a quote is never called changed without evidence.
   const fileQuoteIssue = (quote: FileQuote): string | null => {
     if (quote.kind === 'html') return isBridgeReady && quote.path === htmlAbsolute && htmlChecks[htmlQuoteKey(quote)] === false ? 'Selection changed' : null;
+    if (quote.kind === 'doc' && quote.startLine && quote.path === current?.path) return locateFileQuote(content.markdown, quote) ? null : 'Selection changed';
     const file = files.find(file => !file.refusal && `${(file.root ?? current?.workspace ?? '').replace(/\/$/, '')}/${file.path}` === quote.path), entry = file && watched[file.id];
     if (entry?.status === 404) return 'File unavailable';
     if (!file || entry?.data === undefined) return null;
@@ -1301,7 +1324,7 @@ function App() {
             )}
             {editStartLine !== null && current ? (
               <MarkdownEditMode documentId={documentId} path={current.path} markdown={content.markdown} version={content.version} diskMarkdown={content.markdown} diskVersion={content.version}
-                startLine={editStartLine} handleRef={editMode} onExit={leaveEditing} onError={setError} onStatus={setEditStatus} />
+                startLine={editStartLine} handleRef={editMode} quotes={editQuotes} onSelect={selectInEditor} onOpenQuote={openThread} onExit={leaveEditing} onError={setError} onStatus={setEditStatus} />
             ) : (
             <article
               className="document-card w-full bg-card rounded-xl p-5 md:p-8 lg:p-10 xl:p-12 shadow-xl border border-border/50"
@@ -1384,6 +1407,7 @@ function App() {
           onGoToMessage={goToMessage}
           messageJump={messageJump}
           threadFile={threadFile}
+          {...saveFirst}
         />
       </div>
       </div>
@@ -1446,6 +1470,7 @@ function App() {
               threadFile={htmlPending ? threadFile : undefined}
               quoteIssue={selection ? passageIssue(selection) : null}
               disabled={!current}
+              {...saveFirst}
               floating
               onCancel={cancel}
               onSent={sent}

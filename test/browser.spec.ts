@@ -5024,3 +5024,98 @@ test('Save anyway does not override a newer change than the one reviewed', async
   await expect(page.getByText('This file changed on disk.')).toBeVisible();
   expect(await readFile(doc.path, 'utf8')).toBe('# Newest agent\n\nBody text.\n');
 });
+
+// Real keystrokes: select `length` characters starting at `offset` on 1-based `line`.
+async function selectEditorText(page: Page, line: number, offset: number, length: number) {
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+Home');
+  for (let i = 1; i < line; i++) await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Home');
+  for (let i = 0; i < offset; i++) await page.keyboard.press('ArrowRight');
+  await page.keyboard.down('Shift');
+  for (let i = 0; i < length; i++) await page.keyboard.press('ArrowRight');
+  await page.keyboard.up('Shift');
+}
+
+test('selecting in the editor starts a thread with a line quote', async ({ page }) => {
+  const doc = await f.register('a.md', '# Title\n\nThird line has a marker word.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  const sent: any[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  await selectEditorText(page, 3, 'Third line has a '.length, 'marker'.length);
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('What is this?');
+  await page.getByRole('button', { name: 'Send comment' }).click();
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent[0].fileQuote).toEqual({ path: doc.path, kind: 'doc', exact: 'marker', startLine: 3, endLine: 3 });
+  await expect(page.locator('.selection-badge, .message-quote').filter({ hasText: 'a.md:3' }).first()).toBeVisible();
+  await expect(page.locator('.cm-content .edit-quote')).toContainText('marker');
+});
+
+test('sending while dirty saves first', async ({ page }) => {
+  const doc = await f.register('save-send.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  await selectEditorText(page, 3, 0, 4);
+  const order: string[] = [];
+  await page.route('**/api/questions', async route => {
+    order.push(await readFile(doc.path, 'utf8'));
+    await route.continue();
+  });
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('Check');
+  await expect(page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('button', { name: 'Save & send' })).toBeVisible();
+  await page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('button', { name: 'Save & send' }).click();
+  await expect.poll(() => order.length).toBe(1);
+  expect(order[0]).toBe('# Title typed\n\nBody text.\n');
+});
+
+test('Save & send aborts on conflict', async ({ page }) => {
+  const doc = await f.register('conflict-send.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' mine');
+  await writeFile(doc.path, '# Agent title\n\nBody text.\n');
+  await expect(page.getByText('This file changed on disk.')).toBeVisible();
+  await page.getByRole('button', { name: 'Keep mine', exact: true }).click();
+  let asked = 0;
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') asked++; });
+  await selectEditorText(page, 3, 0, 4);
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  const input = page.getByLabel('Comment', { exact: true });
+  await input.fill('Keep this draft');
+  await page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('button', { name: 'Save & send' }).click();
+  await expect(page.getByText('This file changed on disk.')).toBeVisible();
+  expect(asked).toBe(0);
+  await expect(input).toHaveValue('Keep this draft');
+});
+
+test('edit-mode quote shows Selection changed after its text is deleted and saved', async ({ page }) => {
+  const doc = await f.register('gone.md', '# Title\n\nDelete this phrase soon.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await selectEditorText(page, 3, 'Delete this '.length, 'phrase'.length);
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('About this');
+  await page.getByRole('button', { name: 'Send comment' }).click();
+  await expect(page.locator('.cm-content .edit-quote')).toContainText('phrase');
+  await selectEditorText(page, 3, 'Delete this '.length, 'phrase '.length);
+  await page.keyboard.press('Backspace');
+  await page.keyboard.press('ControlOrMeta+s');
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  await expect(page.getByText('Selection changed').first()).toBeVisible();
+});
+
+test('view-mode selection still works unchanged in view mode', async ({ page }) => {
+  const doc = await f.register('view.md', '# Title\n\nSelect these words please.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.locator('#document p').evaluate(p => {
+    const range = document.createRange(); range.selectNodeContents(p);
+    getSelection()!.removeAllRanges(); getSelection()!.addRange(range);
+    document.getElementById('document')!.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  });
+  await expect(page.getByRole('button', { name: 'Comment', exact: true })).toBeVisible();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+});

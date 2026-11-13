@@ -78,6 +78,8 @@ export function QuestionForm({
   onSendingChange,
   onRemoveSelection,
   agentControl,
+  beforeSend,
+  sendLabel,
 }: {
   documentId: string;
   threadId?: string;
@@ -96,6 +98,9 @@ export function QuestionForm({
   onSendingChange?: (sending: boolean) => void;
   onRemoveSelection?: () => void;
   agentControl?: ViewerState['agentControl'];
+  /** Runs before a send; resolving false aborts it and keeps the draft. */
+  beforeSend?: () => Promise<boolean>;
+  sendLabel?: string;
 }) {
   const [initialDraft] = useState(() => drafts.get(draftKey));
   const [text, setText] = useState(initialDraft?.text ?? ''),
@@ -139,6 +144,7 @@ export function QuestionForm({
         setBusy(true);
         onSendingChange?.(true);
         try {
+          if (beforeSend && !await beforeSend()) return;
           const request = await api<RequestRecord>('/api/questions', { ...body, clientMessageId: retry.current.id });
           // A remounted composer or a newly attached quote may hold a newer draft.
           if (drafts.get(draftKey) === submittedDraft) {
@@ -222,10 +228,10 @@ export function QuestionForm({
             finally { setStopping(false); }
           }}><Icon name="stop" /></button> : <button
             className="send-button"
-            aria-label={floating ? 'Send comment' : 'Send message'}
+            aria-label={sendLabel ?? (floating ? 'Send comment' : 'Send message')}
             disabled={disabled || busy || !text.trim()}
           >
-            {floating ? 'Send' : <Icon name="send" />}
+            {sendLabel ?? (floating ? 'Send' : <Icon name="send" />)}
           </button>}
         </div>
       </div>
@@ -415,6 +421,8 @@ export function ConversationSidebar({
   onOpenFileQuote,
   onUnreadChange,
   threadFile,
+  beforeSend,
+  sendLabel,
 }: {
   documentId: string;
   threads: Thread[];
@@ -443,6 +451,8 @@ export function ConversationSidebar({
   onOpenFileQuote: (quote: FileQuote, revealId?: string) => void;
   onUnreadChange: (count: number) => void;
   threadFile?: string;
+  beforeSend?: () => Promise<boolean>;
+  sendLabel?: string;
 }) {
   const [filter, setFilter] = useState('unresolved'),
     [search, setSearch] = useState(''),
@@ -806,6 +816,8 @@ export function ConversationSidebar({
             quote={drafts.get(active.id)?.quote}
             messageQuote={drafts.get(active.id)?.messageQuote}
             fileQuote={drafts.get(active.id)?.fileQuote}
+            beforeSend={beforeSend}
+            sendLabel={sendLabel}
             onRemoveSelection={onRemoveSelection}
             disabled={isLeaving}
             onSent={(request) => {
