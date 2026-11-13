@@ -27,7 +27,7 @@ function blocksOf(root: HTMLElement, source: string): Block[] {
 function trustedMap(source: string, block: Block): BlockMap | null {
   if (!KINDS.has(block.kind)) return null;
   const map = blockMap(source.slice(block.start, block.end), block.kind as BlockKind);
-  return map && sameVisible(map.visible, selectionText(block.el).replace(/\r$/, '')) ? map : null; // CRLF paragraphs render a trailing CR
+  return map && sameVisible(map.visible.replace(/\r$/, ''), selectionText(block.el).replace(/\r$/, '')) ? map : null; // CRLF paragraphs render a trailing CR
 }
 
 function visibleOffset(block: HTMLElement, container: Node, offset: number) {

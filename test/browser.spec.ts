@@ -4524,6 +4524,45 @@ test('selecting in a CRLF document gives offsets into the CRLF source', async ({
   expect(quote.exact).toBe('wor words');
 });
 
+test('a word inside an untagged fence in a CRLF document quotes exactly that word', async ({ page }) => {
+  const source = '# Title\r\n\r\n```\r\nplain word\r\nsecond\r\n```\r\n';
+  const doc = await f.register('crlf-fence.md', source);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document')).toContainText('plain word');
+  await page.getByLabel('Message', { exact: true }).fill('Why?');
+  await select(page, 'word');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByRole('log')).toContainText('Why?');
+  const quote = (await lastRequest()).quote;
+  expect(quote.exact).toBe('word');
+  expect(source.slice(quote.start, quote.end)).toBe('word');
+});
+
+test('a proposal popover opens beside its passage, not at the document edge', async ({ page }) => {
+  await proposalReply(page, '# Retry policy\n\n' + 'Filler paragraph.\n\n'.repeat(30) + 'The client retries **failed requests** three times.\n\nEnd.\n');
+  const mark = page.locator('#document mark').first();
+  await mark.scrollIntoViewIfNeeded();
+  await mark.click();
+  const dialog = page.getByRole('dialog', { name: 'Proposed change', exact: true });
+  await expect(dialog).toBeVisible();
+  await expect.poll(async () => {
+    const d = (await dialog.boundingBox())!, m = (await mark.boundingBox())!;
+    const dx = Math.max(0, m.x - (d.x + d.width), d.x - (m.x + m.width));
+    const dy = Math.max(0, m.y - (d.y + d.height), d.y - (m.y + m.height));
+    return Math.max(dx, dy);
+  }).toBeLessThan(80);
+});
+
+test('a quote inside a highlighted code block stays painted over the right text', async ({ page }) => {
+  const doc = await f.register('code-quote.md', '# Code\n\n```js\nconst answer = 42;\nconsole.log(answer);\n```\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Look'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"answer = 42"}]}]]\nSee [it](#selection-1).');
+  await expect(page.locator('#document pre code span').first()).toBeVisible();
+  await expect.poll(() => page.locator('#document mark.annotation-highlight').allTextContents().then(t => t.join(''))).toBe('answer = 42');
+});
+
 test.describe('mobile document and chat', () => {
   test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 

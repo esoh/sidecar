@@ -19,7 +19,7 @@ import {
 } from './conversations.tsx';
 import { useQuestionDrafts, forgetDocument, type QuestionDraft, type QuestionDrafts } from './useQuestionDrafts.ts';
 import { useWatchedFiles } from './useWatchedFiles.ts';
-import { locateQuote, matchQuote, quoteIssue, sourceQuote, excludedSelection } from './selection.ts';
+import { locateQuote, matchQuote, quoteIssue, selectionText, sourceQuote, excludedSelection } from './selection.ts';
 import { quoteSourceRange, rangeToSource, sourceToRanges } from './source-dom.ts';
 import { revealRange } from './reveal-target.ts';
 import { MarkdownDocument, WorkspaceLinks, type OpenWorkspaceLink } from './MarkdownDocument.tsx';
@@ -616,6 +616,17 @@ function App() {
     };
   }, [requestedDocument, documentClosed, closedDocument]);
 
+  // Late-rendering content (HTML blocks, diagrams, images) changes the DOM text after layout; repaint when it does.
+  const [documentText, setDocumentText] = useState('');
+  useLayoutEffect(() => {
+    const root = article.current;
+    if (!root) return;
+    const refresh = () => setDocumentText(selectionText(root));
+    refresh();
+    const observer = new MutationObserver(refresh);
+    observer.observe(root, { subtree: true, childList: true, characterData: true });
+    return () => observer.disconnect();
+  }, [content.version, isEditing]);
   const [highlightRevision, setHighlightRevision] = useState(0);
   useLayoutEffect(
     () =>
@@ -688,7 +699,7 @@ function App() {
         mark.title = 'Open passage thread';
       }
     }
-  }, [content.version, anchors, selection, documentError, highlightRevision, activeMessageId, isEditing]);
+  }, [content.version, anchors, selection, documentError, highlightRevision, documentText, activeMessageId, isEditing]);
 
   useEffect(() => {
     const outside = (event: MouseEvent) => {
