@@ -4819,3 +4819,95 @@ test('large folders show sorted batches, filter beyond the first batch, and reve
   await page.getByRole('button', { name: 'Close file window' }).click();
   await page.screenshot({ path: testInfo.outputPath('large-directory-batches.png') });
 });
+
+async function typeAtEndOfFirstLine(page: Page, text: string) {
+  const editor = page.locator('.cm-content');
+  await editor.click();
+  await page.keyboard.press('ControlOrMeta+Home');
+  await page.keyboard.press('End');
+  await page.keyboard.type(text);
+}
+
+test('edit mode saves typed text, keeps undo across save, and Done returns to the reading view', async ({ page }) => {
+  const doc = await f.register('edit-me.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  await expect(page.getByText('● Unsaved')).toBeVisible();
+  await page.keyboard.press('ControlOrMeta+s');
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  expect(await readFile(join(f.directory, 'edit-me.md'), 'utf8')).toBe('# Title typed\n\nBody text.\n');
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect(page.locator('.cm-content')).not.toContainText('typed');
+  await expect(page.getByText('● Unsaved')).toBeVisible();
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Discard', exact: true }).click();
+  await expect(page.locator('#document').getByRole('heading', { name: 'Title typed' })).toBeVisible();
+  expect(await readFile(join(f.directory, 'edit-me.md'), 'utf8')).toBe('# Title typed\n\nBody text.\n');
+});
+
+test('edit is unavailable for HTML documents and documents with carriage returns', async ({ page }) => {
+  const crlf = await f.register('crlf.md', '# Title\r\n\r\nBody.\r\n');
+  await page.goto(`${f.url}/?document=${crlf.id}`);
+  await expect(page.locator('#document').getByRole('heading', { name: 'Title' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Edit', exact: true })).toBeDisabled();
+  const html = await f.register('page.html', '<p>Static</p>');
+  await page.goto(`${f.url}/?document=${html.id}`);
+  await expect(page.locator('.topbar')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Edit', exact: true })).toHaveCount(0);
+});
+
+test('unsaved edits prompt before switching documents and on unload', async ({ page }) => {
+  const doc = await f.register('first.md', '# First\n\nBody.\n');
+  const other = await f.register('second.md', '# Second\n\nBody.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' draft');
+  await page.getByLabel('Documents').selectOption(other.id);
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.locator('.cm-content')).toContainText('First draft');
+  expect(new URL(page.url()).searchParams.get('document')).toBe(doc.id);
+  const kinds: string[] = [];
+  page.on('dialog', async d => { kinds.push(d.type()); await d.accept(); });
+  await page.reload();
+  expect(kinds).toContain('beforeunload');
+});
+
+test('entering edit mode opens near the reading position and Done returns near the editor position', async ({ page }) => {
+  const markdown = Array.from({ length: 40 }, (_, i) => `## Heading ${i + 1}\n\n${'Filler paragraph text.\n\n'.repeat(6)}`).join('');
+  const doc = await f.register('long-edit.md', markdown);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const heading = (n: number) => page.locator('#document').getByRole('heading', { name: `Heading ${n}`, exact: true });
+  await expect(heading(30)).toBeAttached();
+  await page.locator('.canvas').evaluate((canvas, n) => {
+    const target = [...document.querySelectorAll('#document h2')].find(e => e.textContent?.trim() === `Heading ${n}`)!;
+    canvas.scrollTo({ top: canvas.scrollTop + target.getBoundingClientRect().top - canvas.getBoundingClientRect().top, behavior: 'instant' });
+  }, 30);
+  // The button sits at the top of the document; dispatching the click keeps Playwright from scrolling the page back up first.
+  await page.getByRole('button', { name: 'Edit', exact: true }).dispatchEvent('click');
+  const topLine = () => page.locator('.cm-scroller').evaluate(scroller => {
+    const top = scroller.getBoundingClientRect().top;
+    return [...scroller.querySelectorAll('.cm-line')].find(line => line.getBoundingClientRect().bottom > top + 1)?.textContent ?? '';
+  });
+  await expect.poll(async () => { const m = (await topLine()).match(/^Heading (\d+)$/); return m ? Number(m[1]) : 0; }).toBe(30);
+  // Scroll the editor up until Heading 10 is rendered, then put it at the top.
+  await expect.poll(() => page.locator('.cm-scroller').evaluate(scroller => {
+    const line = [...scroller.querySelectorAll('.cm-line')].find(l => l.textContent === 'Heading 10');
+    if (line) { line.scrollIntoView({ block: 'start' }); return true; }
+    scroller.scrollTop -= 1500; return false;
+  })).toBe(true);
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await expect(heading(10)).toBeInViewport();
+});
+
+test('phone width shows the same single editor pane', async ({ page }) => {
+  const doc = await f.register('phone-edit.md', '# Phone\n\nBody.\n');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toHaveCount(1);
+  await expect(page.locator('.cm-editor')).toBeVisible();
+  await expect(page.locator('#document')).toHaveCount(0);
+});

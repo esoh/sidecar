@@ -120,10 +120,11 @@ export const MarkdownDocument = memo(function MarkdownDocument({
   const [image, setImage] = useState<{ src: string; alt: string } | null>(null);
   function renderBlock(block: Block, orderedIndex?: number | null) {
     const language = block.language?.trim().split(/\s+/, 1)[0]?.toLowerCase();
-    if (block.type === 'code' && language === 'mermaid') return <MermaidBlock block={block} readOnly />;
+    const wrap = (child: ReactNode) => <span data-source-line={block.startLine} style={{ display: 'contents' }}>{child}</span>;
+    if (block.type === 'code' && language === 'mermaid') return wrap(<MermaidBlock block={block} readOnly />);
     if (block.type === 'code' && ['dot', 'graphviz', 'gv'].includes(language ?? ''))
-      return <GraphvizBlock block={block} readOnly />;
-    return (
+      return wrap(<GraphvizBlock block={block} readOnly />);
+    return wrap(
       <BlockRenderer
         block={block}
         orderedIndex={orderedIndex}
@@ -145,7 +146,7 @@ export const MarkdownDocument = memo(function MarkdownDocument({
             : undefined
         }
         onImageClick={(src, alt) => setImage({ src, alt })}
-      />
+      />,
     );
   }
   function renderGroups(items: DocumentGroup[]): ReactNode {

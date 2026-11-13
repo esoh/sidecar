@@ -11,6 +11,12 @@ importers:
 
   .:
     dependencies:
+      '@codemirror/state':
+        specifier: 6.7.6
+        version: 6.7.6
+      '@codemirror/view':
+        specifier: 6.43.13
+        version: 6.43.13
       '@pierre/diffs':
         specifier: 1.3.6
         version: 1.3.6(@shikijs/themes@4.4.3)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)

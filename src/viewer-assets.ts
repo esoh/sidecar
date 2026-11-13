@@ -13,18 +13,24 @@ const rendererFonts = {
   geist: rendererRequire.resolve('@fontsource-variable/geist-mono/index.css'),
 };
 
-let appBundle: Promise<Uint8Array> | undefined;
+// CSS imported by the app (the Markdown editor's) is emitted beside the script and served separately.
+let appBundle: Promise<{ js: Uint8Array; css: Uint8Array }> | undefined;
 export async function viewerHtml(gateway = false) {
   const html = await readFile(new URL('../web/index.html', import.meta.url), 'utf8');
   return gateway ? html.replace('<head>', '<head><meta name="sidecar-gateway" content="1">') : html;
 }
 export async function serveViewerAsset(path: string, method: string, response: ServerResponse): Promise<boolean> {
-      if (method === 'GET' && path === '/app.js') {
-        response.setHeader('Content-Type', 'text/javascript; charset=utf-8');
+      if (method === 'GET' && (path === '/app.js' || path === '/app-bundle.css')) {
+        const isScript = path === '/app.js';
+        response.setHeader('Content-Type', isScript ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8');
         // One build per server; the browser revalidates the content hash on later loads.
-        appBundle ??= build({ entryPoints: [fileURLToPath(new URL('../web/app.tsx', import.meta.url))], bundle: true, write: false, minify: true, format: 'esm', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' } })
-          .then(bundle => bundle.outputFiles[0].contents).catch(error => { appBundle = undefined; throw error; });
-        sendBody(response, await appBundle, true);
+        appBundle ??= build({ entryPoints: [fileURLToPath(new URL('../web/app.tsx', import.meta.url))], outdir: 'bundle', bundle: true, write: false, minify: true, format: 'esm', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' } })
+          .then(bundle => {
+            const file = (extension: string) => bundle.outputFiles.find(output => output.path.endsWith(extension))?.contents ?? new Uint8Array();
+            return { js: file('.js'), css: file('.css') };
+          }).catch(error => { appBundle = undefined; throw error; });
+        const bundle = await appBundle;
+        sendBody(response, isScript ? bundle.js : bundle.css, true);
         return true;
       }
       if (method === 'GET' && path === '/renderer.css') {

@@ -40,6 +40,7 @@ import { ResizeHandle } from '@plannotator/ui/components/ResizeHandle';
 import { onCodeHighlightSwap } from '@plannotator/ui/utils/codeHighlight';
 import { usePosition } from './usePosition.ts';
 import { messagePreview } from './message-copy.ts';
+import { MarkdownEditMode, type EditModeHandle } from './MarkdownEditMode.tsx';
 import { ProposalReviewContext, useProposalReview } from './ProposalReview.tsx';
 
 type Content = { html: string; markdown: string; version: string };
@@ -354,6 +355,23 @@ function App() {
   }, [files, changesScope, restoredView, documentId, viewScope]);
   // The main document's reading position, applied once its content has laid out (a few frames at most), then saved on scroll.
   const canvas = useRef<HTMLElement>(null), scrollRestored = useRef('');
+  const [editStartLine, setEditStartLine] = useState<number | null>(null), editMode = useRef<EditModeHandle | null>(null), returnLine = useRef<number | null>(null);
+  const startEditing = () => {
+    const top = canvas.current?.getBoundingClientRect().top ?? 0;
+    const first = [...document.querySelectorAll<HTMLElement>('#document [data-source-line]')].find(node => {
+      const rect = node.firstElementChild?.getBoundingClientRect();
+      return rect && rect.height > 0 && rect.top >= top;
+    });
+    setEditStartLine(Number(first?.dataset.sourceLine) || 1);
+  };
+  const leaveEditing = useCallback((line: number) => { returnLine.current = line; setEditStartLine(null); }, []);
+  useEffect(() => {
+    if (editStartLine !== null || returnLine.current === null) return;
+    const line = returnLine.current; returnLine.current = null;
+    const wrappers = [...document.querySelectorAll<HTMLElement>('#document [data-source-line]')]
+      .filter(node => Number(node.dataset.sourceLine) <= line && (node.firstElementChild?.getClientRects().length ?? 0) > 0);
+    wrappers.at(-1)?.firstElementChild?.scrollIntoView({ block: 'start' });
+  }, [editStartLine]);
   const scrollKey = documentId ? viewKey(documentId, 'scroll') : '';
   const isReading = hasState && !htmlView && !closedDocument;
   useEffect(() => {
@@ -1143,6 +1161,7 @@ function App() {
       setError('Wait for this document’s pending agent requests to finish before closing it.');
       return;
     }
+    if (editMode.current && !await editMode.current.requestExit()) return;
     if (!confirmCloseDocument(current.title)) return;
     setClosing(true);
     try {
@@ -1182,8 +1201,10 @@ function App() {
             className="document-picker"
             aria-label="Documents"
             value={documentId}
-            onChange={(event) => {
-              location.href = viewerPath(`/?document=${event.target.value}`);
+            onChange={async (event) => {
+              const target = event.target.value;
+              if (editMode.current && !await editMode.current.requestExit()) return;
+              location.href = viewerPath(`/?document=${target}`);
             }}
           >
             {Object.values(state?.documents ?? {}).map((doc) => (
@@ -1268,6 +1289,10 @@ function App() {
                 {documentError || 'Open a document from your agent.'}
               </p>
             )}
+            {editStartLine !== null && current ? (
+              <MarkdownEditMode documentId={documentId} path={current.path} markdown={content.markdown} version={content.version}
+                startLine={editStartLine} handleRef={editMode} onExit={leaveEditing} onError={setError} />
+            ) : (
             <article
               className="document-card w-full bg-card rounded-xl p-5 md:p-8 lg:p-10 xl:p-12 shadow-xl border border-border/50"
               id="document"
@@ -1296,9 +1321,10 @@ function App() {
                 }
               }}
             >
-              {current && !documentError && <DocumentHeader key={documentId} repoInfo={current.repoInfo} markdown={content.markdown} onError={setError} />}
+              {current && !documentError && <DocumentHeader key={documentId} repoInfo={current.repoInfo} markdown={content.markdown} onEdit={isHtmlDocument ? undefined : startEditing} onError={setError} />}
               <MarkdownDocument markdown={content.markdown} documentId={documentId} linkBase={current?.path.replace(/\/[^/]*$/, '')} canCollapseHeadings />
             </article>
+            )}
           </div>}
         </main>
         {probes.map(probe => <RenderedTextProbe key={`${probe.id}:${probe.version}`} text={probe.text} onText={text => setRenderedText(previous => previous[probe.id]?.version === probe.version && previous[probe.id].text === text ? previous : { ...previous, [probe.id]: { version: probe.version, text } })} />)}

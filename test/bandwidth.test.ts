@@ -20,7 +20,7 @@ test('large viewer responses compress without caching conversation data or ignor
 
 test('static assets are compressed and revalidated only after viewer authentication', async t => {
   const f = await fixture(t);
-  for (const path of ['/app.js', '/app.css', '/renderer.css']) {
+  for (const path of ['/app.js', '/app-bundle.css', '/app.css', '/renderer.css']) {
     const response = await fetch(f.url + path, { headers: { Cookie: f.cookie, 'Accept-Encoding': 'gzip' } });
     assert.equal(response.status, 200);
     assert.equal(response.headers.get('content-encoding'), 'gzip');
