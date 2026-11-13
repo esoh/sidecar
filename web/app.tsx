@@ -1332,7 +1332,7 @@ function App() {
               }}
             >
               {current && !documentError && <DocumentHeader key={documentId} repoInfo={current.repoInfo} markdown={content.markdown} onError={setError} />}
-              <MarkdownDocument markdown={content.markdown} documentId={documentId} linkBase={current?.path.replace(/\/[^/]*$/, '')} canCollapseHeadings />
+              <MarkdownDocument markdown={content.markdown} documentId={documentId} linkBase={current?.path.replace(/\/[^/]*$/, '')} canCollapseHeadings sourceLines />
             </article>
             )}
           </div>}

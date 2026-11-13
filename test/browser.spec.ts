@@ -4911,3 +4911,24 @@ test('phone width shows the same single editor pane', async ({ page }) => {
   await expect(page.locator('#document')).toHaveCount(0);
   for (const name of ['Save', 'Done']) await expect(page.getByRole('button', { name, exact: true })).toBeInViewport({ ratio: 1 });
 });
+
+test('rendered H1 and last-paragraph spacing match the pre-editor layout in the document and chat', async ({ page }) => {
+  const doc = await f.register('spacing.md', 'Intro.\n\n# One\n\nBody.\n\n# Two\n\n# Three\n');
+  const first = await f.register('spacing-first.md', '# Only\n\nBody.\n');
+  const margin = (name: string, property: 'margin-top' | 'margin-bottom') =>
+    page.locator('#document').getByRole('heading', { name, exact: true }).evaluate((node, p) => getComputedStyle(node).getPropertyValue(p), property);
+  await page.goto(`${f.url}/?document=${first.id}`);
+  await expect.poll(() => margin('Only', 'margin-top')).toBe('0px');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  // Non-first H1s keep 1.5rem whether they own a section (One), follow another H1 (Two) or trail it (Three).
+  for (const name of ['One', 'Two', 'Three']) await expect.poll(() => margin(name, 'margin-top')).toBe('24px');
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Explain'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer('# Reply\n\nFirst.\n\n# Second\n\nLast paragraph.');
+  const content = page.locator('.message .plannotator-content').last();
+  await expect(content.getByRole('heading', { name: 'Second', exact: true })).toBeVisible();
+  expect(await content.getByRole('heading', { name: 'Second', exact: true }).evaluate(n => getComputedStyle(n).marginTop)).toBe('24px');
+  expect(await content.getByRole('heading', { name: 'Reply', exact: true }).evaluate(n => getComputedStyle(n).marginTop)).toBe('0px');
+  expect(await content.getByText('Last paragraph.', { exact: true }).evaluate(n => getComputedStyle(n).marginBottom)).toBe('0px');
+  expect(await content.locator('[data-source-line]').count()).toBe(0);
+});

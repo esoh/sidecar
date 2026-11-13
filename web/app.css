@@ -1636,9 +1636,14 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
 .proposal-review > header > button { width: 26px; height: 26px; padding: 0; border: 0; font-size: 20px; flex-shrink: 0; }
 .proposal-review footer { display: flex; flex-shrink: 0; flex-wrap: wrap; align-items: center; gap: 8px; justify-content: space-between; padding: 10px 14px; border-top: 1px solid var(--border); }
 .document-section > summary { display: block; position: relative; list-style: none; cursor: pointer; }
-/* The summary and source-line wrappers must not make every H1 match upstream first:mt-0. */
-.document-section > summary > [data-source-line] > h1 { margin-top: 1.5rem; }
-.plannotator-content > .document-section:first-child > summary > [data-source-line] > h1 { margin-top: 0; }
+/* The source-line wrapper makes every H1 its parent's first child, matching upstream first:mt-0.
+   Restore the pre-wrapper margins: only an H1 that opens the document keeps none; the summary
+   wrapper is likewise not allowed to zero a section heading's margin. */
+.document-section > summary > h1,
+.plannotator-content [data-source-line] > h1 { margin-top: 1.5rem; }
+.plannotator-content > .document-section:first-child > summary > h1,
+.plannotator-content > .document-section:first-child > summary > [data-source-line] > h1,
+.plannotator-content > [data-source-line]:first-child > h1 { margin-top: 0; }
 .document-section > summary::-webkit-details-marker { display: none; }
 .document-section > summary::before { content: ''; position: absolute; left: -32px; top: 50%; width: 32px; height: 32px; transform: translateY(-50%); }
 .document-section > summary::after { content: ''; position: absolute; left: -17px; top: 50%; width: 6px; height: 6px; margin-top: -4px; border-right: 1.5px solid var(--muted-foreground); border-bottom: 1.5px solid var(--muted-foreground); transform: rotate(-45deg); pointer-events: none; opacity: 0; }
