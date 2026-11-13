@@ -1,3 +1,4 @@
+import { QUIET_MS } from '../web/scroll-sync.ts';
 import { test, expect, type Page } from '@playwright/test';
 import { readFile, writeFile, rename, unlink, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -5162,8 +5163,8 @@ test('Ends align: scrolling either pane to its bottom (and top) puts the other t
   const atEnd = (side: 'source' | 'preview') => page.evaluate(name => { const el = document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!; return el.scrollHeight - el.clientHeight - el.scrollTop; }, side);
   const atTop = (side: 'source' | 'preview') => page.evaluate(name => document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!.scrollTop, side);
   for (const [leader, follower] of [['source', 'preview'], ['preview', 'source']] as const) {
-    // A pane the sync just scrolled ignores scroll events for 100 ms; a person takes longer than that to switch panes.
-    await page.waitForTimeout(150);
+    // A pane the sync just scrolled ignores scroll events for QUIET_MS; a person takes longer than that to switch panes.
+    await page.waitForTimeout(QUIET_MS + 50);
     await page.evaluate(name => { const el = document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!; el.scrollTop = el.scrollHeight; }, leader);
     await expect.poll(() => atEnd(follower)).toBeLessThan(3);
     await page.evaluate(name => { document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!.scrollTop = 0; }, leader);
@@ -5196,6 +5197,24 @@ test('Late image: an image that arrives after the scroll realigns the panes', as
   release();
   await expect.poll(() => page.locator('.edit-preview img').evaluate(img => (img as HTMLImageElement).complete && (img as HTMLImageElement).naturalHeight > 0)).toBe(true);
   await expect.poll(async () => (await syncGap(page, 'source'))?.gap ?? Infinity).toBeLessThan(24);
+});
+
+test('Typing leads: Enter and Backspace in the source do not move it, even after the preview was the leader', async ({ page }) => {
+  await openSplit(page, 'sync-keys.md', syncDoc());
+  await scrollLeader(page, 'preview', 0.5);
+  await page.waitForTimeout(QUIET_MS + 50);
+  const top = () => page.locator('.cm-scroller').evaluate(el => el.scrollTop);
+  const box = (await page.locator('.cm-scroller').boundingBox())!;
+  await page.mouse.click(box.x + 40, box.y + box.height / 2);
+  await page.keyboard.press('Home');
+  const before = await top();
+  // Blank lines above the caret grow the source only; a preview-led sync would pull the source back up under the caret.
+  for (let i = 0; i < 8; i++) await page.keyboard.press('Enter');
+  await page.waitForTimeout(400); // past the preview debounce and the rebuild
+  expect(Math.abs(await top() - before)).toBeLessThan(30);
+  for (let i = 0; i < 4; i++) await page.keyboard.press('Backspace');
+  await page.waitForTimeout(400); // past the preview debounce and the rebuild
+  expect(Math.abs(await top() - before)).toBeLessThan(30);
 });
 
 test('Typing leads: the preview keeps showing the block being typed at the end', async ({ page }) => {
@@ -5532,12 +5551,21 @@ test('a send that fails after the save is retried with the same correct quote an
 test('typing in the source pane patches the preview in place: same article, quote still painted, scroll following the source', async ({ page }) => {
   await longDocWithQuote(page);
   await expect.poll(() => paintedInPreview(page)).toBe('marker');
+  await page.locator('.cm-scroller').evaluate(el => { el.scrollTop = 0.5 * (el.scrollHeight - el.clientHeight); });
+  const previewTop = () => page.locator('.edit-preview').evaluate(el => el.scrollTop);
+  await expect.poll(previewTop).toBeGreaterThan(300);
+  await page.waitForTimeout(QUIET_MS + 50);
+  const before = await previewTop();
   await page.locator('.edit-preview').evaluate(() => { (window as any).__article = document.querySelector('.edit-preview-article'); });
-  await typeAtEndOfFirstLine(page, ' extra');
-  await expect(page.locator('.edit-preview')).toContainText('Filler line 1. extra');
+  const box = (await page.locator('.cm-scroller').boundingBox())!;
+  await page.mouse.click(box.x + 40, box.y + box.height / 2);
+  await page.keyboard.press('End');
+  await page.keyboard.type(' extra');
+  await expect(page.locator('.edit-preview')).toContainText(' extra');
   expect(await page.evaluate(() => (window as any).__article === document.querySelector('.edit-preview-article'))).toBe(true);
-  // Typing leads: the source is at its top, so the preview is too (it is not reset by the patch, it follows).
-  await expect.poll(() => page.locator('.edit-preview').evaluate(scroller => scroller.scrollTop)).toBeLessThan(30);
+  // The patch does not reset the preview: it stays at the position synced to the source.
+  await page.waitForTimeout(400);
+  expect(Math.abs(await previewTop() - before)).toBeLessThan(60);
   await expect.poll(() => paintedInPreview(page)).toBe('marker');
 });
 

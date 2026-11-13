@@ -4,6 +4,8 @@ import type { EditorView } from '@codemirror/view';
 export type Segment = { source: [number, number]; preview: [number, number] };
 export type Heights = { scrollHeight: number; clientHeight: number };
 type Side = 'source' | 'preview';
+/** How long a pane the sync just scrolled ignores scroll events (its echo and CodeMirror's height corrections). */
+export const QUIET_MS = 100;
 
 /** The viewport's anchor: its top at the start, its middle halfway, its bottom at the end. */
 export function anchorY(scrollTop: number, scrollHeight: number, clientHeight: number): number {
@@ -74,7 +76,7 @@ export function syncScroll(source: EditorView, preview: HTMLElement): () => void
     const target = targetScrollTop(segments, from, el[from].scrollTop, heights(from), heights(to));
     if (Math.abs(target - el[to].scrollTop) < 0.5) return;
     el[to].scrollTop = target;
-    quiet[to] = performance.now() + 100;
+    quiet[to] = performance.now() + QUIET_MS;
   };
   const rebuild = () => { frame = 0; segments = buildSegments(source, preview); follow(leader); };
   const schedule = () => { if (!frame) frame = requestAnimationFrame(rebuild); };
@@ -84,11 +86,13 @@ export function syncScroll(source: EditorView, preview: HTMLElement): () => void
     follow(side);
   };
   const onSource = onScroll('source'), onPreview = onScroll('preview');
+  // Enter, Backspace, undo and paste are handled on keydown/paste (which suppress beforeinput), so listen for all of them.
   const typing = () => { leader = 'source'; };
+  const typingEvents = ['keydown', 'beforeinput', 'paste', 'cut', 'drop', 'compositionstart'];
   const resize = new ResizeObserver(schedule), mutations = new MutationObserver(schedule);
   scroller.addEventListener('scroll', onSource, { passive: true });
   preview.addEventListener('scroll', onPreview, { passive: true });
-  source.contentDOM.addEventListener('beforeinput', typing);
+  for (const type of typingEvents) source.contentDOM.addEventListener(type, typing);
   preview.addEventListener('load', schedule, true);
   for (const node of [scroller, source.contentDOM, preview, preview.firstElementChild].filter((node): node is Element => !!node)) resize.observe(node);
   mutations.observe(preview, { childList: true, subtree: true, characterData: true });
@@ -97,7 +101,7 @@ export function syncScroll(source: EditorView, preview: HTMLElement): () => void
     cancelAnimationFrame(frame);
     scroller.removeEventListener('scroll', onSource);
     preview.removeEventListener('scroll', onPreview);
-    source.contentDOM.removeEventListener('beforeinput', typing);
+    for (const type of typingEvents) source.contentDOM.removeEventListener(type, typing);
     preview.removeEventListener('load', schedule, true);
     resize.disconnect(); mutations.disconnect();
   };
