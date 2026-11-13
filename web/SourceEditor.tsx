@@ -15,9 +15,9 @@ const markdownStyle = HighlightStyle.define([
   { tag: [tags.processingInstruction, tags.contentSeparator], color: 'var(--muted-foreground)' },
 ]);
 
-/** One CodeMirror view per mount (and per `documentId`): Markdown source, history, wrapped lines, no gutter. */
-export function SourceEditor({ initial, documentId, extensions, onChange, viewRef }: {
-  initial: string; documentId: string; extensions: Extension[];
+/** One CodeMirror view per mount : Markdown source, history, wrapped lines, no gutter. */
+export function SourceEditor({ initial, extensions, onChange, viewRef }: {
+  initial: string; extensions: Extension[];
   onChange: (update: ViewUpdate) => void;
   viewRef: MutableRefObject<EditorView | null>;
 }) {
@@ -34,6 +34,6 @@ export function SourceEditor({ initial, documentId, extensions, onChange, viewRe
     });
     viewRef.current = view;
     return () => { view.destroy(); if (viewRef.current === view) viewRef.current = null; };
-  }, [documentId]);
+  }, []);
   return <div className="source-editor" ref={host} />;
 }

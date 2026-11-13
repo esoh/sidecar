@@ -1270,6 +1270,7 @@ pre code.pn-code[data-keep-layout] {
 .source-editor .cm-selectionBackground, .source-editor .cm-focused .cm-selectionBackground { background: color-mix(in srgb, var(--primary) 30%, transparent) !important; }
 .edit-preview { flex: 1; min-height: 0; overflow: auto; padding: 16px 20px; }
 .edit-preview-article { outline: none; }
+::highlight(sidecar-quote) { background: color-mix(in srgb, oklch(0.7 0.18 60 / 0.3) var(--sidecar-highlight-intensity, 100%), transparent); }
 .edit-quote-active { outline: 2px solid var(--primary); }
 .topbar .edit-action { width: auto; padding: 0 10px; font-size: 13px; }
 .topbar .markdown-edit-dirty { white-space: nowrap; color: var(--primary); font-size: 12px; }

@@ -136,25 +136,21 @@ export function QuestionForm({
         event.preventDefault();
         if (disabled || sending.current || !text.trim() || !documentId) return;
         const body = { documentId, text, ...(threadId ? { threadId } : threadFile ? { file: threadFile } : {}), ...attachment };
-        const signature = JSON.stringify(body);
-        if (retry.current?.signature !== signature) retry.current = { signature, id: randomId() };
-        const submittedDraft = { text, retry: retry.current, ...attachment };
+        let submittedDraft = { text, retry: retry.current, ...attachment };
         updateDraft(submittedDraft, true);
         sending.current = true;
         setBusy(true);
         onSendingChange?.(true);
         try {
           let sent: Record<string, unknown> = body;
-          if (beforeSend) {
-            const prepared = await beforeSend(quote);
-            if (!prepared) return;
-            // A restamped quote makes this a different request.
-            if (typeof prepared === 'object') {
-              sent = { ...body, quote: prepared.quote };
-              const restamped = JSON.stringify(sent);
-              if (retry.current.signature !== restamped) retry.current = { signature: restamped, id: randomId() };
-            }
-          }
+          const prepared = beforeSend ? await beforeSend(quote) : true;
+          if (!prepared) return;
+          // A restamped quote is part of the request; the same body keeps its id, so a retry cannot duplicate the message.
+          if (typeof prepared === 'object') sent = { ...body, quote: prepared.quote };
+          const signature = JSON.stringify(sent);
+          if (retry.current?.signature !== signature) retry.current = { signature, id: randomId() };
+          submittedDraft = { text, retry: retry.current, ...attachment };
+          updateDraft(submittedDraft, true);
           const request = await api<RequestRecord>('/api/questions', { ...sent, clientMessageId: retry.current.id });
           // A remounted composer or a newly attached quote may hold a newer draft.
           if (drafts.get(draftKey) === submittedDraft) {

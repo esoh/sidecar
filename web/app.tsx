@@ -390,8 +390,9 @@ function App() {
   };
   // Painted in both panes; a click opens the thread they belong to.
   const editQuotes = selectedMessages.filter(({ selection }) => selection.isVisible).map(({ selection }) => ({ id: selection.id, quote: selection.quote }));
-  // Dirty text is saved before a send; the editor's selection is then restamped with the saved version, or the send is blocked.
-  const saveFirst = editStatus.dirty ? { beforeSend: async (quote?: Quote) => {
+  // While editing, every send saves dirty text first, then rebuilds the editor's own quote against the saved text
+  // (stamped with the saved version), or is blocked once its text was edited away.
+  const saveFirst = isEditing ? { beforeSend: async (quote?: Quote) => {
     const handle = editMode.current;
     if (!handle) return true;
     if (!await handle.save()) return false;
@@ -399,7 +400,7 @@ function App() {
     const stamped = handle.pendingQuote();
     if (!stamped) throw new Error('Passage changed');
     return { quote: stamped };
-  }, sendLabel: 'Save & send' } : {};
+  }, sendLabel: editStatus.dirty ? 'Save & send' : undefined } : {};
   // Only while editing: asks to save or discard, and says whether the editor was left. View mode never waits.
   const leaveEditingFirst = () => editAnchor === null || !editMode.current ? Promise.resolve(true) : editMode.current.requestExit();
   const leaveEditing = useCallback((line: number) => { returnLine.current = line; setEditAnchor(null); }, []);

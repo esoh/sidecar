@@ -31,9 +31,8 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
   /** A source offset to open at (the reading view's top block). */
   anchor: number;
   handleRef: MutableRefObject<EditModeHandle | null>;
-  /** Quotes of this document to paint in both panes; `id` is what a click on the mark reports. */
+  /** Quotes of this document to paint in both panes; `id` is what a click on one reports. */
   quotes: Array<{ id: string; quote: Quote }>;
-  /** A finished selection in either pane (or null once there is none). */
   /** Returns false when the app kept its earlier selection instead (a comment is being written). */
   onSelect: (selection: Picked) => boolean | void;
   onOpenQuote: (id: string) => void;
@@ -47,7 +46,7 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
   disk.current = { markdown: diskMarkdown, version: diskVersion };
   // The disk version a Save anyway overrides, and the app's disk version when the conflict was reported.
   const conflict = useRef({ version: '', seen: '' });
-  const view = useRef<EditorView | null>(null), previewRoot = useRef<HTMLElement | null>(null), previewScroller = useRef<HTMLDivElement | null>(null);
+  const view = useRef<EditorView | null>(null), previewRoot = useRef<HTMLElement | null>(null), previewScroller = useRef<HTMLDivElement | null>(null), previewRanges = useRef(new Map<string, Range[]>());
   const synced = useRef(markdown), baseVersion = useRef(version), saving = useRef(false), dirtyNow = useRef(false);
   const [dirty, setDirty] = useState(false), [asking, setAsking] = useState(false), [isSaving, setSaving] = useState(false);
   const choose = useRef<((choice: Choice) => void) | null>(null);
@@ -125,7 +124,7 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
     activeId.current = id; paint();
     const entry = latest.current.quotes.find(item => item.id === id), found = entry && view.current && locateQuote(text(), entry.quote, clean());
     if (found && view.current) revealRange(view.current, found.start, found.end);
-    previewRoot.current?.querySelector(`mark[data-highlight-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'center' });
+    previewRanges.current.get(id)?.[0]?.startContainer.parentElement?.scrollIntoView({ block: 'center' });
   }, [paint]);
   useImperativeHandle(handleRef, () => ({
     isDirty: () => dirtyNow.current, getText: text, save, requestExit, revealQuote,
@@ -245,11 +244,11 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
       )}
       <div className="edit-panes">
         <div className="edit-pane" hidden={narrow && pane !== 'source'}>
-          <SourceEditor key={mountId} initial={seed} documentId={mountId} extensions={extensions} onChange={typed} viewRef={view} />
+          <SourceEditor key={mountId} initial={seed} extensions={extensions} onChange={typed} viewRef={view} />
         </div>
         <div className="edit-pane" hidden={narrow && pane !== 'preview'}>
           <EditPreview text={preview} documentId={documentId} linkBase={linkBase} quotes={quotes} version={preview === synced.current ? baseVersion.current : undefined}
-            rootRef={previewRoot} scrollRef={previewScroller} onRange={previewRange} onOpenQuote={id => latest.current.onOpenQuote(id)} />
+            rootRef={previewRoot} scrollRef={previewScroller} rangesRef={previewRanges} onRange={previewRange} onOpenQuote={id => latest.current.onOpenQuote(id)} />
         </div>
       </div>
       {asking && (

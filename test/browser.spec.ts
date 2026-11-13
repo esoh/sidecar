@@ -4996,6 +4996,9 @@ test('large folders show sorted batches, filter beyond the first batch, and reve
   await page.screenshot({ path: testInfo.outputPath('large-directory-batches.png') });
 });
 
+// The text the preview paints for thread quotes (CSS custom highlight, so the document DOM is untouched).
+const paintedInPreview = (page: Page) => page.evaluate(() => [...(CSS.highlights.get('sidecar-quote') ?? [])].map(range => range.toString()).join(''));
+
 async function typeAtEndOfFirstLine(page: Page, text: string) {
   const editor = page.locator('.cm-content');
   await editor.click();
@@ -5298,7 +5301,7 @@ test('selecting in the source pane starts a thread with a source quote', async (
   expect(sent[0].fileQuote).toBeUndefined();
   expect(sent[0].quote).toMatchObject({ exact: '**marker**', start: source.indexOf('**marker**'), end: source.indexOf('**marker**') + '**marker**'.length });
   await expect(page.locator('.cm-content .edit-quote')).toContainText('**marker**');
-  await expect(page.locator('.edit-preview mark.annotation-highlight').first()).toContainText('marker');
+  await expect.poll(() => paintedInPreview(page)).toBe('marker');
 });
 
 test('Two panes: raw source on the left, rendered preview on the right, preview follows typing', async ({ page }) => {
@@ -5346,6 +5349,7 @@ test('Preview selection: selecting rendered text quotes the source around it', a
   await page.getByLabel('Comment', { exact: true }).fill('Why?');
   await page.getByRole('button', { name: 'Send comment' }).click();
   await expect.poll(() => sent.length).toBe(1);
+  await expect(page.getByRole('dialog', { name: 'Comment on selection' })).toHaveCount(0);
   expect(sent[0].quote.exact).toBe('Hello **wor');
   expect(source.slice(sent[0].quote.start, sent[0].quote.end)).toBe('Hello **wor');
 });
@@ -5373,6 +5377,69 @@ test('Save & send after typing elsewhere restamps the quote with the saved versi
   const text = await readFile(doc.path, 'utf8');
   expect(text).toBe('Intro line.\n\n# Title\n\nBody with a marker inside.\n');
   expect(sent[0].quote).toMatchObject({ exact: 'marker', start: text.indexOf('marker'), end: text.indexOf('marker') + 6, version: saved[0] });
+  await expect(page.getByRole('dialog', { name: 'Comment on selection' })).toHaveCount(0);
+});
+
+test('select while dirty, save, then send: the quote is of the saved text and version', async ({ page }) => {
+  const doc = await f.register('dirty-save-send.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const sent: any[] = [], saved: string[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  page.on('response', async response => { if (response.url().endsWith('/source') && response.request().method() !== 'GET') saved.push((await response.json()).version); });
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  await selectEditorText(page, 3, 'Body with a '.length, 'marker'.length);
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('Check this');
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+s');
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  await page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('button', { name: 'Send comment' }).click();
+  await expect.poll(() => sent.length).toBe(1);
+  const text = await readFile(doc.path, 'utf8');
+  expect(sent[0].quote.version).toBe(saved.at(-1));
+  expect(text.slice(sent[0].quote.start, sent[0].quote.end)).toBe(sent[0].quote.exact);
+  expect(sent[0].quote.exact).toBe('marker');
+  await expect(page.getByRole('dialog', { name: 'Comment on selection' })).toHaveCount(0);
+});
+
+test('a send that fails after the save is retried with the same correct quote and id', async ({ page }) => {
+  const doc = await f.register('retry-send.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const attempts: any[] = [];
+  await page.route('**/api/questions', async route => {
+    attempts.push(route.request().postDataJSON());
+    if (attempts.length === 1) return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'Temporary failure' }) });
+    await route.continue();
+  });
+  await commentWithDraft(page);
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+Home');
+  await page.keyboard.type('Intro line.\n\n');
+  const send = page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('button', { name: /send/i });
+  await send.click();
+  await expect.poll(() => attempts.length).toBe(1);
+  await expect(page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('alert')).toBeVisible();
+  await send.click();
+  await expect.poll(() => attempts.length).toBe(2);
+  const text = await readFile(doc.path, 'utf8');
+  for (const attempt of attempts) expect(text.slice(attempt.quote.start, attempt.quote.end)).toBe('marker');
+  expect(attempts[1].quote).toEqual(attempts[0].quote);
+  expect(attempts[1].clientMessageId).toBe(attempts[0].clientMessageId);
+  await expect(page.getByRole('dialog', { name: 'Comment on selection' })).toHaveCount(0);
+});
+
+test('typing in the source pane patches the preview in place: same article, same scroll, quote still painted', async ({ page }) => {
+  await longDocWithQuote(page);
+  await expect.poll(() => paintedInPreview(page)).toBe('marker');
+  await page.locator('.edit-preview').evaluate(scroller => { scroller.scrollTop = 600; (window as any).__article = document.querySelector('.edit-preview-article'); });
+  const before = await page.locator('.edit-preview').evaluate(scroller => scroller.scrollTop);
+  expect(before).toBeGreaterThan(300);
+  await typeAtEndOfFirstLine(page, ' extra');
+  await expect(page.locator('.edit-preview')).toContainText('Filler line 1. extra');
+  expect(await page.evaluate(() => (window as any).__article === document.querySelector('.edit-preview-article'))).toBe(true);
+  expect(await page.locator('.edit-preview').evaluate(scroller => scroller.scrollTop)).toBe(before);
+  await expect.poll(() => paintedInPreview(page)).toBe('marker');
 });
 
 test('Save & send is blocked with Passage changed once the quoted text was edited away', async ({ page }) => {
@@ -5570,7 +5637,7 @@ test('clicking a view-made quote while editing stays in edit mode and marks it i
   await page.locator('.sidebar').getByRole('button', { name: /Show passage/ }).first().click();
   await expect(page.locator('.cm-editor')).toBeVisible();
   await expect(page.locator('.cm-content .edit-quote-active')).toContainText('Highlighted passage here.');
-  await expect(page.locator('.edit-preview mark.annotation-highlight').first()).toContainText('Highlighted passage here.');
+  await expect.poll(() => paintedInPreview(page)).toBe('Highlighted passage here.');
 });
 
 test('while dirty, revealing a view-made quote neither asks nor leaves edit mode', async ({ page }) => {
