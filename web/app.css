@@ -1253,6 +1253,24 @@ pre code.pn-code[data-keep-layout] {
 .document-tools > div > div { min-width: 0; }
 .document-copy { margin-left: auto; flex-shrink: 0; }
 .markdown-edit-mode { isolation: isolate; display: flex; flex-direction: column; height: calc(100vh - 110px); min-height: 320px; background: var(--card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.edit-panes { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+.markdown-edit-mode[data-narrow] .edit-panes { grid-template-columns: minmax(0, 1fr); }
+.edit-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.edit-pane[hidden] { display: none; }
+.edit-pane + .edit-pane { border-left: 1px solid var(--border); }
+.edit-pane-toggle { display: flex; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.edit-pane-toggle button { border: 1px solid var(--border); background: transparent; color: inherit; border-radius: 6px; padding: 4px 12px; font: inherit; cursor: pointer; }
+.edit-pane-toggle button[aria-pressed="true"] { background: var(--muted); color: var(--primary); }
+.source-editor { flex: 1; min-height: 0; }
+.source-editor .cm-editor { height: 100%; background: transparent; color: var(--foreground); }
+.source-editor .cm-editor.cm-focused { outline: none; }
+.source-editor .cm-scroller { overflow: auto; font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 13px; line-height: 1.6; }
+.source-editor .cm-content { padding: 16px 18px; caret-color: var(--foreground); }
+.source-editor .cm-cursor { border-left-color: var(--foreground); }
+.source-editor .cm-selectionBackground, .source-editor .cm-focused .cm-selectionBackground { background: color-mix(in srgb, var(--primary) 30%, transparent) !important; }
+.edit-preview { flex: 1; min-height: 0; overflow: auto; padding: 16px 20px; }
+.edit-preview-article { outline: none; }
+.edit-quote-active { outline: 2px solid var(--primary); }
 .topbar .edit-action { width: auto; padding: 0 10px; font-size: 13px; }
 .topbar .markdown-edit-dirty { white-space: nowrap; color: var(--primary); font-size: 12px; }
 .markdown-edit-banner { margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--muted); }

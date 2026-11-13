@@ -1,14 +1,7 @@
-import { EditorSelection, StateEffect, StateField, Transaction, type Extension } from '@codemirror/state';
+import { EditorSelection, StateEffect, StateField, Transaction, type EditorState, type Extension } from '@codemirror/state';
 import { Decoration, EditorView, ViewPlugin, type DecorationSet } from '@codemirror/view';
-import type { FileQuote } from '../src/quote.ts';
-
-// The editor package owns its view; this hands it to the host for as long as the document is mounted.
-export function viewCapture(ref: { current: EditorView | null }): Extension {
-  return ViewPlugin.define(view => {
-    ref.current = view;
-    return { destroy() { if (ref.current === view) ref.current = null; } };
-  });
-}
+import type { Quote } from '../src/store.ts';
+import { sourceQuote } from './selection.ts';
 
 export function topVisibleLine(view: EditorView): number {
   return view.state.doc.lineAt(view.lineBlockAtHeight(view.scrollDOM.scrollTop).from).number;
@@ -16,13 +9,12 @@ export function topVisibleLine(view: EditorView): number {
 
 export function scrollToLine(view: EditorView, line: number): void {
   const { from } = view.state.doc.line(Math.min(Math.max(line, 1), view.state.doc.lines));
-  view.dispatch({ effects: EditorView.scrollIntoView(from, { y: 'start' }) });
+  view.dispatch({ effects: EditorView.scrollIntoView(from, { y: 'start', yMargin: 0 }) });
 }
 
-/** Centers the lines' span in the viewport (its start, when the span is taller than the editor). */
-export function revealLineRange(view: EditorView, start: number, end: number): void {
-  const at = (line: number) => view.state.doc.line(Math.min(Math.max(line, 1), view.state.doc.lines));
-  view.dispatch({ effects: EditorView.scrollIntoView(EditorSelection.range(at(start).from, at(Math.max(start, end)).to), { y: 'center' }) });
+/** Centers the range in the viewport (its start, when it is taller than the editor). */
+export function revealRange(view: EditorView, from: number, to: number): void {
+  view.dispatch({ effects: EditorView.scrollIntoView(EditorSelection.range(from, to), { y: 'center' }) });
 }
 
 export function minimalChange(from: string, to: string): { from: number; to: number; insert: string } | null {
@@ -41,20 +33,39 @@ export function applyExternalText(view: EditorView, text: string): void {
   if (change) view.dispatch({ changes: change, annotations: [Transaction.addToHistory.of(false), Transaction.remote.of(true)] });
 }
 
-/** The editor's selected source text as a line quote, with the viewport box the selection toolbar anchors to. */
-export function selectionQuote(view: EditorView, path: string): { quote: FileQuote; rect: DOMRect } | null {
-  const { from, to } = view.state.selection.main, exact = view.state.sliceDoc(from, to);
+/** The selected source text as a Markdown quote of `version`'s source (null for a blank or oversized selection). */
+export function quoteOfSelection(state: EditorState, version: string): Quote | null {
+  const { from, to } = state.selection.main, exact = state.sliceDoc(from, to);
   if (!exact.trim() || exact.length > 128 * 1024) return null;
-  const start = view.coordsAtPos(from), end = view.coordsAtPos(to);
-  if (!start || !end) return null;
-  const left = Math.min(start.left, end.left), top = Math.min(start.top, end.top);
-  return {
-    quote: { path, kind: 'doc', exact, startLine: view.state.doc.lineAt(from).number, endLine: view.state.doc.lineAt(to).number },
-    rect: new DOMRect(left, top, Math.max(start.right, end.right) - left, Math.max(start.bottom, end.bottom) - top),
-  };
+  return sourceQuote(state.doc.toString(), from, to, version);
 }
 
-export const setQuoteMarks = StateEffect.define<Array<{ from: number; to: number; id: string }>>();
+/** The selection's quote with the viewport box the selection toolbar anchors to. */
+export function selectionQuote(view: EditorView, version: string): { quote: Quote; rect: DOMRect } | null {
+  const quote = quoteOfSelection(view.state, version);
+  const start = view.coordsAtPos(view.state.selection.main.from), end = view.coordsAtPos(view.state.selection.main.to);
+  if (!quote || !start || !end) return null;
+  const left = Math.min(start.left, end.left), top = Math.min(start.top, end.top);
+  return { quote, rect: new DOMRect(left, top, Math.max(start.right, end.right) - left, Math.max(start.bottom, end.bottom) - top) };
+}
+
+// The pending selection's range follows later edits, so typing elsewhere does not break its quote.
+export type TrackedRange = { from: number; to: number; exact: string };
+export const setTracked = StateEffect.define<TrackedRange | null>();
+export const trackedRange = StateField.define<TrackedRange | null>({
+  create: () => null,
+  update(range, tr) {
+    for (const effect of tr.effects) if (effect.is(setTracked)) range = effect.value;
+    return range && tr.docChanged ? { ...range, from: tr.changes.mapPos(range.from, 1), to: tr.changes.mapPos(range.to, -1) } : range;
+  },
+});
+/** The tracked range as a quote of `version`, or null once its text was edited away. */
+export function trackedQuote(state: EditorState, version: string): Quote | null {
+  const range = state.field(trackedRange), text = state.doc.toString();
+  return range && range.from < range.to && text.slice(range.from, range.to) === range.exact ? sourceQuote(text, range.from, range.to, version) : null;
+}
+
+export const setQuoteMarks = StateEffect.define<Array<{ from: number; to: number; id: string; active?: boolean }>>();
 // Decorations only: the document text is never touched. Edits move the marks along until they are recomputed.
 export function quoteMarks(): Extension {
   return StateField.define<DecorationSet>({
@@ -63,7 +74,7 @@ export function quoteMarks(): Extension {
       marks = marks.map(tr.changes);
       for (const effect of tr.effects) if (effect.is(setQuoteMarks))
         marks = Decoration.set(effect.value.filter(({ from, to }) => from < to && to <= tr.state.doc.length)
-          .map(({ from, to, id }) => Decoration.mark({ class: 'edit-quote', attributes: { 'data-quote-id': id } }).range(from, to)), true);
+          .map(({ from, to, id, active }) => Decoration.mark({ class: active ? 'edit-quote edit-quote-active' : 'edit-quote', attributes: { 'data-quote-id': id } }).range(from, to)), true);
       return marks;
     },
     provide: field => EditorView.decorations.from(field),

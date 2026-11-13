@@ -309,6 +309,7 @@ function App() {
     highlighter.current?.remove('selection');
     painted.current.delete('selection');
     setSelection(undefined);
+    editorQuote.current = null;
     setHtmlPending(null);
     // The HTML page's own selection goes too, as a captured Markdown passage leaves no native selection.
     frameRef.current?.contentWindow?.postMessage({ sidecar: 'html-bridge', type: 'unselect' }, '*');
@@ -356,8 +357,8 @@ function App() {
   }, [files, changesScope, restoredView, documentId, viewScope]);
   // The main document's reading position, applied once its content has laid out (a few frames at most), then saved on scroll.
   const canvas = useRef<HTMLElement>(null), scrollRestored = useRef('');
-  const [editStartLine, setEditStartLine] = useState<number | null>(null), editMode = useRef<EditModeHandle | null>(null), returnLine = useRef<number | null>(null);
-  const isEditing = editStartLine !== null;
+  const [editAnchor, setEditAnchor] = useState<number | null>(null), editMode = useRef<EditModeHandle | null>(null), returnLine = useRef<number | null>(null);
+  const isEditing = editAnchor !== null, editorQuote = useRef<Quote | null>(null);
   const [unsavedText, setUnsavedText] = useState('');
   const [editStatus, setEditStatus] = useState({ dirty: false, saving: false });
   const hasCarriageReturn = content.markdown.includes('\r');
@@ -367,46 +368,48 @@ function App() {
       const rect = node.firstElementChild?.getBoundingClientRect();
       return rect && rect.height > 0 && rect.top >= top;
     });
-    setEditStartLine(Number(first?.dataset.sourceLine) || 1);
+    const line = Number(first?.dataset.sourceLine) || 1;
+    setEditAnchor(content.markdown.split('\n').slice(0, line - 1).reduce((offset, text) => offset + text.length + 1, 0));
   };
-  // The editor offers the same quick menu as an HTML page's selection, with a raw-source line quote.
-  const selectInEditor = (picked: { quote: FileQuote; rect: DOMRect } | null) => {
+  // Both editor panes offer the same quick menu as the reading view, with a Markdown source quote.
+  const sameQuote = (a: Quote, b: Quote) => a.start === b.start && a.end === b.end && a.version === b.version && a.exact === b.exact;
+  const selectInEditor = (picked: { quote: Quote; rect: DOMRect } | null) => {
     const hasText = composing && (sendingComment.current || !!passageDrafts.current.get(draftKey)?.text.trim());
-    if (hasText) return;
-    if (!picked) { if (htmlPending) { if (composing) passageDrafts.current.delete(draftKey); clearSelection(); } return; }
+    if (hasText) return false;
+    if (!picked) { if (editorQuote.current) { if (composing) passageDrafts.current.delete(draftKey); clearSelection(); } return; }
     if (composing) passageDrafts.current.delete(draftKey);
     fileSelectionVisit.current++;
-    setHtmlPending(picked);
+    editorQuote.current = picked.quote; lastRect.current = picked.rect;
+    setSelection(picked.quote);
     if (activeThreadId && isSidebarShown) {
-      const { quote: _, messageQuote, fileQuote, ...rest } = drafts.get(activeThreadId) ?? { text: '', retry: null };
-      drafts.set(activeThreadId, { ...rest, fileQuote: picked.quote });
+      const { messageQuote, fileQuote, ...rest } = drafts.get(activeThreadId) ?? { text: '', retry: null };
+      drafts.set(activeThreadId, { ...rest, quote: picked.quote });
     }
     setComposing(false);
     setChoices(null);
   };
-  // Source-line quotes of the open document, painted in the editor; a click opens the thread they belong to.
-  const editQuotes = threads.flatMap(thread => thread.messages.flatMap(message =>
-    [message.fileQuote, ...(message.fileSelections ?? []).map(selection => selection.fileQuote)]
-      .flatMap(quote => quote && quote.kind === 'doc' && quote.path === current?.path ? [{ id: thread.id, quote }] : [])));
-  const saveFirst = editStatus.dirty ? { beforeSend: () => editMode.current?.save() ?? Promise.resolve(true), sendLabel: 'Save & send' } : {};
+  // Painted in both panes; a click opens the thread they belong to.
+  const editQuotes = selectedMessages.filter(({ selection }) => selection.isVisible).map(({ selection }) => ({ id: selection.id, quote: selection.quote }));
+  // Dirty text is saved before a send; the editor's selection is then restamped with the saved version, or the send is blocked.
+  const saveFirst = editStatus.dirty ? { beforeSend: async (quote?: Quote) => {
+    const handle = editMode.current;
+    if (!handle) return true;
+    if (!await handle.save()) return false;
+    if (!quote || !editorQuote.current || !sameQuote(quote, editorQuote.current)) return true;
+    const stamped = handle.pendingQuote();
+    if (!stamped) throw new Error('Passage changed');
+    return { quote: stamped };
+  }, sendLabel: 'Save & send' } : {};
   // Only while editing: asks to save or discard, and says whether the editor was left. View mode never waits.
-  const leaveEditingFirst = () => editStartLine === null || !editMode.current ? Promise.resolve(true) : editMode.current.requestExit();
-  const [editReveal, setEditReveal] = useState<{ start: number; end: number } | null>(null);
-  // A quote made in the editor reveals in the editor: scroll there, or enter edit mode and let it scroll once mounted.
-  const revealEditQuote = (quote: FileQuote) => {
-    const span = { start: quote.startLine ?? 1, end: quote.endLine ?? quote.startLine ?? 1 };
-    if (editStartLine !== null) editMode.current?.revealLines(span.start, span.end);
-    else { setEditReveal(span); startEditing(); }
-    if (innerWidth <= 850) setSidebarShown(false);
-  };
-  const leaveEditing = useCallback((line: number) => { returnLine.current = line; setEditStartLine(null); setEditReveal(null); }, []);
+  const leaveEditingFirst = () => editAnchor === null || !editMode.current ? Promise.resolve(true) : editMode.current.requestExit();
+  const leaveEditing = useCallback((line: number) => { returnLine.current = line; setEditAnchor(null); }, []);
   useEffect(() => {
-    if (editStartLine !== null || returnLine.current === null) return;
+    if (editAnchor !== null || returnLine.current === null) return;
     const line = returnLine.current; returnLine.current = null;
     const wrappers = [...document.querySelectorAll<HTMLElement>('#document [data-source-line]')]
       .filter(node => Number(node.dataset.sourceLine) <= line && (node.firstElementChild?.getClientRects().length ?? 0) > 0);
     wrappers.at(-1)?.firstElementChild?.scrollIntoView({ block: 'start' });
-  }, [editStartLine]);
+  }, [editAnchor]);
   const scrollKey = documentId ? viewKey(documentId, 'scroll') : '';
   const isReading = hasState && !htmlView && !closedDocument;
   useEffect(() => {
@@ -873,7 +876,8 @@ function App() {
     }
     return ids.length > 0;
   }
-  const passageIssue = (quote: Quote) => documentError ? 'Document unavailable' : quoteIssue(content.markdown, quote, content.version);
+  // The editor's own selection is of unsaved text until Save & send saves it; it is checked then.
+  const passageIssue = (quote: Quote) => documentError ? 'Document unavailable' : !content.version ? null : isEditing && editStatus.dirty && editorQuote.current && sameQuote(quote, editorQuote.current) ? null : quoteIssue(content.markdown, quote, content.version);
   async function attachToConversation(attachment: { fileQuote: FileQuote } | { quote: Quote }) {
     const visit = ++fileSelectionVisit.current;
     if ('fileQuote' in attachment) clearPendingSelection();
@@ -1081,7 +1085,6 @@ function App() {
   }
   const selectionActions = {
     onOpenFileQuote: (quote: FileQuote, revealId?: string) => {
-      if (quote.kind === 'doc' && quote.path === current?.path && !htmlView && !hasCarriageReturn && !documentError) return revealEditQuote(quote);
       if (quote.kind === 'html' && quote.selector && revealId && quote.path !== htmlAbsolute) return openHtmlPage(quote.path, revealId);
       if (!htmlView || quote.kind !== 'html' || quote.path !== htmlAbsolute || !quote.selector) return openLink(quote.kind === 'code' ? 'code' : 'doc', quote.path);
       if (innerWidth <= 850) setSidebarShown(false);
@@ -1103,7 +1106,7 @@ function App() {
     passageIssue,
     fileQuoteIssue,
     showOriginal: (selectionId: string, afterLeave = false): boolean | Promise<boolean> => {
-      if (editStartLine !== null && !afterLeave) return leaveEditingFirst().then(left => { if (left) selectionActions.showOriginal(selectionId, true); return left; });
+      if (editAnchor !== null && !afterLeave) return leaveEditingFirst().then(left => { if (left) selectionActions.showOriginal(selectionId, true); return left; });
       const entry = selectedMessages.find(({ selection }) => selection.id === selectionId);
       if (entry) setActiveThreadId(entry.thread.id);
       clearSelection();
@@ -1115,16 +1118,17 @@ function App() {
       return true;
     },
     showPassage: (selection: import('../src/store.ts').MessageSelection, wasEditing = false): boolean | Promise<boolean> => {
-      if (editStartLine !== null && !wasEditing) return leaveEditingFirst().then(left => { if (left) selectionActions.showPassage(selection, true); return left; });
       const entry = selectedMessages.find(item => item.selection.id === selection.id);
       if (entry) setActiveThreadId(entry.thread.id);
       setActiveMessageId(selection.id);
       setOriginalMessageId(null);
       setPreviewPath(null);
+      // Editing stays editing: scroll the source pane to the quote.
+      if (editAnchor !== null && !wasEditing) { editMode.current?.revealQuote(selection.id); if (innerWidth <= 850) setSidebarShown(false); return true; }
       let tries = 0;
       const reveal = () => {
         const root = article.current, range = root && quoteSourceRange(root, content.markdown, selection.quote, content.version);
-        // Leaving the editor mounts the article a render later.
+        // Leaving the editor (for a proposal review) mounts the article a render later.
         if (!range) { if (wasEditing && ++tries < 60) requestAnimationFrame(reveal); return; }
         revealRange(range);
         const node = range.startContainer.parentElement;
@@ -1159,8 +1163,8 @@ function App() {
     documentId, proposals: Object.values(state?.proposals ?? {}).filter(p => p.documentId === documentId),
     selections: selectedMessages.map(item => item.selection), article, markdown: content.markdown, version: content.version,
     isHistorical: !!originalMessageId || !!previewPath,
-    decisionBlocked: editStartLine !== null && editStatus.dirty ? 'Save or discard your edits first' : undefined,
-    onShowSelection: selectionActions.showPassage, onShowOriginal: selectionActions.showOriginal,
+    decisionBlocked: editAnchor !== null && editStatus.dirty ? 'Save or discard your edits first' : undefined,
+    onShowSelection: selection => editAnchor !== null ? leaveEditingFirst().then(left => { if (left) selectionActions.showPassage(selection, true); return left; }) : selectionActions.showPassage(selection), onShowOriginal: selectionActions.showOriginal,
     onReturnToCurrent: () => { setOriginalMessageId(null); setPreviewPath(null); },
   });
   const cancel = () => {
@@ -1256,7 +1260,7 @@ function App() {
           <Icon name="panel" />
           <span>{isSidebarShown ? 'Document' : 'Chat'}</span>
         </button>
-        {current && !htmlView && (editStartLine === null
+        {current && !htmlView && (editAnchor === null
           ? documentError ? null : <button className="sidebar-toggle edit-action" disabled={hasCarriageReturn || !content.version} onClick={startEditing}
               title={hasCarriageReturn ? 'This file uses Windows (CRLF) line endings, which the editor would change. Edit it in your own editor.' : 'Edit this document'}>Edit</button>
           : <>
@@ -1320,9 +1324,9 @@ function App() {
                 {documentError || 'Open a document from your agent.'}
               </p>
             )}
-            {editStartLine !== null && current ? (
-              <MarkdownEditMode documentId={documentId} path={current.path} markdown={content.markdown} version={content.version} diskMarkdown={content.markdown} diskVersion={content.version}
-                startLine={editStartLine} reveal={editReveal} handleRef={editMode} quotes={editQuotes} onSelect={selectInEditor} onOpenQuote={openThread} onExit={leaveEditing} onError={setError} onStatus={setEditStatus} />
+            {editAnchor !== null && current ? (
+              <MarkdownEditMode documentId={documentId} linkBase={current.path.replace(/\/[^/]*$/, '')} markdown={content.markdown} version={content.version} diskMarkdown={content.markdown} diskVersion={content.version}
+                anchor={editAnchor} handleRef={editMode} quotes={editQuotes} onSelect={selectInEditor} onOpenQuote={openMessage} onExit={leaveEditing} onError={setError} onStatus={setEditStatus} />
             ) : (
             <article
               className="document-card w-full bg-card rounded-xl p-5 md:p-8 lg:p-10 xl:p-12 shadow-xl border border-border/50"

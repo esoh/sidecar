@@ -99,7 +99,7 @@ export function QuestionForm({
   onRemoveSelection?: () => void;
   agentControl?: ViewerState['agentControl'];
   /** Runs before a send; resolving false aborts it and keeps the draft. */
-  beforeSend?: () => Promise<boolean>;
+  beforeSend?: (quote?: Quote) => Promise<boolean | { quote: Quote }>;
   sendLabel?: string;
 }) {
   const [initialDraft] = useState(() => drafts.get(draftKey));
@@ -144,8 +144,18 @@ export function QuestionForm({
         setBusy(true);
         onSendingChange?.(true);
         try {
-          if (beforeSend && !await beforeSend()) return;
-          const request = await api<RequestRecord>('/api/questions', { ...body, clientMessageId: retry.current.id });
+          let sent: Record<string, unknown> = body;
+          if (beforeSend) {
+            const prepared = await beforeSend(quote);
+            if (!prepared) return;
+            // A restamped quote makes this a different request.
+            if (typeof prepared === 'object') {
+              sent = { ...body, quote: prepared.quote };
+              const restamped = JSON.stringify(sent);
+              if (retry.current.signature !== restamped) retry.current = { signature: restamped, id: randomId() };
+            }
+          }
+          const request = await api<RequestRecord>('/api/questions', { ...sent, clientMessageId: retry.current.id });
           // A remounted composer or a newly attached quote may hold a newer draft.
           if (drafts.get(draftKey) === submittedDraft) {
             setText(''); retry.current = null;
@@ -451,7 +461,7 @@ export function ConversationSidebar({
   onOpenFileQuote: (quote: FileQuote, revealId?: string) => void;
   onUnreadChange: (count: number) => void;
   threadFile?: string;
-  beforeSend?: () => Promise<boolean>;
+  beforeSend?: (quote?: Quote) => Promise<boolean | { quote: Quote }>;
   sendLabel?: string;
 }) {
   const [filter, setFilter] = useState('unresolved'),
