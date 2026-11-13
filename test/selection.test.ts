@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { locateQuote, matchQuote, resolveQuote, surroundingSentence } from '../web/selection.ts';
+import { locateQuote, matchQuote, resolveQuote, sourceQuote } from '../web/selection.ts';
 
 test('duplicate agent quotes are ambiguous, not changed, and need explicit disambiguation', () => {
   const text = 'Review\nAuthor Summary\nNew introduction.\nSee Author Summary.';
@@ -50,14 +50,20 @@ test('renderer smart quotes preserve source anchors and DOM offsets without hidi
   assert.equal(locateQuote("admission’s admission's", quote), null);
 });
 
-test('sentence context is mechanical, bounded, and omitted for whole or multi-sentence selections', () => {
-  const text = 'Previous sentence. The widget retries three times. Next sentence.';
-  const start = text.indexOf('three');
-  assert.equal(surroundingSentence(text, start, start + 5), 'The widget retries three times.');
-  const sentenceStart = text.indexOf('The widget');
-  const sentenceEnd = text.indexOf(' Next');
-  assert.equal(surroundingSentence(text, sentenceStart, sentenceEnd), undefined);
-  assert.equal(surroundingSentence(text, sentenceStart, text.length), undefined);
-  assert.equal(surroundingSentence('word ' + 'x'.repeat(600) + '.', 0, 4), undefined);
-  assert.equal(surroundingSentence('Use 😀 twice. Done.', 4, 6), 'Use 😀 twice.');
+test('sourceQuote carries 32 characters of source context that matchQuote finds at the same position', () => {
+  const source = '# Title\n\nHello **world**. ' + 'x'.repeat(40) + '\n';
+  const start = source.indexOf('Hello **wor'), end = start + 'Hello **wor'.length;
+  const quote = sourceQuote(source, start, end, 'v1');
+  assert.equal(quote.exact, 'Hello **wor');
+  assert.equal(quote.prefix, '# Title\n\n');
+  assert.equal(quote.suffix.length, 32);
+  assert.deepEqual(matchQuote(source, quote, 'v1'), { status: 'found', matches: [{ start, end }] });
+});
+
+test('a duplicate passage resolves to the second occurrence through its source context', () => {
+  const source = 'Intro.\n\nSame **line**.\n\nMiddle.\n\nSame **line**.\n';
+  const second = source.lastIndexOf('Same **line**.');
+  const quote = sourceQuote(source, second, second + 'Same **line**.'.length, 'v1');
+  assert.deepEqual(locateQuote(source, quote, 'v1'), { start: second, end: second + 14 });
+  assert.deepEqual(locateQuote(source, { ...quote, isPositionVerified: false }, 'v1'), { start: second, end: second + 14 });
 });

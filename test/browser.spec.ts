@@ -121,7 +121,7 @@ async function proposalReply(page: Page, markdown = '# Retry policy\n\nThe clien
   await page.goto(`${f.url}/?document=${doc.id}`);
   const input = page.getByLabel('Message', { exact: true }); await input.fill('Propose an edit'); await input.press('Enter');
   await expect(input).toHaveValue('');
-  await answer('[[sidecar-meta {"highlights":[{"exact":"The client retries failed requests three times.","label":"Retry policy","proposal":{"before":"The client retries **failed requests** three times.","after":"The client retries **temporary failures** up to three times."}}]}]]\nReview [the retry policy](#selection-1).');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"The client retries **failed requests** three times.","label":"Retry policy","proposal":{"before":"The client retries **failed requests** three times.","after":"The client retries **temporary failures** up to three times."}}]}]]\nReview [the retry policy](#selection-1).');
   await expect(page.locator('.sidebar .proposal-card')).toBeVisible();
   return doc;
 }
@@ -691,7 +691,7 @@ test('queued previews wait for batch delivery and keep selections, order and dra
   await f.agent(`/agent/requests/${first.id}/accepted`, {});
   await expect(queue.getByRole('listitem')).toHaveText(['Arrived after the batch']);
   await expect(log.locator('.message.user .message-bubble')).toHaveText(['Explain this passage', 'And this follow-up']);
-  await expect(log.locator('.message-selection')).toContainText('Hello world.');
+  await expect(log.locator('.message-selection')).toContainText('Hello **world**.');
   await expect(log.locator('.message-status')).toHaveText('Working…');
   await f.agent('/agent/stream-events', { ownerKey: ownerKey(f.owner), turnId: 'queue-test', messageId: 'final', index: 0, delta: prepared.stream.prefix + 'First answer' + prepared.stream.suffix, final: true });
   await f.agent(`/agent/requests/${later.id}/prepare`, {});
@@ -854,7 +854,7 @@ test('quotes from sent messages, floating windows and the dock keep their source
   await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', request.threadId);
   await expect(page.locator('.draft-selection')).toContainText('Alpha bold and code omega.');
   await select(page, 'Hello world.');
-  await expect(page.locator('.draft-selection')).toContainText('Hello world.');
+  await expect(page.locator('.draft-selection')).toContainText('Hello **world**.');
   await expect(page.locator('.draft-selection')).not.toContainText('Alpha bold');
   // A hidden conversation must retain its own draft when a different pinned source opens.
   await answer('Follow-up answer.');
@@ -1134,7 +1134,7 @@ test('each agent selection has a persistent eye, stable reply link, and independ
   await page.getByLabel('Message', { exact: true }).fill('Please identify both passages.');
   await page.getByLabel('Message', { exact: true }).press('Enter');
   await expect(page.getByRole('log')).toContainText('Please identify both passages.');
-  await answer('[[sidecar-meta {"threadTitle":"Document landmarks","highlights":[{"exact":"First passage.","label":"First"},{"exact":"Second passage."}]}]]\nSee [first](#selection-1) and [second](#selection-2).');
+  await answer('[[sidecar-meta {"threadTitle":"Document landmarks","highlights":[{"exact":"First **passage**.","label":"First"},{"exact":"Second passage."}]}]]\nSee [first](#selection-1) and [second](#selection-2).');
   const badges = page.locator('.message-selection');
   await expect(badges).toHaveCount(2);
   await expect(badges.first()).toContainText('First');
@@ -1225,7 +1225,7 @@ test('agent prefix/suffix context disambiguates headings without a repair and mi
   const input = page.getByLabel('Message', { exact: true });
   await input.fill('Point to it'); await input.press('Enter');
   await expect(page.getByRole('log')).toContainText('Point to it');
-  await answer('[[sidecar-meta {"highlights":[{"exact":"Author Summary","suffix":"\\nNew introduction."},{"exact":"Never existed"}]}]]\nHere.');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"Author Summary","suffix":"\\n\\nNew introduction."},{"exact":"Never existed"}]}]]\nHere.');
   await expect(page.locator('#document h2 mark')).toHaveText('Author Summary');
   await expect(page.locator('.message-selection').first()).not.toContainText('Multiple matching passages');
   await page.locator('.message-selection').last().getByRole('button', { name: 'View original document' }).click();
@@ -1241,7 +1241,7 @@ test('agent source apostrophes locate rendered smart quotes and retain genuine p
   await page.getByLabel('Message', { exact: true }).fill('Highlight these');
   await page.getByLabel('Message', { exact: true }).press('Enter');
   await expect(page.getByRole('log')).toContainText('Highlight these');
-  await answer('[[sidecar-meta ' + JSON.stringify({ highlights: [first, second, third].map(exact => ({ exact })) }) + ']]\nHere are the three passages.');
+  await answer('[[sidecar-meta ' + JSON.stringify({ highlights: [first.replace('CallSessions', '`CallSession`s'), second, third].map(exact => ({ exact })) }) + ']]\nHere are the three passages.');
   await expect(page.locator('.message-selection')).toHaveCount(3);
   await expect(page.getByText('Passage changed', { exact: true })).toHaveCount(0);
   await expect(page.locator('#document mark')).toHaveCount(5); // The code span splits the first passage into three marks.
@@ -1374,13 +1374,13 @@ test('selection spans inline formatting, code and emoji; outside and empty selec
   await expect(page.locator('#document')).toContainText('bold 😀');
   await select(page, 'bold 😀 and code');
   await page.getByRole('button', { name: 'Comment', exact: true }).click();
-  await expect(page.getByTestId('selection-preview')).toHaveText('bold 😀 and code');
+  await expect(page.getByTestId('selection-preview')).toHaveText('**bold 😀** and `code`');
   await page.getByLabel('Comment', { exact: true }).fill('Explain the selection');
   await page.getByRole('dialog').getByRole('button', { name: 'Send comment', exact: true }).click();
   await expect(page.locator('#threads').getByText('Explain the selection', { exact: true })).toBeVisible();
   const quote = (await lastRequest()).quote;
-  expect(quote.exact).toBe('bold 😀 and code'); expect(quote.end - quote.start).toBe(quote.exact.length);
-  expect(quote.sentence).toBe('Alpha bold 😀 and code omega.');
+  expect(quote.exact).toBe('**bold 😀** and `code`'); expect(quote.end - quote.start).toBe(quote.exact.length);
+  expect(quote.sentence).toBeUndefined();
   expect(await page.locator('#document script').count()).toBe(0);
   await page.evaluate(() => {
     const range = document.createRange(); range.selectNodeContents(document.querySelector('.brand')!);
@@ -1578,7 +1578,7 @@ test('floating comments retain their highlight, retry safely, and reopen the sav
   await expect(composer).toHaveCount(0);
   await expect(page.locator('#threads').getByText('Explain this passage', { exact: true })).toBeVisible();
   const request = await lastRequest();
-  expect(request.quote.exact).toBe('bold 😀 and code');
+  expect(request.quote.exact).toBe('**bold 😀** and `code`');
   expect(Object.keys((await state()).requests)).toHaveLength(1);
   await answer('This stays in the original conversation.');
   await page.reload();
@@ -1646,7 +1646,7 @@ for (const kind of ['External', 'Padded code', 'Markdown line']) test(`${kind} l
   await page.locator('#document mark').click();
   await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', first.threadId);
   expect(page.url()).toContain(f.url);
-  const second = await (await f.view('/api/questions', { documentId: a.id, text: 'Second question', clientMessageId: 'second', quote: { ...first.quote, exact: 'docs', prefix: first.quote.prefix + 'the ', start: first.quote.start + 4 } })).json();
+  const second = await (await f.view('/api/questions', { documentId: a.id, text: 'Second question', clientMessageId: 'second', quote: { ...first.quote, exact: 'docs', prefix: first.quote.prefix + '[the ', start: first.quote.start + 5, end: first.quote.start + 9, suffix: (first.quote.exact.slice(first.quote.exact.indexOf('docs') + 4) + first.quote.suffix).slice(0, 32) } })).json();
   await expect(page.locator('#document mark').filter({ hasText: /^docs$/ })).toBeVisible();
   for (const [text, id] of [['First question', first.threadId], ['Second question', second.threadId]]) {
     await page.locator('#document mark').filter({ hasText: /^docs$/ }).click();
@@ -1873,7 +1873,7 @@ test('composers grow, preserve Shift+Enter and IME, and submit with Enter', asyn
   await comment.fill('Explain'); await comment.press('Shift+Enter'); await comment.pressSequentially('this');
   await expect(comment).toHaveValue('Explain\nthis'); await comment.press('Enter');
   await expect(page.getByRole('dialog')).toHaveCount(0);
-  expect((await lastRequest()).quote.exact).toBe('Hello world.');
+  expect((await lastRequest()).quote.exact).toBe('Hello **world**.');
 });
 
 
@@ -1970,7 +1970,7 @@ test('a delayed send preserves a newer draft after leaving and reopening its thr
     await page.getByRole('button', { name: 'Threads', exact: true }).click();
     await page.locator(`[data-thread-id="${request.threadId}"]`).click();
     await expect(message).toHaveValue('Keep this newer draft');
-    await expect(page.locator('.draft-selection')).toContainText('world.');
+    await expect(page.locator('.draft-selection')).toContainText('**world**.');
     expect((await state()).requests[request.id].quote.exact).toBe('Hello');
     expect(Object.keys((await state()).requests)).toHaveLength(1);
   } finally { release(); }
@@ -2441,7 +2441,7 @@ digraph G { Read -> Ask }
   expect(await page.evaluate(() => '__sidecarDocumentScriptRan' in window)).toBe(false);
   await select(page, 'important');
   await page.getByRole('button', { name: 'Comment', exact: true }).click();
-  await expect(page.getByTestId('selection-preview')).toHaveText('important');
+  await expect(page.getByTestId('selection-preview')).toHaveText('> [!NOTE]\n> Keep this **important** detail.'); // alerts are unmappable: whole source lines
 });
 
 test('renderer fonts, spacing, images and highlighted code survive reload and file edits', async ({ page }) => {
@@ -2874,7 +2874,7 @@ test('saved drafts retain retry IDs after a lost response and clear only after s
   const original = await lastRequest();
   await page.reload();
   await expect(message).toHaveValue('Send this exactly once');
-  await expect(page.locator('.draft-selection')).toContainText('Hello world.');
+  await expect(page.locator('.draft-selection')).toContainText('Hello **world**.');
   await message.press('Enter');
   await expect(message).toHaveValue('');
   expect(Object.keys((await state()).requests)).toEqual([original.id]);
@@ -4426,7 +4426,102 @@ test('opening a hidden sidebar carries the new passage into the existing draft',
   await expect(page.locator('#document mark[data-pending]')).toHaveText('world');
   await page.getByLabel('Message', { exact: true }).press('Enter');
   await expect(page.getByRole('log')).toContainText('Keep my follow-up');
-  expect((await lastRequest()).quote.exact).toBe('world');
+  expect((await lastRequest()).quote.exact).toBe('**world**');
+});
+
+test('View selection quotes source and paints only the visible text', async ({ page }) => {
+  const source = '# Heading\n\nHello **world**.\n';
+  const doc = await f.register('source-quote.md', source);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document')).toContainText('Hello world.');
+  await page.getByLabel('Message', { exact: true }).fill('Why?');
+  await select(page, 'Hello wor');
+  await expect.poll(() => page.locator('#document mark[data-pending]').allTextContents().then(t => t.join(''))).toBe('Hello wor');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByRole('log')).toContainText('Why?');
+  const quote = (await lastRequest()).quote;
+  expect(quote.exact).toBe('Hello **wor');
+  expect(source.slice(quote.start, quote.end)).toBe('Hello **wor');
+  expect(quote.sentence).toBeUndefined();
+});
+
+test('triple-clicking a heading quotes its source line', async ({ page }) => {
+  const doc = await f.register('whole-heading.md', '## Heading\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document h2')).toHaveText('Heading');
+  await page.getByLabel('Message', { exact: true }).fill('Why?');
+  await page.locator('#document h2').click({ clickCount: 3 });
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByRole('log')).toContainText('Why?');
+  expect((await lastRequest()).quote.exact).toBe('## Heading');
+});
+
+test('selecting the second of two identical passages paints the second after reload', async ({ page }) => {
+  const doc = await f.register('duplicate.md', 'Same **line**.\n\nMiddle.\n\nSame **line**.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document p')).toHaveCount(3);
+  await page.getByLabel('Message', { exact: true }).fill('Which?');
+  await page.evaluate(() => {
+    const p = document.querySelectorAll('#document p')[2]!;
+    const range = document.createRange(); range.selectNodeContents(p);
+    const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+    document.getElementById('document')!.dispatchEvent(new Event('mouseup', { bubbles: true }));
+  });
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  const marked = () => page.evaluate(() => [...document.querySelectorAll('#document p')].map(p => !!p.querySelector('mark.annotation-highlight')));
+  await expect.poll(marked).toEqual([false, false, true]);
+  await page.reload();
+  await expect.poll(marked).toEqual([false, false, true]);
+});
+
+test('agent highlights match source text; ambiguous ones say so', async ({ page }) => {
+  const doc = await f.register('agent-source.md', 'A **world** here.\n\nTwice. Twice.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Highlight'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"**world**"},{"exact":"Twice."}]}]]\nSee [one](#selection-1) and [two](#selection-2).');
+  await expect(page.locator('#document mark.annotation-highlight').first()).toHaveText('world');
+  await expect(page.getByText('Multiple matching passages', { exact: true })).toBeVisible();
+});
+
+test('a passage under a folded heading opens and scrolls into view from its thread quote', async ({ page }) => {
+  const doc = await f.register('folded-source.md', '# Top\n\n## Hidden\n\n' + 'Filler.\n\n'.repeat(40) + 'Deep **target** passage.\n\n## Other\n\nEnd.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Find'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"Deep **target** passage."}]}]]\nSee [it](#selection-1).');
+  const mark = page.locator('#document mark.annotation-highlight').first();
+  await expect(mark).toBeVisible();
+  await page.locator('#document summary').filter({ hasText: 'Hidden' }).click();
+  await expect(mark).toBeHidden();
+  await page.getByRole('button', { name: /Show passage/ }).click();
+  await expect(mark).toBeVisible();
+  await expect(mark).toBeInViewport();
+});
+
+test('selecting across smart quotes quotes the straight-quote source', async ({ page }) => {
+  const doc = await f.register('smart.md', 'He said "quoted" text and left.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document')).toContainText('quoted');
+  await page.getByLabel('Message', { exact: true }).fill('Why?');
+  await select(page, (await page.locator('#document p').textContent())!.match(/said .quoted. text/)![0]);
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByRole('log')).toContainText('Why?');
+  expect((await lastRequest()).quote.exact).toBe('said "quoted" text');
+});
+
+test('selecting in a CRLF document gives offsets into the CRLF source', async ({ page }) => {
+  const source = '# Title\r\n\r\nSome wor words.\r\n';
+  const doc = await f.register('crlf.md', source);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document')).toContainText('Some wor words.');
+  await page.getByLabel('Message', { exact: true }).fill('Why?');
+  await select(page, 'wor words');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByRole('log')).toContainText('Why?');
+  const quote = (await lastRequest()).quote;
+  expect(source.slice(quote.start, quote.end)).toBe(quote.exact);
+  expect(quote.exact).toBe('wor words');
 });
 
 test.describe('mobile document and chat', () => {
@@ -4590,7 +4685,7 @@ test.describe('mobile document and chat', () => {
     await page.getByRole('button', { name: 'Send comment', exact: true }).tap();
     await expect(page.getByRole('log')).toContainText('New passage thread');
     expect((await lastRequest()).threadId).not.toBe(draftThread);
-    expect((await lastRequest()).quote.exact).toBe('world');
+    expect((await lastRequest()).quote.exact).toBe('**world**');
     await expect(toggle).toHaveAttribute('aria-expanded', 'true');
   });
   test('overlapping annotations keep their thread chooser in the document view', async ({ page }) => {

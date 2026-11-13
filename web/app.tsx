@@ -19,7 +19,8 @@ import {
 } from './conversations.tsx';
 import { useQuestionDrafts, forgetDocument, type QuestionDraft, type QuestionDrafts } from './useQuestionDrafts.ts';
 import { useWatchedFiles } from './useWatchedFiles.ts';
-import { matchQuote, quoteIssue, quoteRange, selectionText, selectionSentence, excludedSelection } from './selection.ts';
+import { locateQuote, matchQuote, quoteIssue, sourceQuote, excludedSelection } from './selection.ts';
+import { quoteSourceRange, rangeToSource, sourceToRanges } from './source-dom.ts';
 import { revealRange } from './reveal-target.ts';
 import { MarkdownDocument, WorkspaceLinks, type OpenWorkspaceLink } from './MarkdownDocument.tsx';
 import { resolveWorkspaceLink, splitLineSuffix, fileLineRange, pageLinkTarget, type FileLineRange } from './links.ts';
@@ -615,17 +616,7 @@ function App() {
     };
   }, [requestedDocument, documentClosed, closedDocument]);
 
-  const [documentText, setDocumentText] = useState('');
   const [highlightRevision, setHighlightRevision] = useState(0);
-  useLayoutEffect(() => {
-    const root = article.current;
-    if (!root) return;
-    const refresh = () => setDocumentText(selectionText(root));
-    refresh();
-    const observer = new MutationObserver(refresh);
-    observer.observe(root, { subtree: true, childList: true, characterData: true });
-    return () => observer.disconnect();
-  }, [content.version, isEditing]);
   useLayoutEffect(
     () =>
       onCodeHighlightSwap((element) => {
@@ -675,10 +666,11 @@ function App() {
       // Exact overlaps leave empty text nodes inside the library's marks. A later
       // partial overlap detaches those nodes while wrapping; normalize only marks.
       for (const mark of painter.getDoms()) mark.normalize();
-      const range = quoteRange(root, target.quote, content.version);
-      if (!range) continue;
+      const match = locateQuote(content.markdown, target.quote, content.version);
+      const ranges = match ? sourceToRanges(root, content.markdown, match.start, match.end) : [];
+      if (!ranges.length) continue;
       paintingId = target.id;
-      painter.fromRange(range);
+      for (const range of ranges) painter.fromRange(range);
       painted.current.set(target.id, JSON.stringify(target.quote));
     }
     releaseId();
@@ -696,7 +688,7 @@ function App() {
         mark.title = 'Open passage thread';
       }
     }
-  }, [content.version, anchors, selection, documentError, highlightRevision, documentText, activeMessageId, isEditing]);
+  }, [content.version, anchors, selection, documentError, highlightRevision, activeMessageId, isEditing]);
 
   useEffect(() => {
     const outside = (event: MouseEvent) => {
@@ -803,10 +795,10 @@ function App() {
     if (choices) return highlighter.current?.getDoms(choices.ids[0])[0]?.getBoundingClientRect() ?? choices.rect;
     if (htmlPending) return htmlPending.rect;
     const root = article.current;
-    const range = root && selection && quoteRange(root, selection, content.version);
+    const range = root && selection && quoteSourceRange(root, content.markdown, selection, content.version);
     if (range) lastRect.current = range.getBoundingClientRect();
     return lastRect.current;
-  }, [selection, htmlPending, choices, content.version]);
+  }, [selection, htmlPending, choices, content.version, content.markdown]);
   usePosition(composer, composing ? anchor : null, 384);
   usePosition(toolbar, ((selection || htmlPending) && !composing) || choices ? anchor : null, choices ? 300 : 76, !choices);
 
@@ -820,19 +812,11 @@ function App() {
     if ([range.startContainer, range.endContainer].some((node) => node.parentElement?.closest(excludedSelection)))
       return;
     revealRange(range);
-    const before = document.createRange();
-    before.selectNodeContents(root);
-    before.setEnd(range.startContainer, range.startOffset);
-    const start = selectionText(before.cloneContents()).length;
-    before.setEnd(range.endContainer, range.endOffset);
-    const end = selectionText(before.cloneContents()).length;
-    const text = selectionText(root),
-      exact = text.slice(start, end);
-    if (!exact.trim()) {
+    const span = rangeToSource(root, content.markdown, range);
+    if (!span) {
       clearSelection();
       return;
     }
-    const sentence = selectionSentence(range);
     lastRect.current = range.getBoundingClientRect();
     // As in web-highlighter's pointer-end handler, the painted mark owns the
     // preview; a native selection left here makes the next drag move text.
@@ -841,16 +825,7 @@ function App() {
     requestAnimationFrame(() => {
       ignoreClick.current = false;
     });
-    const quote: Quote = {
-      exact,
-      prefix: text.slice(Math.max(0, start - 32), start),
-      suffix: text.slice(end, end + 32),
-      start,
-      end,
-      version: content.version,
-      isPositionVerified: true,
-      ...(sentence ? { sentence } : {}),
-    };
+    const quote = sourceQuote(content.markdown, span.start, span.end, content.version);
     fileSelectionVisit.current++;
     setSelection(quote);
     if (activeThreadId && isSidebarShown) {
@@ -888,7 +863,7 @@ function App() {
     }
     return ids.length > 0;
   }
-  const passageIssue = (quote: Quote) => documentError ? 'Document unavailable' : quoteIssue(documentText, quote, content.version);
+  const passageIssue = (quote: Quote) => documentError ? 'Document unavailable' : quoteIssue(content.markdown, quote, content.version);
   async function attachToConversation(attachment: { fileQuote: FileQuote } | { quote: Quote }) {
     const visit = ++fileSelectionVisit.current;
     if ('fileQuote' in attachment) clearPendingSelection();
@@ -1152,7 +1127,7 @@ function App() {
       setPreviewPath(null);
       let tries = 0;
       const reveal = () => {
-        const root = article.current, range = root && quoteRange(root, selection.quote, content.version);
+        const root = article.current, range = root && quoteSourceRange(root, content.markdown, selection.quote, content.version);
         // Leaving the editor mounts the article a render later.
         if (!range) { if (wasEditing && ++tries < 60) requestAnimationFrame(reveal); return; }
         revealRange(range);
@@ -1186,7 +1161,7 @@ function App() {
   }, [revealId, !!state, !!revealTarget, areScriptsEnabled, isBridgeReady]);
   const proposalReview = useProposalReview({
     documentId, proposals: Object.values(state?.proposals ?? {}).filter(p => p.documentId === documentId),
-    selections: selectedMessages.map(item => item.selection), article, version: content.version,
+    selections: selectedMessages.map(item => item.selection), article, markdown: content.markdown, version: content.version,
     isHistorical: !!originalMessageId || !!previewPath,
     decisionBlocked: editStartLine !== null && editStatus.dirty ? 'Save or discard your edits first' : undefined,
     onShowSelection: selectionActions.showPassage, onShowOriginal: selectionActions.showOriginal,

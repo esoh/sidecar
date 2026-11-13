@@ -8,7 +8,7 @@ import type { MessageSelection } from '../src/store.ts';
 import type { DecisionResult, Proposal, ProposalReason } from '../src/proposals.ts';
 import { api, errorText } from './api.ts';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
-import { quoteRange } from './selection.ts';
+import { quoteSourceRange } from './source-dom.ts';
 import { usePosition } from './usePosition.ts';
 
 const explanations: Record<ProposalReason, string> = {
@@ -22,7 +22,7 @@ const explanations: Record<ProposalReason, string> = {
 const statusLabel = (proposal: Proposal) => ({ pending: 'Pending', accepted: 'Accepted', rejected: 'Rejected', outdated: 'Outdated' })[proposal.status];
 type Options = {
   documentId: string; proposals: Proposal[]; selections: MessageSelection[]; article: RefObject<HTMLElement | null>;
-  version: string; isHistorical: boolean; decisionBlocked?: string; onShowSelection: (selection: MessageSelection) => boolean | Promise<boolean>;
+  markdown: string; version: string; isHistorical: boolean; decisionBlocked?: string; onShowSelection: (selection: MessageSelection) => boolean | Promise<boolean>;
   onShowOriginal: (selectionId: string) => void; onReturnToCurrent: () => void;
 };
 type ReviewContext = {
@@ -64,7 +64,7 @@ export function useProposalReview(options: Options) {
   }, [active, close]);
   const anchor = useCallback(() => {
     const root = latest.current.article.current;
-    const range = root && !latest.current.isHistorical && selection && quoteRange(root, selection.quote, latest.current.version);
+    const range = root && !latest.current.isHistorical && selection && quoteSourceRange(root, latest.current.markdown, selection.quote, latest.current.version);
     const rect = range && range.getBoundingClientRect();
     return rect && (rect.width || rect.height) ? rect : active?.invoker?.getBoundingClientRect() ?? root?.getBoundingClientRect();
   }, [active, selection]);

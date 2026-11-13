@@ -62,30 +62,14 @@ export const selectionText = (root: Node) =>
     .map((node) => node.textContent ?? '')
     .join('');
 
-// Sentence context is optional: never truncate the user's selection or attach a long paragraph.
-export function surroundingSentence(text: string, start: number, end: number): string | undefined {
-  const exact = text.slice(start, end).trim();
-  for (const { segment, index } of new Intl.Segmenter('en', { granularity: 'sentence' }).segment(text)) {
-    if (index > start) break;
-    if (start >= index && end <= index + segment.length) {
-      const sentence = segment.trim();
-      return sentence.length <= 512 && sentence !== exact ? sentence : undefined;
-    }
-  }
-  return undefined;
-}
-
-export function selectionSentence(range: Range): string | undefined {
-  const common = range.commonAncestorContainer;
-  const element = common instanceof Element ? common : common.parentElement;
-  const block = element?.closest('p, li, blockquote, pre, td, th, h1, h2, h3, h4, h5, h6');
-  if (!block) return undefined;
-  const before = document.createRange();
-  before.selectNodeContents(block);
-  before.setEnd(range.startContainer, range.startOffset);
-  const start = selectionText(before.cloneContents()).length;
-  before.setEnd(range.endContainer, range.endOffset);
-  return surroundingSentence(selectionText(block), start, selectionText(before.cloneContents()).length);
+/** A quote of `source[start, end)` with 32 characters of source context on each side. */
+export function sourceQuote(source: string, start: number, end: number, version: string): Quote {
+  return {
+    exact: source.slice(start, end),
+    prefix: source.slice(Math.max(0, start - 32), start),
+    suffix: source.slice(end, end + 32),
+    start, end, version, isPositionVerified: true,
+  };
 }
 
 // Convert our UTF-16 text anchors to text-node endpoints for web-highlighter.
