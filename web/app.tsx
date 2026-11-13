@@ -357,6 +357,7 @@ function App() {
   // The main document's reading position, applied once its content has laid out (a few frames at most), then saved on scroll.
   const canvas = useRef<HTMLElement>(null), scrollRestored = useRef('');
   const [editStartLine, setEditStartLine] = useState<number | null>(null), editMode = useRef<EditModeHandle | null>(null), returnLine = useRef<number | null>(null);
+  const isEditing = editStartLine !== null;
   const [editStatus, setEditStatus] = useState({ dirty: false, saving: false });
   const hasCarriageReturn = content.markdown.includes('\r');
   const startEditing = () => {
@@ -387,6 +388,17 @@ function App() {
     [message.fileQuote, ...(message.fileSelections ?? []).map(selection => selection.fileQuote)]
       .flatMap(quote => quote && quote.kind === 'doc' && quote.path === current?.path ? [{ id: thread.id, quote }] : [])));
   const saveFirst = editStatus.dirty ? { beforeSend: () => editMode.current?.save() ?? Promise.resolve(true), sendLabel: 'Save & send' } : {};
+  const leaveEditingFirst = async () => editStartLine === null || !editMode.current || await editMode.current.requestExit();
+  // A quote made in the editor reveals in the editor: enter edit mode if needed, then scroll to its lines once it has mounted.
+  const revealEditQuote = (quote: FileQuote) => {
+    if (editStartLine === null) setEditStartLine(quote.startLine ?? 1);
+    let tries = 0;
+    const reveal = () => {
+      if (editMode.current) editMode.current.revealLines(quote.startLine ?? 1, quote.endLine ?? quote.startLine ?? 1);
+      else if (++tries < 60) requestAnimationFrame(reveal);
+    };
+    requestAnimationFrame(reveal);
+  };
   const leaveEditing = useCallback((line: number) => { returnLine.current = line; setEditStartLine(null); }, []);
   useEffect(() => {
     if (editStartLine !== null || returnLine.current === null) return;
@@ -611,7 +623,7 @@ function App() {
     const observer = new MutationObserver(refresh);
     observer.observe(root, { subtree: true, childList: true, characterData: true });
     return () => observer.disconnect();
-  }, [content.version]);
+  }, [content.version, isEditing]);
   useLayoutEffect(
     () =>
       onCodeHighlightSwap((element) => {
@@ -640,7 +652,7 @@ function App() {
       painter.dispose();
       highlighter.current = null;
     };
-  }, [content.version]);
+  }, [content.version, isEditing]);
   useLayoutEffect(() => {
     const root = article.current,
       painter = highlighter.current;
@@ -682,7 +694,7 @@ function App() {
         mark.title = 'Open passage thread';
       }
     }
-  }, [content.version, anchors, selection, documentError, highlightRevision, documentText, activeMessageId]);
+  }, [content.version, anchors, selection, documentError, highlightRevision, documentText, activeMessageId, isEditing]);
 
   useEffect(() => {
     const outside = (event: MouseEvent) => {
@@ -1096,6 +1108,7 @@ function App() {
   }
   const selectionActions = {
     onOpenFileQuote: (quote: FileQuote, revealId?: string) => {
+      if (quote.kind === 'doc' && quote.path === current?.path && !htmlView && !hasCarriageReturn) return revealEditQuote(quote);
       if (quote.kind === 'html' && quote.selector && revealId && quote.path !== htmlAbsolute) return openHtmlPage(quote.path, revealId);
       if (!htmlView || quote.kind !== 'html' || quote.path !== htmlAbsolute || !quote.selector) return openLink(quote.kind === 'code' ? 'code' : 'doc', quote.path);
       if (innerWidth <= 850) setSidebarShown(false);
@@ -1116,7 +1129,8 @@ function App() {
     activeSelectionId: activeMessageId,
     passageIssue,
     fileQuoteIssue,
-    showOriginal: (selectionId: string) => {
+    showOriginal: async (selectionId: string) => {
+      if (!(await leaveEditingFirst())) return;
       const entry = selectedMessages.find(({ selection }) => selection.id === selectionId);
       if (entry) setActiveThreadId(entry.thread.id);
       clearSelection();
@@ -1126,15 +1140,19 @@ function App() {
       setActiveMessageId(selectionId);
       if (innerWidth <= 850) setSidebarShown(false);
     },
-    showPassage: (selection: import('../src/store.ts').MessageSelection) => {
+    showPassage: async (selection: import('../src/store.ts').MessageSelection) => {
+      const wasEditing = editStartLine !== null;
+      if (!(await leaveEditingFirst())) return;
       const entry = selectedMessages.find(item => item.selection.id === selection.id);
       if (entry) setActiveThreadId(entry.thread.id);
       setActiveMessageId(selection.id);
       setOriginalMessageId(null);
       setPreviewPath(null);
-      requestAnimationFrame(() => {
+      let tries = 0;
+      const reveal = () => {
         const root = article.current, range = root && quoteRange(root, selection.quote, content.version);
-        if (!range) return;
+        // Leaving the editor mounts the article a render later.
+        if (!range) { if (wasEditing && ++tries < 60) requestAnimationFrame(reveal); return; }
         revealRange(range);
         const node = range.startContainer.parentElement;
         node?.scrollIntoView({ block: 'center', behavior: 'smooth' });
@@ -1144,7 +1162,8 @@ function App() {
           for (const mark of highlighter.current?.getDoms(selection.id) ?? [])
             mark.animate([{ boxShadow: '0 0 0 5px oklch(0.75 0.18 280 / 0.6)' }, { boxShadow: '0 0 0 0 transparent' }], { duration: 700 });
         }
-      });
+      };
+      requestAnimationFrame(reveal);
     },
   };
   // ?reveal= from another view: open its thread now, reveal once the user turns on Run scripts and the page is ready.
@@ -1166,6 +1185,7 @@ function App() {
     documentId, proposals: Object.values(state?.proposals ?? {}).filter(p => p.documentId === documentId),
     selections: selectedMessages.map(item => item.selection), article, version: content.version,
     isHistorical: !!originalMessageId || !!previewPath,
+    decisionBlocked: editStartLine !== null && editStatus.dirty ? 'Save or discard your edits first' : undefined,
     onShowSelection: selectionActions.showPassage, onShowOriginal: selectionActions.showOriginal,
     onReturnToCurrent: () => { setOriginalMessageId(null); setPreviewPath(null); },
   });

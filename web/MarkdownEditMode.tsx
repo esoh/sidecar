@@ -5,7 +5,7 @@ import { MarkdownEditor, type MarkdownEditorHandle } from '@plannotator/ui/compo
 import { errorText, saveSource } from './api.ts';
 import type { FileQuote } from '../src/quote.ts';
 import { locateFileQuote } from './edit-quotes.ts';
-import { applyExternalText, quoteMarks, scrollToLine, selectionQuote, setQuoteMarks, topVisibleLine, viewCapture } from './editor-view.ts';
+import { applyExternalText, quoteMarks, revealLineRange, scrollToLine, selectionQuote, setQuoteMarks, topVisibleLine, viewCapture } from './editor-view.ts';
 
 export type EditModeHandle = {
   isDirty(): boolean;
@@ -96,7 +96,7 @@ export function MarkdownEditMode({ documentId, path, markdown, version, diskMark
   }, [leave, save]);
   useImperativeHandle(handleRef, () => ({
     isDirty: () => dirtyNow.current, save, requestExit,
-    revealLines: start => { if (view.current) scrollToLine(view.current, start); },
+    revealLines: (start, end) => { if (view.current) revealLineRange(view.current, start, end); },
   }), [save, requestExit]);
   useEffect(() => () => { handleRef.current = null; }, [handleRef]);
 

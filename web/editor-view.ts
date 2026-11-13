@@ -1,4 +1,4 @@
-import { StateEffect, StateField, Transaction, type Extension } from '@codemirror/state';
+import { EditorSelection, StateEffect, StateField, Transaction, type Extension } from '@codemirror/state';
 import { Decoration, EditorView, ViewPlugin, type DecorationSet } from '@codemirror/view';
 import type { FileQuote } from '../src/quote.ts';
 
@@ -17,6 +17,12 @@ export function topVisibleLine(view: EditorView): number {
 export function scrollToLine(view: EditorView, line: number): void {
   const { from } = view.state.doc.line(Math.min(Math.max(line, 1), view.state.doc.lines));
   view.dispatch({ effects: EditorView.scrollIntoView(from, { y: 'start' }) });
+}
+
+/** Centers the lines' span in the viewport (its start, when the span is taller than the editor). */
+export function revealLineRange(view: EditorView, start: number, end: number): void {
+  const at = (line: number) => view.state.doc.line(Math.min(Math.max(line, 1), view.state.doc.lines));
+  view.dispatch({ effects: EditorView.scrollIntoView(EditorSelection.range(at(start).from, at(Math.max(start, end)).to), { y: 'center' }) });
 }
 
 export function minimalChange(from: string, to: string): { from: number; to: number; insert: string } | null {
