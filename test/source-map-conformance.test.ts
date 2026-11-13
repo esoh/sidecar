@@ -110,7 +110,13 @@ test('kinds that are not mapped return null, matching Plannotator block types', 
   assert.equal(blockMap('::: note\nbody\n:::', 'directive'), null);
 });
 
-test('CRLF fenced code drops the carriage returns', () => {
+test('CRLF fenced code without a language keeps the carriage returns', () => {
+  const s = '```\r\nplain\r\nb\r\n```';
+  assert.equal(blockMap(s, 'code')!.visible, 'plain\r\nb\r');
+  assert.equal(pick(s, 'code', null), s);
+});
+
+test('CRLF fenced code with a language drops the carriage returns', () => {
   const s = '```ts\r\nconst a = 1;\r\nb\r\n```';
   assert.equal(blockMap(s, 'code')!.visible, 'const a = 1;\nb');
   assert.equal(pick(s, 'code', null), s);

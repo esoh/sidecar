@@ -107,5 +107,8 @@ test('unmappable kinds and syntax', () => {
 test('sameVisible', () => {
   assert.ok(sameVisible('say “hi”', 'say "hi"'));
   assert.ok(!sameVisible('say hi', 'say ho'));
+  assert.ok(!sameVisible('plain\nb', 'plain\r\nb\r'));
+  assert.ok(sameVisible('a\nb', 'a b'));
+  assert.ok(!sameVisible('a  b', 'a b'));
 });
 

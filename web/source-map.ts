@@ -3,7 +3,7 @@
 //
 // `visible` models what Plannotator renders (parseMarkdownToBlocks content, then
 // InlineMarkdown's regex scanner, ported below), NOT CommonMark. The conformance
-// test in test/source-map.test.ts renders the real components and compares.
+// test in test/source-map-conformance.test.ts renders the real components and compares.
 
 export type BlockKind =
   | 'paragraph' | 'heading' | 'blockquote' | 'list-item' | 'code'
@@ -168,6 +168,7 @@ function codeMap(source: string, end: number, b: Builder): BlockMap | null {
   const open = trimmed(lines[0]);
   if (!open.t.startsWith('```')) return null;
   const fenceLen = /^`+/.exec(open.t)![0].length;
+  const hasLang = open.t.slice(fenceLen).trim() !== '';
   const closing = new RegExp('^\\s*`{' + fenceLen + ',}');
   let k = 1;
   const body: typeof lines = [];
@@ -177,8 +178,8 @@ function codeMap(source: string, end: number, b: Builder): BlockMap | null {
   b.elements.push({ open: [0, openEnd], close: [closeFrom, end] });
   body.forEach((line, i) => {
     if (i > 0) b.add('\n', line.start - 1, line.start);
-    // \r before \n is not part of the rendered text (innerHTML normalises CRLF).
-    const n = line.text.endsWith('\r') && (i < body.length - 1 || k < lines.length) ? line.text.length - 1 : line.text.length;
+    // With a language, highlighting sets innerHTML, which normalises CRLF; without one the text node keeps \r.
+    const n = hasLang && line.text.endsWith('\r') && (i < body.length - 1 || k < lines.length) ? line.text.length - 1 : line.text.length;
     for (let c = 0; c < n; c++) b.add(line.text[c], line.start + c, line.start + c + 1);
   });
   return b.finish();
@@ -500,9 +501,11 @@ export function visibleSpan(map: BlockMap, start: number, end: number): { start:
   return a < 0 ? null : { start: a, end: z };
 }
 
-const normalize = (t: string) =>
-  t.replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, ' ').trim();
+const fold = (c: string) => (/[‘’]/.test(c) ? "'" : /[“”]/.test(c) ? '"' : /\s/.test(c) ? ' ' : c);
 
+/** True only when `a` and `b` have equal length and match per position (any whitespace equals any whitespace, curly equals straight quotes), so offsets agree 1:1. */
 export function sameVisible(a: string, b: string): boolean {
-  return normalize(a) === normalize(b);
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (fold(a[i]) !== fold(b[i])) return false;
+  return true;
 }
