@@ -5,10 +5,12 @@ import { Icon, MessageContent, PinSymbol, type MessageContentProps } from './con
 import { useMessageSettings } from './TextSettings.tsx';
 import { messagePreview } from './message-copy.ts';
 import { FilePreview, type OpenFile } from './FilePreview.tsx';
+import type { WatchedFile } from './useWatchedFiles.ts';
 import type { FileQuote } from '../src/quote.ts';
 import { ChangedFiles } from './ChangedFiles.tsx';
 import type { Comparison, WorkspaceFileChange } from './useComparison.ts';
 import { usePosition } from './usePosition.ts';
+import { viewKey, readView, writeView, isFinite_, clamp, debouncedSave } from './view-state.ts';
 
 type WindowPosition = { id: string; x: number; y: number; width: number; height: number; layer: number; zoom: number };
 type Point = { x: number; y: number };
@@ -31,8 +33,24 @@ function clampWindow(value: WindowPosition): WindowPosition {
   return { ...value, width, height, x: Math.max(margin, Math.min(value.x, innerWidth - width - margin)), y: Math.max(margin, Math.min(value.y, innerHeight - height - margin)) };
 }
 
-export function PinnedWindows({ workspace, threads, files, root, documentId, comparison, changesScope, openRequests, onOpened, onCloseFile, onSetFileScripts, onSetLineRangeVisible, onCloseChanges, onOpenChange, onQuoteFile, onRevealFile, onGoToMessage, ...contentProps }: {
-  workspace: RefObject<HTMLDivElement | null>; threads: Thread[]; documentId: string;
+// A refresh brings windows back where they were; every value is re-validated and clamped to the current viewport.
+function restoreWindows(stored: Record<string, unknown> | null) {
+  const windows: WindowPosition[] = [];
+  for (const value of (Array.isArray(stored?.windows) ? stored.windows : []).slice(0, 30)) {
+    const v = typeof value === 'object' && value !== null ? value as Record<string, unknown> : null;
+    if (!v || typeof v.id !== 'string' || !isFinite_(v.x) || !isFinite_(v.y) || windows.some(other => other.id === v.id)) continue;
+    windows.push(clampWindow({ id: v.id, x: clamp(v.x, -1e5, 1e5, 0), y: clamp(v.y, -1e5, 1e5, 0), width: clamp(v.width, 240, 1e4, 410), height: clamp(v.height, 160, 1e4, 330), layer: Math.floor(clamp(v.layer, 0, 1e6, 0)), zoom: clamp(v.zoom, 25, 200, 100) }));
+  }
+  const ids = new Set(windows.map(window => window.id)), scrolls: Record<string, number> = {};
+  for (const [id, top] of Object.entries(typeof stored?.scrolls === 'object' && stored.scrolls !== null ? stored.scrolls : {})) if (ids.has(id) && isFinite_(top) && top > 0) scrolls[id] = top;
+  return {
+    windows, scrolls, docked: (Array.isArray(stored?.docked) ? stored.docked : []).filter((id): id is string => typeof id === 'string' && ids.has(id)),
+    activeDock: typeof stored?.activeDock === 'string' ? stored.activeDock : null, expanded: stored?.expanded !== false, height: clamp(stored?.height, minDockHeight, 1e4, 310),
+  };
+}
+
+export function PinnedWindows({ workspace, isRestored, viewScope, threads, files, root, documentId, comparison, changesScope, openRequests, onOpened, onCloseFile, onSetFileScripts, onSetLineRangeVisible, onCloseChanges, onOpenChange, onQuoteFile, onRevealFile, onGoToMessage, watched, onRenderedText, ...contentProps }: {
+  workspace: RefObject<HTMLDivElement | null>; isRestored: boolean; viewScope: string; threads: Thread[]; documentId: string;
   files: OpenFile[]; root?: string; onCloseFile: (id: string) => void; onSetFileScripts: (id: string, enabled: boolean) => void;
   onSetLineRangeVisible: (id: string, visible: boolean) => void;
   comparison: Comparison; changesScope: string | null; onCloseChanges: () => void; onOpenChange: (change: WorkspaceFileChange) => void;
@@ -40,15 +58,22 @@ export function PinnedWindows({ workspace, threads, files, root, documentId, com
   onRevealFile: (path: string) => void;
   openRequests: string[]; onOpened: (ids: string[]) => void;
   onGoToMessage: (id: string) => void;
-} & Pick<MessageContentProps, 'activeSelectionId' | 'passageIssue' | 'showPassage' | 'showOriginal' | 'onQuoteMessage' | 'onOpenFileQuote'>) {
+  watched: Record<string, WatchedFile>; onRenderedText: (id: string, version: string, text: string) => void;
+} & Pick<MessageContentProps, 'activeSelectionId' | 'passageIssue' | 'fileQuoteIssue' | 'showPassage' | 'showOriginal' | 'onQuoteMessage' | 'onOpenFileQuote'>) {
   // Array order records when a window was opened; docking, focus and tab order are independent.
-  const [windows, setWindows] = useState<WindowPosition[]>([]);
-  const [docked, setDocked] = useState<string[]>([]), [activeDock, setActiveDock] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState(true), [height, setHeight] = useState(310);
+  const [initial] = useState(() => restoreWindows(documentId ? readView(viewKey(documentId + viewScope, 'windows')) : null));
+  const [windows, setWindows] = useState<WindowPosition[]>(initial.windows);
+  const [docked, setDocked] = useState<string[]>(initial.docked), [activeDock, setActiveDock] = useState<string | null>(initial.activeDock);
+  const [expanded, setExpanded] = useState(initial.expanded), [height, setHeight] = useState(initial.height);
+  // Scroll tops of window bodies: `scrolls` is what is saved; `pendingScroll` waits for a file's content before being applied once.
+  const scrolls = useRef({ ...initial.scrolls }), pendingScroll = useRef({ ...initial.scrolls });
+  const latest = useRef({ windows, docked, activeDock, expanded, height });
+  latest.current = { windows, docked, activeDock, expanded, height };
+  const saver = useMemo(() => debouncedSave(() => { if (documentId) writeView(viewKey(documentId + viewScope, 'windows'), { ...latest.current, scrolls: scrolls.current }); }), [documentId]);
   const [preview, setPreview] = useState<DockPreview | null>(null);
   const [dragging, setDragging] = useState<string | null>(null), [ghost, setGhost] = useState<Point | null>(null);
   const dock = useRef<HTMLElement>(null), tabs = useRef<HTMLDivElement>(null);
-  const layer = useRef(0), stopGesture = useRef<(() => void) | null>(null);
+  const layer = useRef(Math.max(0, ...initial.windows.map(window => window.layer))), stopGesture = useRef<(() => void) | null>(null);
   const pendingFocus = useRef<string | null>(null);
   const { windowMode } = useMessageSettings();
   const entries = useMemo<WindowEntry[]>(() => [
@@ -70,11 +95,25 @@ export function PinnedWindows({ workspace, threads, files, root, documentId, com
     return entry?.kind === 'file' ? <Icon name="file" /> : entry?.kind === 'changes' ? <Icon name="diff" /> : <PinSymbol style={entry?.message.pinStyle} />;
   };
   useEffect(() => () => stopGesture.current?.(), []);
+  // Restored windows wait for their files and pinned messages to exist before anything unknown is pruned.
   useEffect(() => {
+    if (!isRestored) return;
     const valid = new Set(entries.map(entry => entry.id));
     setWindows(previous => previous.filter(window => valid.has(window.id)));
     setDocked(previous => previous.filter(id => valid.has(id)));
-  }, [ids]);
+  }, [ids, isRestored]);
+  useEffect(() => { if (isRestored) saver.run(); }, [isRestored, saver, windows, docked, activeDock, expanded, height]);
+  useEffect(() => { window.addEventListener('pagehide', saver.flush); return () => { window.removeEventListener('pagehide', saver.flush); saver.flush(); }; }, [saver]);
+  useEffect(() => {
+    for (const [id, top] of Object.entries(pendingScroll.current)) {
+      const entry = find(id), body = document.getElementById(`reference-${id}`)?.querySelector<HTMLElement>('.reference-body') ?? document.getElementById(`dock-panel-${id}`);
+      if (entry?.kind !== 'file' || !watched[id]?.data || !body) continue;
+      delete pendingScroll.current[id];
+      // A line reference scrolls itself to the range; do not fight it.
+      if (!(entry.file.lineRange && entry.file.isLineRangeVisible !== false)) requestAnimationFrame(() => body.scrollTo({ top, behavior: 'instant' }));
+    }
+  }, [watched, windows, docked, activeDock, expanded, ids]);
+  const saveScroll = (id: string | null | undefined, top: number) => { if (id) { scrolls.current[id] = top; saver.run(); } };
   useEffect(() => {
     if (windowMode !== 'single') return;
     stopGesture.current?.();
@@ -85,6 +124,13 @@ export function PinnedWindows({ workspace, threads, files, root, documentId, com
     const valid = new Set(windows.map(window => window.id));
     setDocked(previous => previous.filter(id => valid.has(id)));
   }, [windowIds]);
+  // A file whose window is gone without the close button (single-window displacement or mode switch) stops being open, so it stops polling.
+  // Pending open requests are skipped, and nothing is closed before restore has made its windows.
+  useEffect(() => {
+    if (!isRestored) return;
+    const shown = new Set(windows.map(window => window.id));
+    for (const file of files) if (!shown.has(file.id) && !openRequests.includes(file.id)) onCloseFile(file.id);
+  }, [windowIds, ids, openRequests, isRestored]);
   useEffect(() => {
     const ready = openRequests.filter(id => find(id));
     if (!ready.length) return;
@@ -208,7 +254,7 @@ export function PinnedWindows({ workspace, threads, files, root, documentId, com
   const zoomControls = (id: string) => <ZoomControls zoom={zoomFor(id)} onZoom={zoom => updateWindow(id, { zoom })} />;
   const renderContent = (id: string, prefix: string) => {
     const entry = find(id);
-    if (entry?.kind === 'file') return <FilePreview key={entry.id} {...entry.file} documentId={documentId} root={entry.file.root ?? root} comparison={comparison} onQuoteFile={onQuoteFile} onRevealFile={onRevealFile} onSetLineRangeVisible={visible => onSetLineRangeVisible(entry.id, visible)} onSetScripts={enabled => onSetFileScripts(entry.id, enabled)} />;
+    if (entry?.kind === 'file') return <FilePreview key={entry.id} {...entry.file} documentId={documentId} root={entry.file.root ?? root} loaded={watched[entry.id]} onRenderedText={(version, text) => onRenderedText(entry.id, version, text)} comparison={comparison} onQuoteFile={onQuoteFile} onRevealFile={onRevealFile} onSetLineRangeVisible={visible => onSetLineRangeVisible(entry.id, visible)} onSetScripts={enabled => onSetFileScripts(entry.id, enabled)} />;
     if (entry?.kind === 'changes') return <ChangedFiles documentId={documentId} scope={entry.scope} comparison={comparison} onOpenFile={onOpenChange} />;
     return entry && <div className={`message ${entry.message.role}`}><MessageContent {...contentProps} {...entry} documentId={documentId} prefix={prefix} onGoToMessage={onGoToMessage} /></div>;
   };
@@ -228,7 +274,7 @@ export function PinnedWindows({ workspace, threads, files, root, documentId, com
           <button aria-label="Dock window" title="Dock window" onClick={() => { moveIn(value.id); setExpanded(true); }}><Icon name="dock" /></button>
           <button aria-label={chrome[kindOf(value.id)].close} title="Close window" onClick={() => close(value.id)}><Icon name="close" /></button>
         </header>
-        <div className="reference-body" style={{ zoom: value.zoom / 100 }}>{renderContent(value.id, 'reference')}</div>
+        <div className="reference-body" style={{ zoom: value.zoom / 100 }} onScroll={event => saveScroll(value.id, event.currentTarget.scrollTop)}>{renderContent(value.id, 'reference')}</div>
         {kindOf(value.id) === 'message' && <footer className="reference-footer"><button onClick={() => onGoToMessage(value.id)}>Go to message<Icon name="arrowUpRight" /></button></footer>}
         {['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'].map(edge => <div key={edge} className={`resize-edge resize-${edge}`} onPointerDown={event => resize(event, value, edge)} />)}
       </section>
@@ -270,7 +316,7 @@ export function PinnedWindows({ workspace, threads, files, root, documentId, com
           <button className="dock-toggle" aria-label="Collapse dock" aria-expanded="true" onClick={() => setExpanded(false)}><Icon name="chevron" /></button>
         </> : <button className="dock-collapsed" aria-label="Expand dock" aria-expanded="false" onClick={() => setExpanded(true)}><Icon name="dock" /><span>{visibleDock.length} {visibleDock.length === 1 ? 'window' : 'windows'}</span><Icon name="chevron" /></button>}
       </header>
-      {isDockOpen && <div className="reference-body" style={{ zoom: zoomFor(displayedId) / 100 }} role="tabpanel" tabIndex={-1} id={`dock-panel-${displayedId}`} aria-labelledby={preview ? undefined : `dock-tab-${displayedId}`} aria-label={preview ? 'Dock preview' : undefined}>
+      {isDockOpen && <div className="reference-body" style={{ zoom: zoomFor(displayedId) / 100 }} onScroll={event => saveScroll(preview ? null : displayedId, event.currentTarget.scrollTop)} role="tabpanel" tabIndex={-1} id={`dock-panel-${displayedId}`} aria-labelledby={preview ? undefined : `dock-tab-${displayedId}`} aria-label={preview ? 'Dock preview' : undefined}>
         {displayedId ? renderContent(displayedId, 'dock') : <p className="dock-empty">Drop a window here</p>}
       </div>}
       {isDockOpen && displayedId && !preview && kindOf(displayedId) === 'message' && <footer className="reference-footer"><button onClick={() => onGoToMessage(displayedId)}>Go to message<Icon name="arrowUpRight" /></button></footer>}

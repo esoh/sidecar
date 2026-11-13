@@ -1,6 +1,7 @@
 import { viewerPath, isGateway, libraryPath } from './viewer-path.ts';
-import { HtmlControls, HtmlFileViewer, htmlFullPageUrl, isHtmlPath, revealParameter, isHtmlViewValid, readHtmlView, useHtmlBridge, type HtmlFile } from './HtmlFile.tsx';
+import { HtmlControls, HtmlFileViewer, htmlFullPageUrl, isHtmlPath, revealParameter, isHtmlViewValid, readHtmlView, useHtmlBridge, fileQuery, parseAnchor, parseChain, type AnchorEntry, type BridgeMessage, type HtmlFile } from './HtmlFile.tsx';
 import { ViewerEvents } from './viewer-events.ts';
+import { viewKey, readView, writeView, isFinite_, clamp, debouncedSave, restoreOpenFile } from './view-state.ts';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
@@ -17,7 +18,8 @@ import {
   TitleForm,
 } from './conversations.tsx';
 import { useQuestionDrafts, forgetDocument, type QuestionDraft, type QuestionDrafts } from './useQuestionDrafts.ts';
-import { quoteIssue, quoteRange, selectionText, selectionSentence, excludedSelection } from './selection.ts';
+import { useWatchedFiles } from './useWatchedFiles.ts';
+import { matchQuote, quoteIssue, quoteRange, selectionText, selectionSentence, excludedSelection } from './selection.ts';
 import { revealRange } from './reveal-target.ts';
 import { MarkdownDocument, WorkspaceLinks, type OpenWorkspaceLink } from './MarkdownDocument.tsx';
 import { resolveWorkspaceLink, splitLineSuffix, fileLineRange, pageLinkTarget, type FileLineRange } from './links.ts';
@@ -31,7 +33,7 @@ import { OriginalDocument } from './OriginalDocument.tsx';
 import { FilesPanel } from './FilesPanel.tsx';
 import { useComparison, type WorkspaceFileChange } from './useComparison.ts';
 import { isAnnotatableDocPath } from '@plannotator/core/annotatable';
-import type { OpenFile } from './FilePreview.tsx';
+import { RenderedTextProbe, type OpenFile } from './FilePreview.tsx';
 import { pageTextSelector, type FileQuote } from '../src/quote.ts';
 import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
 import { ResizeHandle } from '@plannotator/ui/components/ResizeHandle';
@@ -77,17 +79,43 @@ function App() {
   const documentId = requestedDocument ?? Object.keys(state?.documents ?? {})[0] ?? '';
   const current = state?.documents[documentId];
   const [unreadCount, setUnreadCount] = useState(0);
-  const [urlHtmlView] = useState(readHtmlView);
+  const [urlHtmlView] = useState(readHtmlView), [initialHash] = useState(() => location.hash);
   // A registered HTML file is itself the document: it always opens in the full-page HTML view.
   const isHtmlDocument = !!current && isHtmlPath(current.path);
-  const htmlView: HtmlFile | null = urlHtmlView ?? (current && isHtmlDocument ? { documentId, path: current.path.slice(current.path.lastIndexOf('/') + 1), root: current.path.slice(0, current.path.lastIndexOf('/')) || '/', fragment: location.hash } : null);
+  const htmlView: HtmlFile | null = urlHtmlView ?? (current && isHtmlDocument ? { documentId, path: current.path.slice(current.path.lastIndexOf('/') + 1), root: current.path.slice(0, current.path.lastIndexOf('/')) || '/', fragment: initialHash } : null);
   const htmlRoot = htmlView && (htmlView.root ?? current?.workspace);
   const htmlAbsolute = htmlView && htmlRoot ? `${htmlRoot.replace(/\/$/, '')}/${htmlView.path}` : undefined;
   // Only an HTML file opened from another document binds its threads; a standalone HTML document is the file itself.
   const threadFile = urlHtmlView ? htmlAbsolute : undefined;
-  const [areScriptsEnabled, setScriptsEnabled] = useState(false), [isBridgeReady, setBridgeReady] = useState(false), [isPicking, setPicking] = useState(false);
+  // Session-scoped consent for the full page: a refresh keeps it, a new tab (noopener links) starts off; a browser "Duplicate tab" may copy sessionStorage.
+  const scriptsKey = htmlAbsolute ? `sidecar-run-scripts:${viewerPath('/')}:${documentId}:${htmlAbsolute}` : undefined;
+  const [scriptChoice, setScriptChoice] = useState<{ key: string; enabled: boolean } | null>(null);
+  const storedScripts = useMemo(() => { try { return !!scriptsKey && sessionStorage.getItem(scriptsKey) === '1'; } catch { return false; } }, [scriptsKey]);
+  const areScriptsEnabled = !!scriptsKey && (scriptChoice?.key === scriptsKey ? scriptChoice.enabled : storedScripts);
+  const [isBridgeReady, setBridgeReady] = useState(false), [isPicking, setPicking] = useState(false);
   const [htmlNotice, setHtmlNotice] = useState(''), [htmlZoom, setHtmlZoom] = useState(100);
   const frameRef = useRef<HTMLIFrameElement>(null);
+  // The page's own hash (which step it shows) lives in the top URL via replaceState; the frame only takes it at its next reload, never on each change.
+  const frameHash = useRef<string | null>(null), frameChain = useRef<{ hash: string; chain: AnchorEntry[] } | null>(null), hashFresh = useRef(true), syncedHash = useRef<string | null>(null), bridgeLive = useRef(false), [htmlFragment, setHtmlFragment] = useState<string | undefined>();
+  // Per-tab page position and zoom; saved on change, so the restore (below) must read before anything writes.
+  // File windows belong to the view they were opened in: the document and each full-page HTML view keep separate sets.
+  const viewScope = urlHtmlView ? `|html:${urlHtmlView.root ?? ''}/${urlHtmlView.path}` : '';
+  const htmlViewKey = htmlAbsolute ? viewKey(documentId, `html:${htmlAbsolute}`) : '';
+  const htmlZoomNow = useRef(100), htmlSaver = useMemo(() => debouncedSave(() => {
+    if (htmlViewKey) writeView(htmlViewKey, { zoom: htmlZoomNow.current, scroll: pageScroll.current ?? readView(htmlViewKey)?.scroll, hashChain: frameChain.current, syncedHash: syncedHash.current });
+  }), [htmlViewKey]);
+  useEffect(() => {
+    const stored = htmlViewKey ? readView(htmlViewKey) : null;
+    if (!stored) return;
+    if (isFinite_(stored.zoom)) { htmlZoomNow.current = clamp(stored.zoom, 25, 200, 100); setHtmlZoom(htmlZoomNow.current); }
+    const scroll = stored.scroll as Record<string, unknown> | undefined;
+    if (scroll && isFinite_(scroll.x) && isFinite_(scroll.y)) restoreScroll.current = pageScroll.current = { type: 'scroll', x: scroll.x, y: scroll.y, anchor: parseAnchor(scroll.anchor) };
+    if (typeof stored.syncedHash === 'string' && stored.syncedHash === location.hash) syncedHash.current = stored.syncedHash;
+    const saved = stored.hashChain as Record<string, unknown> | null | undefined, chain = parseChain(saved?.chain);
+    if (typeof saved?.hash === 'string' && saved.hash === location.hash && chain) frameChain.current = { hash: saved.hash, chain };
+  }, [htmlViewKey]);
+  useEffect(() => { window.addEventListener('pagehide', htmlSaver.flush); return () => { window.removeEventListener('pagehide', htmlSaver.flush); htmlSaver.flush(); }; }, [htmlSaver]);
+  const changeHtmlZoom = (zoom: number) => { htmlZoomNow.current = zoom; setHtmlZoom(zoom); htmlSaver.run(); };
   useEffect(() => {
     const prefix = unreadCount ? `(${unreadCount}) ` : '';
     if (urlHtmlView) document.title = `${prefix}${urlHtmlView.path.split('/').pop() || 'HTML file'} — Sidecar`;
@@ -172,6 +200,13 @@ function App() {
   useEffect(() => { rootVisit.current++; setVisibleRoot(null); setFileReveal(null); setChangesScope(null); }, [documentId, current?.workspace]);
   const browserRoot = visibleRoot ?? current?.workspace;
   const [files, setFiles] = useState<OpenFile[]>([]);
+  // Open files and the full page are polled by this tab alone (conditional requests), so edits show without a reload.
+  const watchedSources = useMemo(() => [
+    ...files.filter(file => !file.refusal).map(file => ({ key: file.id, url: `/api/files/${file.kind === 'code' ? 'code' : 'content'}?${fileQuery({ documentId, path: file.path, root: file.root ?? current?.workspace })}` })),
+    ...(htmlView && htmlRoot ? [{ key: 'page', url: `/api/files/html?${fileQuery({ ...htmlView, root: htmlRoot })}`, method: 'HEAD' as const }] : []),
+  ], [files, documentId, current?.workspace, htmlView?.path, htmlView?.root, htmlRoot]);
+  const watched = useWatchedFiles(watchedSources);
+  const [renderedText, setRenderedText] = useState<Record<string, { version: string; text: string }>>({});
   const comparison = useComparison(documentId, current?.workspace, current?.baseBranch, !!current?.workspace && (isFilesShown || !!changesScope || files.length > 0));
   const fileThread = useRef<Promise<Thread> | null>(null);
   const fileSelectionVisit = useRef(0);
@@ -297,6 +332,51 @@ function App() {
     if (directory === current?.workspace) return directory;
     return (await api<{ root: string }>('/api/files/root', { documentId, directory })).root;
   }, [documentId, current?.workspace]);
+  // A refresh restores open file windows. Stored paths are only requests: each root goes back through allowRoot (the server decides), and a refused one drops its files.
+  const [restoredView, setRestoredView] = useState(''), hasState = !!state;
+  useEffect(() => {
+    if (!hasState || !documentId) return;
+    const stored = readView(viewKey(documentId + viewScope, 'files')), scope = typeof stored?.changesScope === 'string' ? stored.changesScope : null;
+    const wanted = (Array.isArray(stored?.files) ? stored.files.slice(0, 20) : []).map(restoreOpenFile).filter(file => !!file);
+    let isCurrent = true;
+    void Promise.all(wanted.map(file => allowRoot(file.root!).then(() => file, () => null))).then(results => {
+      if (!isCurrent) return;
+      const kept = results.filter(file => !!file);
+      setFiles(previous => [...previous, ...kept.filter(file => !previous.some(other => other.id === file.id))]);
+      if (scope) setChangesScope(previous => previous ?? scope);
+      setRestoredView(documentId);
+    });
+    return () => { isCurrent = false; };
+  }, [hasState, documentId, viewScope]);
+  // Saved only after the restore: the empty initial state must never overwrite what is stored.
+  useEffect(() => {
+    if (documentId && restoredView === documentId) writeView(viewKey(documentId + viewScope, 'files'), { files: files.filter(file => !file.refusal), changesScope });
+  }, [files, changesScope, restoredView, documentId, viewScope]);
+  // The main document's reading position, applied once its content has laid out (a few frames at most), then saved on scroll.
+  const canvas = useRef<HTMLElement>(null), scrollRestored = useRef('');
+  const scrollKey = documentId ? viewKey(documentId, 'scroll') : '';
+  const isReading = hasState && !htmlView && !closedDocument;
+  useEffect(() => {
+    const node = canvas.current;
+    if (!isReading || !scrollKey || !content.version || !node || scrollRestored.current === scrollKey) return;
+    const top = readView(scrollKey)?.top;
+    let frames = 0, frame = 0;
+    const apply = () => {
+      if (isFinite_(top) && node.scrollHeight - node.clientHeight < top && ++frames < 30) { frame = requestAnimationFrame(apply); return; }
+      if (isFinite_(top)) node.scrollTo({ top, behavior: 'instant' });
+      scrollRestored.current = scrollKey;
+    };
+    frame = requestAnimationFrame(apply);
+    return () => cancelAnimationFrame(frame);
+  }, [isReading, scrollKey, content.version]);
+  useEffect(() => {
+    const node = canvas.current;
+    if (!isReading || !node || !scrollKey) return;
+    const saver = debouncedSave(() => writeView(scrollKey, { top: node.scrollTop }));
+    const onScroll = () => { if (scrollRestored.current === scrollKey) saver.run(); };
+    node.addEventListener('scroll', onScroll, { passive: true }); window.addEventListener('pagehide', saver.flush);
+    return () => { node.removeEventListener('scroll', onScroll); window.removeEventListener('pagehide', saver.flush); saver.flush(); };
+  }, [isReading, scrollKey]);
   const changeVisibleRoot = useCallback(async (directory: string, revealPath?: string) => {
     const visit = ++rootVisit.current;
     try {
@@ -800,15 +880,40 @@ function App() {
     if (htmlAbsolute) void attachToConversation({ fileQuote: { path: htmlAbsolute, kind: 'html', exact, selector, ...(fingerprint ? { isElement: true, fingerprint } : {}) } });
   };
   // The last reported page position, restored only after an agent revision reloads the frame (never after a user's own change).
-  const pageScroll = useRef<{ type: 'scroll'; x: number; y: number } | null>(null), restoreScroll = useRef<typeof pageScroll.current>(null);
+  const [htmlChecks, setHtmlChecks] = useState<Record<string, boolean>>({}), checkRequest = useRef<{ id: number; keys: string[] }>({ id: 0, keys: [] });
+  const pageScroll = useRef<Extract<BridgeMessage, { type: 'scroll' }> | null>(null), restoreScroll = useRef<typeof pageScroll.current>(null);
   const postBridge = useHtmlBridge(frameRef, message => {
-    if (message.type === 'ready') {
-      setBridgeReady(true); setPicking(false);
+    if (message.type === 'hash') {
+      if (!htmlView) return;
+      const first = hashFresh.current, chain = frameChain.current?.hash === message.hash ? frameChain.current.chain : [];
+      hashFresh.current = false;
+      if (first && message.missing && syncedHash.current === message.hash) {
+        // Only a load's first report counts (a later click on a dead link keeps its hash). Start clean: no notice-less stale URL, no saved scroll.
+        frameHash.current = ''; syncedHash.current = null; frameChain.current = null; pageScroll.current = restoreScroll.current = null;
+        if (htmlViewKey) writeView(htmlViewKey, { zoom: htmlZoomNow.current });
+        history.replaceState(history.state, '', location.pathname + location.search);
+        setHtmlNotice(`Section ${message.hash} is no longer on this page.`);
+        // With the full bridge the page can go to the nearest surviving parent section; otherwise (or if none survives) the top.
+        if (bridgeLive.current && chain.length) postBridge({ type: 'nearest', chain }); else postBridge({ type: 'scroll', x: 0, y: 0 });
+        return;
+      }
+      // A hash the page never had (a link's own #fragment used as data) is left alone; only one we saw present can go "missing".
+      frameHash.current = message.hash; if (!message.missing) syncedHash.current = message.hash;
+      htmlSaver.run();
+      if (location.hash !== message.hash) history.replaceState(history.state, '', location.pathname + location.search + message.hash);
+    }
+    else if (message.type === 'hash-anchor') { frameChain.current = { hash: message.hash, chain: message.chain }; htmlSaver.run(); }
+    else if (message.type === 'nearest') {
+      if (message.ok) setHtmlNotice(notice => notice.replace(/\.$/, '; showing the nearest remaining section.'));
+      else postBridge({ type: 'scroll', x: 0, y: 0 });
+    }
+    else if (message.type === 'ready') {
+      bridgeLive.current = true; setBridgeReady(true); setPicking(false);
       if (restoreScroll.current) postBridge(restoreScroll.current);
       restoreScroll.current = null;
     }
     else if (message.type === 'scroll') {
-      pageScroll.current = message;
+      pageScroll.current = message; htmlSaver.run();
       // The quick menu would no longer sit beside the text; an attached quote stays on the draft.
       if (htmlPending && !composing) setHtmlPending(null);
     }
@@ -837,6 +942,7 @@ function App() {
     else if (message.type === 'pick') { setPicking(false); attachHtml(message.exact, message.selector, message.fingerprint); }
     else if (message.type === 'picker') setPicking(false);
     else if (message.type === 'open-file') openPageLink(message.href);
+    else if (message.type === 'checked') { if (message.id === checkRequest.current.id) setHtmlChecks(Object.fromEntries(checkRequest.current.keys.map((key, index) => [key, message.results[index]]))); }
     else setHtmlNotice(message.ok ? '' : 'This part of the page changed or was removed since it was attached.');
   });
   // Page links are untrusted input: open only files inside the registered workspace, never grant another root.
@@ -851,19 +957,77 @@ function App() {
     setHtmlNotice('');
     openPreview(target.path, undefined, isAnnotatableDocPath(target.path) ? 'doc' : 'code', root, target.fragment, target.lineRange);
   };
-  const changeScripts = (enabled: boolean) => {
-    setScriptsEnabled(enabled); setBridgeReady(false); setPicking(false); setHtmlNotice(''); pageScroll.current = null; restoreScroll.current = null;
+  const resetFrame = () => {
+    setBridgeReady(false); setPicking(false); setHtmlNotice(''); setHtmlChecks({}); pageScroll.current = null; restoreScroll.current = null;
+    hashFresh.current = true; bridgeLive.current = false;
+    if (frameHash.current !== null) setHtmlFragment(frameHash.current);
     // The reloaded page has no selection; only typed floating-comment text keeps its quote.
     if (htmlPending && !(composing && passageDrafts.current.get(draftKey)?.text.trim())) clearPendingSelection();
   };
-  // Agent revisions to a standalone HTML document reload its frame, keeping the Run scripts choice.
-  const htmlRevision = isHtmlDocument && !urlHtmlView ? current?.version ?? '' : '';
+  const changeScripts = (enabled: boolean) => {
+    if (scriptsKey) {
+      setScriptChoice({ key: scriptsKey, enabled });
+      try { if (enabled) sessionStorage.setItem(scriptsKey, '1'); else sessionStorage.removeItem(scriptsKey); } catch { /* Blocked storage: the in-memory choice still applies. */ }
+    }
+    resetFrame();
+  };
+  // An agent's edit reloads the frame, keeping Run scripts and the reading position. The first version seen only
+  // records itself: remounting then would spend an extra script ticket and flash.
+  // The page's own watcher entry is the version and availability source for both views (registered documents too).
+  const pageVersion = watched.page?.version, pageDown = !!pageVersion?.startsWith('error:'), pageStatus = watched.page?.status;
+  const seenVersion = useRef(''), wasDown = useRef(false), [htmlReload, setHtmlReload] = useState(0);
   useEffect(() => {
-    if (!htmlRevision) return;
+    if (!pageVersion) return;
+    if (pageDown) {
+      // Unavailable: the frame unmounts, so nothing it reported is valid; the last scroll/anchor stays for the return.
+      wasDown.current = true; setBridgeReady(false); setPicking(false); setHtmlChecks({}); bridgeLive.current = false;
+      return;
+    }
+    const before = seenVersion.current, recovered = wasDown.current;
+    seenVersion.current = pageVersion; wasDown.current = false;
+    if (!recovered && (!before || before === pageVersion)) return;
     const position = pageScroll.current;
-    changeScripts(areScriptsEnabled);
+    resetFrame();
     restoreScroll.current = position;
-  }, [htmlRevision]);
+    setHtmlReload(count => count + 1);
+  }, [pageVersion]);
+  // Saved HTML quotes for this page are checked inside the frame (bridge) whenever it loads or the set changes.
+  const htmlQuoteKey = (quote: FileQuote) => `${quote.selector}\0${quote.exact}\0${quote.fingerprint ?? ''}`;
+  const htmlQuotes = useMemo(() => {
+    const quotes = new Map<string, FileQuote>();
+    for (const thread of threads) for (const message of thread.messages) for (const quote of [message.fileQuote, ...(message.fileSelections ?? []).map(selection => selection.fileQuote)])
+      if (quote?.kind === 'html' && quote.selector && quote.path === htmlAbsolute) quotes.set(htmlQuoteKey(quote), quote);
+    return [...quotes].slice(0, 500);
+  }, [threads, htmlAbsolute]);
+  const htmlQuotesJson = JSON.stringify(htmlQuotes);
+  useEffect(() => {
+    if (!isBridgeReady || !htmlQuotes.length) return;
+    checkRequest.current = { id: checkRequest.current.id + 1, keys: htmlQuotes.map(([key]) => key) };
+    postBridge({ type: 'check', id: checkRequest.current.id, items: htmlQuotes.map(([, quote]) => ({ selector: quote.selector, exact: quote.exact, isElement: !!quote.isElement, fingerprint: quote.fingerprint })) });
+  }, [isBridgeReady, htmlQuotesJson]);
+  // Docked or collapsed Markdown has no mounted article, so a hidden probe renders just the files whose saved rendered-text quotes need it.
+  const probes = useMemo(() => {
+    const exacts = new Map<string, string[]>();
+    for (const thread of threads) for (const message of thread.messages) for (const quote of [message.fileQuote, ...(message.fileSelections ?? []).map(selection => selection.fileQuote)])
+      if (quote && quote.kind !== 'html' && !quote.startLine) exacts.set(quote.path, [...(exacts.get(quote.path) ?? []), quote.exact]);
+    return files.flatMap(file => {
+      const entry = watched[file.id], data = entry?.data, wanted = exacts.get(`${(file.root ?? current?.workspace ?? '').replace(/\/$/, '')}/${file.path}`);
+      if (file.refusal || file.kind !== 'doc' || data?.renderAs !== 'markdown' || !wanted || renderedText[file.id]?.version === entry.version) return [];
+      return wanted.some(exact => matchQuote(data.text, { exact, prefix: '', suffix: '' } as Quote).status === 'missing') ? [{ id: file.id, version: entry.version, text: data.text }] : [];
+    });
+  }, [threads, files, watched, renderedText, current?.workspace]);
+  // null means fine or unknown; a quote is never called changed without evidence.
+  const fileQuoteIssue = (quote: FileQuote): string | null => {
+    if (quote.kind === 'html') return isBridgeReady && quote.path === htmlAbsolute && htmlChecks[htmlQuoteKey(quote)] === false ? 'Selection changed' : null;
+    const file = files.find(file => !file.refusal && `${(file.root ?? current?.workspace ?? '').replace(/\/$/, '')}/${file.path}` === quote.path), entry = file && watched[file.id];
+    if (entry?.status === 404) return 'File unavailable';
+    if (!file || entry?.data === undefined) return null;
+    const has = (text: string) => matchQuote(text, { exact: quote.exact, prefix: '', suffix: '' } as Quote).status !== 'missing';
+    if (has(entry.data.text)) return null;
+    // A line quote is source text; a rendered-Markdown quote may still be on screen even where the source differs.
+    const shown = renderedText[file.id];
+    return quote.startLine || (shown?.version === entry.version && !has(shown.text)) ? 'Selection changed' : null;
+  };
   const togglePicker = (on: boolean) => { setPicking(on); postBridge({ type: 'picker', on }); };
   useEffect(() => {
     if (!isPicking) return;
@@ -908,6 +1072,7 @@ function App() {
     },
     activeSelectionId: activeMessageId,
     passageIssue,
+    fileQuoteIssue,
     showOriginal: (selectionId: string) => {
       const entry = selectedMessages.find(({ selection }) => selection.id === selectionId);
       if (entry) setActiveThreadId(entry.thread.id);
@@ -1005,7 +1170,7 @@ function App() {
       <div className={`viewer${htmlView ? ' html-view' : ''}`} ref={viewer} data-chat-open={isSidebarShown}>
       <header className={`topbar${htmlView ? ' html-topbar' : ''}`}>
         {htmlView ? <HtmlControls file={htmlView} isDocument={!urlHtmlView} areScriptsEnabled={areScriptsEnabled} onScripts={changeScripts} isReady={areScriptsEnabled && isBridgeReady}
-          isPicking={isPicking} onPick={() => togglePicker(!isPicking)} zoom={htmlZoom} onZoom={setHtmlZoom} /> : <>
+          isPicking={isPicking} onPick={() => togglePicker(!isPicking)} zoom={htmlZoom} onZoom={changeHtmlZoom} /> : <>
         <div className="brand">
           <Icon name="logo" />
           <span>Sidecar</span>
@@ -1032,7 +1197,7 @@ function App() {
         <AgentStatus state={state} connected={connected} />
         <TextSettings version={state?.appVersion}>
           {/* Also here because a phone header has no room for the page's zoom controls. */}
-          {htmlView && <div className="text-settings-heading brightness-heading"><span>HTML page zoom</span><ZoomControls zoom={htmlZoom} onZoom={setHtmlZoom} /></div>}
+          {htmlView && <div className="text-settings-heading brightness-heading"><span>HTML page zoom</span><ZoomControls zoom={htmlZoom} onZoom={changeHtmlZoom} /></div>}
         </TextSettings>
         <button
           className="sidebar-toggle conversation-toggle"
@@ -1081,10 +1246,11 @@ function App() {
           </>
         )}
         <div className="document-workspace" id="document-workspace" ref={workspace}>
-        <main className={`canvas${htmlView ? ' html-canvas' : ''}`} style={htmlView ? { '--html-zoom': htmlZoom / 100 } as React.CSSProperties : undefined}>
+        <main ref={canvas} className={`canvas${htmlView ? ' html-canvas' : ''}`} style={htmlView ? { '--html-zoom': htmlZoom / 100 } as React.CSSProperties : undefined}>
           {htmlView ? <>
             {htmlNotice && <p className="html-notice" role="status">{htmlNotice}</p>}
-            {htmlView.root || current?.workspace ? <HtmlFileViewer key={`${htmlView.path}:${htmlRoot}:${htmlRevision}`} file={htmlView} areScriptsEnabled={areScriptsEnabled} bridge frameRef={frameRef} />
+            {pageDown ? <p role="alert">This HTML file is unavailable (HTTP {pageStatus}). It reloads when the file is back.</p>
+              : htmlView.root || current?.workspace ? <HtmlFileViewer key={`${htmlView.path}:${htmlRoot}:${htmlReload}`} file={htmlFragment === undefined ? htmlView : { ...htmlView, fragment: htmlFragment }} areScriptsEnabled={areScriptsEnabled} bridge frameRef={frameRef} />
               : state ? <p role="alert">This document has no recorded workspace. Reopen it from your agent.</p> : <p role="status">Loading HTML file…</p>}
           </> : <div className="reading-width">
             {originalMessage?.quote && activeThreadId && (
@@ -1135,7 +1301,8 @@ function App() {
             </article>
           </div>}
         </main>
-        <PinnedWindows key={documentId} workspace={workspace} threads={threads} files={files} onSetLineRangeVisible={(id, visible) => setFiles(previous => previous.map(file => file.id === id ? { ...file, isLineRangeVisible: visible } : file))} onSetFileScripts={(id, enabled) => setFiles(previous => previous.map(file => file.id === id ? { ...file, areScriptsEnabled: enabled } : file))} root={current?.workspace} documentId={documentId} comparison={comparison} changesScope={changesScope} onCloseChanges={() => setChangesScope(null)} onOpenChange={openChange} onQuoteFile={fileQuote => attachToConversation({ fileQuote })} onRevealFile={revealFile} openRequests={openPins} onOpened={ids => setOpenPins(previous => previous.filter(id => !ids.includes(id)))} onCloseFile={id => {
+        {probes.map(probe => <RenderedTextProbe key={`${probe.id}:${probe.version}`} text={probe.text} onText={text => setRenderedText(previous => previous[probe.id]?.version === probe.version && previous[probe.id].text === text ? previous : { ...previous, [probe.id]: { version: probe.version, text } })} />)}
+        <PinnedWindows key={documentId} viewScope={viewScope} isRestored={restoredView === documentId} watched={watched} onRenderedText={(id, version, text) => setRenderedText(previous => previous[id]?.version === version && previous[id].text === text ? previous : { ...previous, [id]: { version, text } })} workspace={workspace} threads={threads} files={files} onSetLineRangeVisible={(id, visible) => setFiles(previous => previous.map(file => file.id === id ? { ...file, isLineRangeVisible: visible } : file))} onSetFileScripts={(id, enabled) => setFiles(previous => previous.map(file => file.id === id ? { ...file, areScriptsEnabled: enabled } : file))} root={current?.workspace} documentId={documentId} comparison={comparison} changesScope={changesScope} onCloseChanges={() => setChangesScope(null)} onOpenChange={openChange} onQuoteFile={fileQuote => attachToConversation({ fileQuote })} onRevealFile={revealFile} openRequests={openPins} onOpened={ids => setOpenPins(previous => previous.filter(id => !ids.includes(id)))} onCloseFile={id => {
           setFiles(previous => previous.filter(file => file.id !== id));
           setPreviewPath(previous => `file:${previous}` === id ? null : previous);
         }} {...selectionActions} onGoToMessage={goToMessage} />

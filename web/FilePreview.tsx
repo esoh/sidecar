@@ -1,7 +1,8 @@
-import { useEffect, useId, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { guideLanguageForPath } from '@plannotator/core/guide-format';
 import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
-import type { CodeFileData, FileDiffData, FilePreviewData } from '../src/files.ts';
+import type { FileDiffData } from '../src/files.ts';
+import type { WatchedFile } from './useWatchedFiles.ts';
 import { api, errorText } from './api.ts';
 import { HtmlFileFrame, RunHtmlScripts, htmlFullPageUrl } from './HtmlFile.tsx';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
@@ -21,15 +22,15 @@ function fenced(language: string, text: string) {
 
 export type OpenFile = { id: string; path: string; root?: string; kind: 'doc' | 'code'; refusal?: string; fragment?: string; lineRange?: FileLineRange; isLineRangeVisible?: boolean; areScriptsEnabled?: boolean; revision: number };
 
-export function FilePreview({ documentId, root, path, kind, refusal, revision, fragment, lineRange, isLineRangeVisible = true, onSetLineRangeVisible, areScriptsEnabled = false, comparison, onQuoteFile, onRevealFile, onSetScripts }: {
-  documentId: string; root?: string; comparison: Comparison; onQuoteFile: (quote: FileQuote) => void;
+export function FilePreview({ documentId, root, path, kind, refusal, revision, fragment, lineRange, isLineRangeVisible = true, onSetLineRangeVisible, areScriptsEnabled = false, comparison, onQuoteFile, onRevealFile, onSetScripts, loaded, onRenderedText }: {
+  documentId: string; loaded?: WatchedFile; onRenderedText?: (version: string, text: string) => void; root?: string; comparison: Comparison; onQuoteFile: (quote: FileQuote) => void;
   onSetLineRangeVisible: (visible: boolean) => void;
   onRevealFile: (path: string) => void; onSetScripts: (enabled: boolean) => void;
 } & OpenFile) {
   const anchorPrefix = useId();
-  const [preview, setPreview] = useState<FilePreviewData | null>(null),
-    [error, setError] = useState(''),
-    [isCopied, setCopied] = useState(false);
+  // Contents come from the app's poll (useWatchedFiles); the previous text stays up until the new text arrives.
+  const preview = loaded?.data ?? null, [copyError, setCopyError] = useState(''), error = loaded?.error ?? copyError;
+  const [isCopied, setCopied] = useState(false);
   const absolute = root ? `${root.replace(/\/$/, '')}/${path}` : undefined;
   const { status, mode, base, revision: comparisonRevision } = comparison;
   const change = absolute && status?.available ? status.files[absolute] : undefined;
@@ -47,18 +48,7 @@ export function FilePreview({ documentId, root, path, kind, refusal, revision, f
     api<FileDiffData>(`/api/files/diff?document=${encodeURIComponent(documentId)}&path=${encodeURIComponent(absolute)}&mode=${mode}${mode === 'base' ? `&base=${encodeURIComponent(base!)}` : ''}`)
       .then(result => { if (!stopped) setDiff(result); }, reason => { if (!stopped) { setDiff(null); setDiffError(errorText(reason)); } });
     return () => { stopped = true; };
-  }, [diffOn, documentId, absolute, mode, base, comparisonRevision]);
-  useEffect(() => {
-    if (refusal || isDeleted) return;
-    let stopped = false;
-    setPreview(null);
-    setError('');
-    api<FilePreviewData | CodeFileData>(`/api/files/${kind === 'code' ? 'code' : 'content'}?document=${encodeURIComponent(documentId)}&path=${encodeURIComponent(path)}${root ? `&directory=${encodeURIComponent(root)}` : ''}`)
-      .then((loaded) => {
-        if (!stopped) setPreview('codeFile' in loaded ? { path: loaded.filepath, text: loaded.contents, renderAs: 'markdown' } : loaded);
-      }, (reason) => { if (!stopped) setError(errorText(reason)); });
-    return () => { stopped = true; };
-  }, [documentId, root, path, kind, refusal, revision, isDeleted]);
+  }, [diffOn, documentId, absolute, mode, base, comparisonRevision, loaded?.version]);
   const isSource = !!lineRange || preview?.renderAs === 'text' || kind === 'code' || /\.(jsonc?|json5|ya?ml)$/i.test(path);
   const lineCount = useMemo(() => preview?.text.split('\n').length ?? 0, [preview?.text]);
   const hasLineRange = !!lineRange && !!preview && !isDeleted && !error && lineRange.end <= lineCount;
@@ -88,28 +78,32 @@ export function FilePreview({ documentId, root, path, kind, refusal, revision, f
       <MarkdownDiff old={asMarkdown(diff.old)} current={asMarkdown(diff.current)} anchorPrefix={`${anchorPrefix}-`} linkBase={root && `${root}/${path}`.replace(/\/[^/]*$/, '')}
         source={<CodeDiff path={path} old={diff.old} current={diff.current} onQuote={quoteLines} />} />
     </article>);
+  const article = useRef<HTMLElement>(null), reportText = useRef(onRenderedText);
+  reportText.current = onRenderedText;
+  // Rendered Markdown text lets the app tell whether a saved rendered-text quote is still on screen.
+  useEffect(() => { if (article.current && loaded?.version) reportText.current?.(loaded.version, selectionText(article.current)); }, [loaded?.version, markdown, diffOn]);
   if (refusal) return (
     <section className="file-preview" aria-label="File preview">
       <p>{refusal}</p>
       <p className="file-refusal">
         <code>{path}</code>
-        <button onClick={async () => { if (await copyTextToClipboard(path)) setCopied(true); else setError('Could not copy path.'); }}>{isCopied ? 'Copied' : 'Copy path'}</button>
+        <button onClick={async () => { if (await copyTextToClipboard(path)) setCopied(true); else setCopyError('Could not copy path.'); }}>{isCopied ? 'Copied' : 'Copy path'}</button>
       </p>
       {error && <p role="alert">{error}</p>}
     </section>
   );
-  const plain = error ? (
-    <p role="alert">{error}</p>
-  ) : isDeleted ? (
+  const plain = isDeleted ? (
     <p>This file was deleted in the current comparison.</p>
+  ) : error ? (
+    <p role="alert">{error}</p>
   ) : !preview ? (
     <p role="status">Loading file…</p>
   ) : sourceLanguage ? (
     <CodeFileView path={path} contents={preview.text} lineRange={shownRange} revision={revision} onQuote={quote => root && onQuoteFile({ path: `${root.replace(/\/$/, '')}/${preview.path}`, kind, ...quote })} />
   ) : markdown === null ? (
-    <HtmlFileFrame documentId={documentId} path={path} root={root} fragment={fragment} revision={revision} areScriptsEnabled={areScriptsEnabled} />
+    <HtmlFileFrame documentId={documentId} path={path} root={root} fragment={fragment} revision={`${revision}:${loaded?.version ?? ''}`} areScriptsEnabled={areScriptsEnabled} />
   ) : (
-    <article onMouseUp={event => capture(event.currentTarget)} onTouchEnd={event => capture(event.currentTarget)} onKeyUp={event => { if (event.key === 'Shift' || event.key.startsWith('Arrow')) capture(event.currentTarget); }}>
+    <article ref={article} onMouseUp={event => capture(event.currentTarget)} onTouchEnd={event => capture(event.currentTarget)} onKeyUp={event => { if (event.key === 'Shift' || event.key.startsWith('Arrow')) capture(event.currentTarget); }}>
       {/* An empty document ID keeps relative images from resolving against the open document's folder. */}
       <MarkdownDocument markdown={markdown} documentId="" anchorPrefix={`${anchorPrefix}-`} linkBase={root && `${root}/${path}`.replace(/\/[^/]*$/, '')} />
     </article>
@@ -133,4 +127,12 @@ export function FilePreview({ documentId, root, path, kind, refusal, revision, f
       {!diffOn ? plain : diff ? diffView : diffError ? <><p role="alert">Diff unavailable: {diffError}</p>{plain}</> : <p role="status">Loading diff…</p>}
     </section>
   );
+}
+
+// Off-screen render of a Markdown file's text so rendered-text quote checks work while its window is docked or collapsed.
+export function RenderedTextProbe({ text, onText }: { text: string; onText: (text: string) => void }) {
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => { if (box.current) onText(selectionText(box.current)); }, [text]);
+  // Not aria-hidden: selectionText skips such subtrees, and `hidden` already removes it from the accessibility tree.
+  return <div ref={box} hidden {...{ inert: true }}><MarkdownDocument markdown={text} documentId="" /></div>;
 }

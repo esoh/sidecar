@@ -10,7 +10,7 @@ export { isHtmlPath } from '../src/quote.ts';
 export type HtmlFile = { documentId: string; path: string; root?: string; fragment?: string };
 const scriptWarning = 'Only enable for trusted HTML. Blocks external resources and viewer access, but scripts can navigate their own frame.';
 
-function fileQuery({ documentId, path, root }: HtmlFile) {
+export function fileQuery({ documentId, path, root }: HtmlFile) {
   return new URLSearchParams({ document: documentId, path, ...(root ? { directory: root } : {}) });
 }
 
@@ -27,7 +27,7 @@ export function readHtmlView(): HtmlFile | null {
 }
 export const isHtmlViewValid = (file: HtmlFile) => !!file.documentId && !!file.path && !(isGateway && !viewerBase());
 
-export function HtmlFileFrame({ areScriptsEnabled, revision = 0, bridge = false, ref, ...file }: HtmlFile & { areScriptsEnabled: boolean; revision?: number; bridge?: boolean; ref?: RefObject<HTMLIFrameElement | null> }) {
+export function HtmlFileFrame({ areScriptsEnabled, revision = 0, bridge = false, ref, ...file }: HtmlFile & { areScriptsEnabled: boolean; revision?: number | string; bridge?: boolean; ref?: RefObject<HTMLIFrameElement | null> }) {
   // Every scripted load spends a fresh one-use ticket from the viewer (enable, fragment, revision or remount),
   // so a page can never reach scripts by navigating to a scripted URL.
   const query = fileQuery(file).toString(), load = `${query}:${file.fragment ?? ''}:${revision}:${bridge}`;
@@ -53,7 +53,25 @@ export function RunHtmlScripts({ enabled, onChange }: { enabled: boolean; onChan
   return <label className="file-diff-toggle" title={scriptWarning}><input type="checkbox" checked={enabled} onChange={event => onChange(event.target.checked)} />Run scripts</label>;
 }
 
-export type BridgeMessage = { type: 'ready' } | { type: 'selection'; exact: string; selector: string; rect?: { left: number; top: number; right: number; bottom: number } } | { type: 'pick'; exact: string; selector: string; fingerprint: string } | { type: 'picker'; on: false } | { type: 'revealed'; ok: boolean } | { type: 'open-file'; href: string } | { type: 'scroll'; x: number; y: number };
+// The element at the top of the viewport and its ancestors (nearest first): lets a revised page return to the same place in its content.
+export type AnchorEntry = { selector: string; tag: string; text: string; hasId: boolean };
+export type ScrollAnchor = { chain: AnchorEntry[]; offset: number };
+export function parseChain(value: unknown): AnchorEntry[] | null {
+  if (!Array.isArray(value) || value.length > 12) return null;
+  const chain: AnchorEntry[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) return null;
+    const { selector, tag, text, hasId } = entry as Record<string, unknown>;
+    if (!isSelector(selector) || typeof tag !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(tag) || typeof text !== 'string' || text.length > 60 || typeof hasId !== 'boolean') return null;
+    chain.push({ selector, tag, text, hasId });
+  }
+  return chain;
+}
+export function parseAnchor(value: unknown): ScrollAnchor | undefined {
+  const v = typeof value === 'object' && value !== null ? value as Record<string, unknown> : null, chain = parseChain(v?.chain);
+  return v && chain && typeof v.offset === 'number' && Number.isFinite(v.offset) ? { chain, offset: v.offset } : undefined;
+}
+export type BridgeMessage = { type: 'ready' } | { type: 'hash'; hash: string; missing?: boolean } | { type: 'hash-anchor'; hash: string; chain: AnchorEntry[] } | { type: 'nearest'; ok: boolean } | { type: 'selection'; exact: string; selector: string; rect?: { left: number; top: number; right: number; bottom: number } } | { type: 'pick'; exact: string; selector: string; fingerprint: string } | { type: 'picker'; on: false } | { type: 'revealed'; ok: boolean } | { type: 'open-file'; href: string } | { type: 'scroll'; x: number; y: number; anchor?: ScrollAnchor } | { type: 'checked'; id: number; results: boolean[] };
 const isExact = (v: unknown): v is string => typeof v === 'string' && v.length <= 128 * 1024;
 // Scripted pages could forge these; Run scripts is the trusted opt-in and the parent supplies the file path itself.
 export function useHtmlBridge(frame: RefObject<HTMLIFrameElement | null>, onMessage: (message: BridgeMessage) => void) {
@@ -64,6 +82,9 @@ export function useHtmlBridge(frame: RefObject<HTMLIFrameElement | null>, onMess
       const data: unknown = event.data;
       if (!frame.current || event.source !== frame.current.contentWindow || typeof data !== 'object' || data === null || !('sidecar' in data) || data.sidecar !== 'html-bridge' || !('type' in data)) return;
       if (data.type === 'ready') latest.current({ type: 'ready' });
+      else if (data.type === 'hash' && 'hash' in data && typeof data.hash === 'string' && data.hash.length <= 2048 && (data.hash === '' || data.hash.startsWith('#')) && !/[\x00-\x1f\x7f]/.test(data.hash)) latest.current({ type: 'hash', hash: data.hash, missing: 'missing' in data && data.missing === true });
+      else if (data.type === 'hash-anchor' && 'hash' in data && typeof data.hash === 'string' && data.hash.length <= 2048 && data.hash.startsWith('#') && !/[\x00-\x1f\x7f]/.test(data.hash) && 'chain' in data && parseChain(data.chain)) latest.current({ type: 'hash-anchor', hash: data.hash, chain: parseChain(data.chain)! });
+      else if (data.type === 'nearest' && 'ok' in data && typeof data.ok === 'boolean') latest.current({ type: 'nearest', ok: data.ok });
       else if (data.type === 'selection' && 'exact' in data && 'selector' in data && isExact(data.exact) && isSelector(data.selector)) {
         const rect = 'rect' in data && typeof data.rect === 'object' && data.rect !== null ? data.rect as Record<string, unknown> : null;
         const box = rect && ['left', 'top', 'right', 'bottom'].every(side => Number.isFinite(rect[side])) ? rect as { left: number; top: number; right: number; bottom: number } : undefined;
@@ -72,7 +93,8 @@ export function useHtmlBridge(frame: RefObject<HTMLIFrameElement | null>, onMess
       else if (data.type === 'pick' && 'exact' in data && 'selector' in data && 'fingerprint' in data && isExact(data.exact) && isSelector(data.selector) && typeof data.fingerprint === 'string' && /^\d{1,9}:[0-9a-f]{8}$/.test(data.fingerprint)) latest.current({ type: 'pick', exact: data.exact, selector: data.selector, fingerprint: data.fingerprint });
       else if (data.type === 'picker' && 'on' in data && data.on === false) latest.current({ type: 'picker', on: false });
       else if (data.type === 'revealed' && 'ok' in data && typeof data.ok === 'boolean') latest.current({ type: 'revealed', ok: data.ok });
-      else if (data.type === 'scroll' && 'x' in data && 'y' in data && Number.isFinite(data.x) && Number.isFinite(data.y)) latest.current({ type: 'scroll', x: data.x as number, y: data.y as number });
+      else if (data.type === 'scroll' && 'x' in data && 'y' in data && Number.isFinite(data.x) && Number.isFinite(data.y)) latest.current({ type: 'scroll', x: data.x as number, y: data.y as number, anchor: 'anchor' in data ? parseAnchor(data.anchor) : undefined });
+      else if (data.type === 'checked' && 'id' in data && 'results' in data && Number.isFinite(data.id) && Array.isArray(data.results) && data.results.length <= 500 && data.results.every(value => typeof value === 'boolean')) latest.current({ type: 'checked', id: data.id as number, results: data.results as boolean[] });
       else if (data.type === 'open-file' && 'href' in data && typeof data.href === 'string' && data.href.length <= 4096 && !/[\x00-\x1f]/.test(data.href)) latest.current({ type: 'open-file', href: data.href });
     };
     window.addEventListener('message', listen);

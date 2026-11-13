@@ -17,6 +17,27 @@ async function scripted(f: Fixture, route: string, extra = '') {
 }
 const injectedNonce = (body: string) => /^(?:[\s\S]*?)<script nonce="([^"]+)" data-sidecar-bridge>/.exec(body)![1];
 
+test('open file revision checks are authorized, bodyless and change only with file contents', async t => {
+  const f = await fixture(t), doc = await f.register();
+  await f.agent('/agent/documents', { path: doc.path, workspace: f.directory });
+  const routes: [string, string, string][] = [['note.md', 'content', 'GET'], ['code.ts', 'code', 'GET'], ['page.html', 'content', 'GET'], ['page.html', 'html', 'HEAD']];
+  for (const [name, kind, method] of routes) {
+    const path = join(f.directory, name), route = `/api/files/${kind}?document=${doc.id}&path=${name}`;
+    await writeFile(path, 'before');
+    assert.equal((await fetch(f.url + route, { method })).status, 403);
+    const first = await f.view(route, undefined, method), etag = first.headers.get('etag')!;
+    assert.equal(first.status, 200); assert.match(etag, /^"[a-f0-9]{64}"$/); await first.text();
+    const same = await f.view(route, undefined, method, { 'If-None-Match': etag });
+    assert.equal(same.status, 304); assert.equal(await same.text(), '');
+    await writeFile(path, 'after!');
+    const changed = await f.view(route, undefined, method, { 'If-None-Match': etag });
+    assert.equal(changed.status, 200); assert.notEqual(changed.headers.get('etag'), etag);
+    if (method === 'GET') assert.match(await changed.text(), /after!/);
+  }
+  for (const kind of ['content', 'code']) assert.equal((await f.view(`/api/files/${kind}?document=${doc.id}&path=../outside`)).status, 403);
+  assert.equal((await f.view(`/api/files/html?document=${doc.id}&path=../outside`, undefined, 'HEAD')).status, 403);
+});
+
 test('HTML frame endpoint requires viewer auth and an authorized HTML file', async t => {
   const f = await fixture(t);
   const doc = await f.register();

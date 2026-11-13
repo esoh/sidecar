@@ -1,4 +1,4 @@
-import { createViewerHost, bodyOf, json, sendBody, type ViewerContext } from './viewer-http.ts';
+import { createViewerHost, bodyOf, isNotModified, json, sendBody, type ViewerContext } from './viewer-http.ts';
 import { viewerHtml, serveViewerAsset, serveDocumentImage } from './viewer-assets.ts';
 import { openAgentIds, isAgentAlias, type IdKind } from './agent-ids.ts';
 import { compactNotification, compactContext } from './agent-protocol.ts';
@@ -730,8 +730,13 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
             response.setHeader('Content-Security-Policy', `default-src 'none'; script-src ${scripts ? "'unsafe-inline'" : `'nonce-${nonce}'`}; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox allow-scripts;`);
             response.setHeader('Content-Type', 'text/html; charset=utf-8');
             response.setHeader('Referrer-Policy', 'no-referrer');
+            // Open viewers poll HEAD for edits: the tag hashes the file, not the nonced body, and only follows authorization.
+            if (method === 'HEAD' && isNotModified(response, preview.text)) return;
             sendBody(response, withBridge(preview.text, nonce, scripts && param('bridge') === '1'));
-          } else json(response, path === '/api/files/code' ? await readCode(root, file) : await readPreview(root, file));
+          } else {
+            const result = path === '/api/files/code' ? await readCode(root, file) : await readPreview(root, file);
+            if (!isNotModified(response, 'codeFile' in result ? result.contents : result.text)) json(response, result);
+          }
         }
         return;
       }
@@ -861,7 +866,7 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
         changed(); json(response, { ok: true, baseBranch }); return;
       }
       if (method === 'POST' && path === '/api/files/root') {
-        // Only explicit local viewer actions call this; previews/hover discovery cannot grant access.
+        // Only explicit local viewer actions call this, or a tab refresh restoring windows from folders the user granted earlier in that tab; previews/hover discovery cannot grant access.
         const document = get(store.read().documents, text(body, 'documentId'));
         const requestedRoot = text(body, 'directory');
         if (!isAbsolute(requestedRoot) || requestedRoot.includes('\0')) throw new DomainError('Expected an absolute directory path');

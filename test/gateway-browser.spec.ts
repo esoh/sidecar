@@ -1,4 +1,4 @@
-import { writeFile, readFile, mkdir, readdir, realpath } from 'node:fs/promises';
+import { writeFile, readFile, mkdir, readdir, realpath, unlink } from 'node:fs/promises';
 import { join, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { test, expect } from '@playwright/test';
@@ -554,7 +554,8 @@ for (const access of ['direct', 'gateway', 'network'] as const) test(`HTML full 
     await expect(frame.locator('#result')).toHaveText('Static diagram');
     await toggle.check();
     await fullPage.reload();
-    await expect(toggle).not.toBeChecked();
+    await expect(toggle).toBeChecked();
+    await toggle.uncheck();
     await expect(frame.locator('#result')).toHaveText('Static diagram');
     expect(await fullPage.evaluate(() => window.opener)).toBeNull();
     await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep my draft');
@@ -584,6 +585,7 @@ test('HTML full page logs a new browser in and returns to the exact owner, file 
   await page.getByRole('checkbox', { name: 'Run scripts' }).check();
   await expect(page.frameLocator('.file-preview-frame').locator('#result')).toHaveText('#chained.html#tab');
   await page.reload();
+  await page.getByRole('checkbox', { name: 'Run scripts' }).uncheck();
   await expect(page.frameLocator('.file-preview-frame').locator('#result')).toHaveText('Static diagram');
   expect(paths.filter(path => path.includes('/api/')).every(path => path.startsWith(`/a/${owner.alias}/api/`))).toBe(true);
   expect(paths.filter(path => path.endsWith('/api/files/html')).every(path => path === `/a/${owner.alias}/api/files/html`)).toBe(true);
@@ -1012,10 +1014,12 @@ test('HTML page link messages need this frame, a valid local href and a user cli
   await expect(windows).toHaveCount(0);
   await post('src/a.ts:2');
   await expect(page.getByRole('dialog', { name: /^File: .*src\/a\.ts$/ }).locator('.file-line-reference')).toContainText('Line 2');
+  // A refresh now restores open file windows, so close this one first.
+  await page.getByRole('button', { name: 'Close file window', exact: true }).click();
   // A page script posting on its own, long after any click, opens nothing.
   await writeFile(join(owner.directory, 'page.html'), linkPage + '<script>setTimeout(() => parent.postMessage({ sidecar: "html-bridge", type: "open-file", href: "src/b.ts" }, "*"), 6000)</script>');
   await page.reload();
-  await page.getByRole('checkbox', { name: 'Run scripts' }).check();
+  await expect(page.getByRole('checkbox', { name: 'Run scripts' })).toBeChecked();
   await page.waitForTimeout(7000);
   await expect(page.locator('.reference-window')).toHaveCount(0);
 });
@@ -1169,7 +1173,9 @@ for (const access of ['direct', 'gateway', 'network'] as const) test(`a standalo
   await expect(frame.locator('#result')).toHaveText('Ran #part');
   await expect(frame.locator('body')).toHaveAttribute('data-isolated', 'yes');
   await page.reload();
-  await expect(toggle).not.toBeChecked();
+  // Run scripts survives a refresh of this tab (session-scoped); turn it off to see the static page.
+  await expect(toggle).toBeChecked();
+  await toggle.uncheck();
   await expect(frame.locator('#result')).toHaveText('Static diagram');
   const library = page.getByRole('link', { name: 'All documents' });
   await expect(library).toHaveAttribute('href', access === 'direct' ? '/?library=1' : `/a/${owner.alias}/`);
@@ -1533,4 +1539,404 @@ test('an outside-workspace HTML target opens its tab within the click, survives 
   await fallback.click();
   await reveals(await opened);
   await expect(fallback).toHaveCount(0);
+});
+
+// Live reload of open files: a tab polls with If-None-Match, so edits show without a reload and unchanged files cost no bodies.
+const longPage = (label: string) => `<!doctype html><body><p>Top marker</p><div style="height:3000px"></div><p id="end">${label}</p></body>`;
+test('HTML full page reloads after an edit keeping Run scripts, scroll and drafts, and remembers Run scripts per tab', async ({ page }) => {
+  test.setTimeout(45000);
+  const { owner, base, full } = await htmlThreads();
+  await writeFile(join(owner.directory, 'page.html'), longPage('First end'));
+  await page.goto(full);
+  const frame = page.frameLocator('.file-preview-frame'), scripts = page.getByRole('checkbox', { name: 'Run scripts' }), draft = page.getByLabel('Message', { exact: true });
+  await scripts.check();
+  await expect(page.getByRole('button', { name: 'Pick element' })).toBeEnabled();
+  await draft.fill('typed draft');
+  await frame.locator('#end').evaluate(() => scrollTo(0, 1500));
+  await page.waitForTimeout(300);
+  await writeFile(join(owner.directory, 'page.html'), longPage('Second end'));
+  await expect(frame.locator('#end')).toHaveText('Second end', { timeout: 10000 });
+  await expect(scripts).toBeChecked();
+  await expect.poll(() => frame.locator('body').evaluate(() => scrollY)).toBe(1500);
+  await expect(draft).toHaveValue('typed draft');
+  await page.reload();
+  await expect(scripts).toBeChecked();
+  await writeFile(join(owner.directory, 'other.html'), longPage('Other end'));
+  await page.goto(`${base}/?view=html&document=${owner.doc.id}&path=other.html`);
+  await expect(page.locator('.file-preview-frame')).toBeVisible();
+  await expect(scripts).not.toBeChecked();
+});
+
+test('Run scripts still toggles when session storage is blocked', async ({ page }) => {
+  await page.addInitScript(() => {
+    const proto = Storage.prototype as unknown as Record<string, (this: Storage, ...args: unknown[]) => unknown>;
+    for (const name of ['getItem', 'setItem']) {
+      const original = proto[name];
+      proto[name] = function (this: Storage, ...args: unknown[]) { if (this === window.sessionStorage) throw new Error('blocked'); return original.apply(this, args); };
+    }
+  });
+  const { full } = await htmlThreads();
+  await page.goto(full);
+  const scripts = page.getByRole('checkbox', { name: 'Run scripts' });
+  await scripts.check();
+  await expect(scripts).toBeChecked();
+  await expect(page.getByRole('button', { name: 'Pick element' })).toBeEnabled();
+});
+
+async function openFiles(page: import('@playwright/test').Page, files: Record<string, string>, padding = '') {
+  const owner = f.owners[1], links = Object.keys(files).map(name => `[${name}](${name})`).join('\n\n');
+  for (const [name, text] of Object.entries(files)) await writeFile(join(owner.directory, name), text);
+  await writeFile(join(owner.directory, 'review.md'), `# Review\n\n${links}\n\n${padding}`);
+  await page.goto(`${f.gateway.url}/a/${owner.alias}/?document=${owner.doc.id}`);
+  const open = async (name: string) => { await page.locator('#document').getByRole('link', { name, exact: true }).click(); return page.getByRole('dialog', { name: `File: ${name}`, exact: true }); };
+  return { owner, open, file: (name: string) => join(owner.directory, name) };
+}
+
+test('open file windows refresh after edits, docked ones too, and a closed window stops polling', async ({ page }) => {
+  test.setTimeout(45000);
+  const { open, file } = await openFiles(page, { 'note.md': '# Note\n\nBefore text.', 'code.ts': 'export const before = 1;\n' });
+  const note = await open('note.md'), code = await open('code.ts');
+  await expect(note).toContainText('Before text.');
+  await expect(code).toContainText('before');
+  await code.getByRole('button', { name: 'Minimize window', exact: true }).click();
+  await writeFile(file('note.md'), '# Note\n\nAfter text.');
+  await writeFile(file('code.ts'), 'export const after = 2;\n');
+  await expect(note).toContainText('After text.', { timeout: 10000 });
+  const dock = page.getByRole('region', { name: 'Window dock', exact: true });
+  await dock.getByRole('button', { name: 'Expand dock', exact: true }).click();
+  await expect(dock.getByRole('tabpanel')).toContainText('after', { timeout: 10000 });
+  await note.getByRole('button', { name: 'Close file window', exact: true }).click();
+  const requests: string[] = [];
+  page.on('request', request => { if (request.url().includes('path=note.md')) requests.push(request.url()); });
+  await page.waitForTimeout(4000);
+  expect(requests).toEqual([]);
+});
+
+test('unchanged open files answer polls with 304 and no body', async ({ page }) => {
+  test.setTimeout(45000);
+  // WebKit surfaces a cached 200 for a wire 304, so assert the client contract; the server's 304 is covered in html-preview.test.ts.
+  const polls: { etag: string | undefined; status: number; tag: string | null }[] = [];
+  page.on('response', async response => {
+    if (response.url().includes('/api/files/content') && response.url().includes('path=note.md')) polls.push({ etag: (await response.request().allHeaders())['if-none-match'], status: response.status(), tag: (await response.allHeaders())['etag'] ?? null });
+  });
+  const { open } = await openFiles(page, { 'note.md': '# Note\n\nStable text.' });
+  const note = await open('note.md');
+  await expect(note).toContainText('Stable text.');
+  await expect.poll(() => polls.length, { timeout: 10000 }).toBeGreaterThan(2);
+  expect(polls[0]).toMatchObject({ etag: undefined, status: 200 });
+  for (const poll of polls.slice(1)) {
+    expect(poll.etag).toBe(polls[0].tag);
+    expect(poll.status === 304 || (poll.status === 200 && poll.tag === polls[0].tag)).toBe(true);
+  }
+  await expect(note).toContainText('Stable text.');
+});
+
+test('saved file quotes show Selection changed only once their text is gone, and File unavailable for a deleted file', async ({ page }) => {
+  test.setTimeout(60000);
+  const owner = f.owners[1], workspace = owner.doc.workspace.replace(/\/$/, ''), thread = '00000000-0000-4000-8000-000000000002';
+  const post = (path: string, body: object) => f.view(`/a/${owner.alias}${path}`, body);
+  await post('/api/threads', { id: thread, documentId: owner.doc.id });
+  await post('/api/questions', { documentId: owner.doc.id, threadId: thread, text: 'Quote note', clientMessageId: 'note', fileQuote: { path: `${workspace}/note.md`, kind: 'doc', exact: 'Alpha line here.' } });
+  await post('/api/questions', { documentId: owner.doc.id, threadId: thread, text: 'Quote code', clientMessageId: 'code', fileQuote: { path: `${workspace}/code.ts`, kind: 'code', exact: 'export const b = 2;', startLine: 2, endLine: 2 } });
+  await agentReply(owner, thread, [], 'Noted.');
+  const { open, file } = await openFiles(page, { 'note.md': '# Note\n\nAlpha line here.\n\nOther stuff.', 'code.ts': 'export const a = 1;\nexport const b = 2;\nexport const c = 3;\n' });
+  const note = await open('note.md'), code = await open('code.ts'), issues = page.locator('.sidebar .passage-context .changed');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await page.locator('.thread-row', { hasText: 'Noted.' }).click();
+  await expect(page.locator('.sidebar')).toContainText('Quote code');
+  await expect(note).toContainText('Alpha line here.');
+  await expect(issues).toHaveCount(0);
+  // Unrelated edits (a line inserted above the quote) leave both quotes valid.
+  await writeFile(file('code.ts'), '// header\nexport const a = 1;\nexport const b = 2;\nexport const c = 3;\n');
+  await writeFile(file('note.md'), '# Note\n\nAlpha line here.\n\nOther stuff changed.');
+  await expect(note).toContainText('Other stuff changed.', { timeout: 10000 });
+  await expect(code).toContainText('header');
+  await expect(issues).toHaveCount(0);
+  await writeFile(file('note.md'), '# Note\n\nGone.');
+  await expect(issues).toHaveText(['Selection changed'], { timeout: 10000 });
+  await writeFile(file('code.ts'), 'export const a = 1;\n');
+  await expect(issues).toHaveText(['Selection changed', 'Selection changed'], { timeout: 10000 });
+  await unlink(file('note.md'));
+  await expect(issues.first()).toHaveText('File unavailable', { timeout: 10000 });
+  await writeFile(file('note.md'), '# Note\n\nAlpha line here.');
+  await writeFile(file('code.ts'), 'export const b = 2;\n');
+  await expect(issues).toHaveCount(0, { timeout: 10000 });
+});
+
+test('a full-page HTML file opened while missing appears once created, and a deleted one shows unavailable then recovers with Run scripts and drafts intact', async ({ page }) => {
+  test.setTimeout(60000);
+  const { owner, full } = await htmlThreads();
+  const frame = page.frameLocator('.file-preview-frame'), alert = page.getByRole('alert').filter({ hasText: 'This HTML file is unavailable' });
+  await page.goto(full.replace('page.html', 'missing.html'));
+  await expect(page.locator('.file-preview-frame')).toHaveCount(0);
+  await writeFile(join(owner.directory, 'missing.html'), '<!doctype html><body><p id="here">Now here</p></body>');
+  await expect(frame.locator('#here')).toHaveText('Now here', { timeout: 10000 });
+  await page.goto(full);
+  const scripts = page.getByRole('checkbox', { name: 'Run scripts' }), draft = page.getByLabel('Message', { exact: true });
+  await scripts.check();
+  await expect(page.getByRole('button', { name: 'Pick element' })).toBeEnabled();
+  await page.locator('.thread-row', { hasText: 'Question about the page' }).click();
+  await draft.fill('typed draft');
+  await unlink(join(owner.directory, 'page.html'));
+  await expect(alert).toBeVisible({ timeout: 10000 });
+  await expect(page.locator('.file-preview-frame')).toHaveCount(0);
+  await writeFile(join(owner.directory, 'page.html'), pageHtml);
+  await expect(page.locator('.file-preview-frame')).toBeVisible({ timeout: 10000 });
+  await expect(alert).toHaveCount(0);
+  await expect(scripts).toBeChecked();
+  await expect(page.getByRole('button', { name: 'Pick element' })).toBeEnabled();
+  await expect(draft).toHaveValue('typed draft');
+});
+
+test('files displaced by one-at-a-time mode or its switch stop polling once closed', async ({ page }) => {
+  test.setTimeout(60000);
+  const { open } = await openFiles(page, { 'a.ts': 'export const a = 1;\n', 'b.ts': 'export const b = 2;\n' });
+  const requests: string[] = [];
+  page.on('request', request => { if (/path=[ab]\.ts/.test(request.url())) requests.push(request.url()); });
+  const mode = async () => { await page.getByRole('button', { name: 'Settings', exact: true }).click(); await page.getByRole('radio', { name: 'One at a time', exact: true }).check(); await page.getByRole('button', { name: 'Close settings', exact: true }).click(); };
+  await mode();
+  await open('a.ts');
+  const b = await open('b.ts');
+  await expect(page.getByRole('dialog', { name: 'File: a.ts', exact: true })).toHaveCount(0);
+  await b.getByRole('button', { name: 'Close file window', exact: true }).click();
+  await page.waitForTimeout(500); requests.length = 0;
+  await page.waitForTimeout(4000);
+  expect(requests).toEqual([]);
+  // Switch path: two windows in multi mode, then single keeps only the last.
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('radio', { name: 'Multiple', exact: true }).check();
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await open('a.ts'); const second = await open('b.ts');
+  await expect(page.getByRole('dialog', { name: 'File: a.ts', exact: true })).toBeVisible();
+  await mode();
+  await expect(page.getByRole('dialog', { name: 'File: a.ts', exact: true })).toHaveCount(0);
+  await second.getByRole('button', { name: 'Close file window', exact: true }).click();
+  await page.waitForTimeout(500); requests.length = 0;
+  await page.waitForTimeout(4000);
+  expect(requests).toEqual([]);
+});
+
+test('a docked, collapsed Markdown file still refreshes its saved rendered-text quote validity', async ({ page }) => {
+  test.setTimeout(60000);
+  const owner = f.owners[1], workspace = owner.doc.workspace.replace(/\/$/, ''), thread = '00000000-0000-4000-8000-000000000003';
+  const post = (path: string, body: object) => f.view(`/a/${owner.alias}${path}`, body);
+  await post('/api/threads', { id: thread, documentId: owner.doc.id });
+  await post('/api/questions', { documentId: owner.doc.id, threadId: thread, text: 'Quote bold', clientMessageId: 'bold', fileQuote: { path: `${workspace}/note.md`, kind: 'doc', exact: 'Alpha bold selected.' } });
+  await agentReply(owner, thread, [], 'Noted.');
+  const { open, file } = await openFiles(page, { 'note.md': 'Alpha **bold** selected.' });
+  const note = await open('note.md'), issues = page.locator('.sidebar .passage-context .changed');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await page.locator('.thread-row', { hasText: 'Noted.' }).click();
+  await expect(page.locator('.sidebar')).toContainText('Quote bold');
+  await expect(note).toContainText('Alpha bold selected.');
+  await note.getByRole('button', { name: 'Minimize window', exact: true }).click();
+  const dock = page.getByRole('region', { name: 'Window dock', exact: true });
+  await expect(dock.getByRole('button', { name: 'Expand dock', exact: true })).toBeVisible();
+  await page.waitForTimeout(500);
+  await expect(issues).toHaveCount(0);
+  await writeFile(file('note.md'), 'Entirely different wording.');
+  await expect(issues).toHaveText(['Selection changed'], { timeout: 10000 });
+  await expect(dock.getByRole('button', { name: 'Expand dock', exact: true })).toBeVisible();
+  await writeFile(file('note.md'), 'Alpha **bold** selected.');
+  await expect(issues).toHaveCount(0, { timeout: 10000 });
+  await expect(dock.getByRole('button', { name: 'Expand dock', exact: true })).toBeVisible();
+});
+
+test('an attached HTML quote shows Selection changed after the page text it names is gone', async ({ page }) => {
+  test.setTimeout(45000);
+  const { owner, file, full } = await htmlThreads();
+  const asked = await f.view(`/a/${owner.alias}/api/questions`, { documentId: owner.doc.id, threadId: '00000000-0000-4000-8000-000000000001', text: 'Quote title', clientMessageId: 'title', fileQuote: { path: file, kind: 'html', exact: 'Title', selector: '#title' } });
+  expect(asked.status).toBe(200);
+  await agentReply(owner, '00000000-0000-4000-8000-000000000001', [], 'Noted.');
+  await page.goto(full);
+  await page.getByRole('checkbox', { name: 'Run scripts' }).check();
+  await expect(page.getByRole('button', { name: 'Pick element' })).toBeEnabled();
+  await expect(page.locator('.sidebar')).toContainText('Quote title');
+  await page.waitForTimeout(500);
+  await expect(page.locator('.sidebar .passage-context .changed')).toHaveCount(0);
+  await writeFile(join(owner.directory, 'page.html'), pageHtml.replace('>Title<', '>Heading<'));
+  await expect(page.locator('.sidebar .passage-context .changed')).toHaveText('Selection changed', { timeout: 10000 });
+});
+
+const box = async (locator: import('@playwright/test').Locator) => (await locator.boundingBox())!;
+const near = (a: { x: number; y: number; width: number; height: number }, b: typeof a) => (['x', 'y', 'width', 'height'] as const).every(key => Math.abs(a[key] - b[key]) <= 2);
+
+test('a refresh restores open file windows, their geometry, zoom, dock state and the document scroll; a new tab starts clean', async ({ page, context }) => {
+  test.setTimeout(60000);
+  const padding = Array.from({ length: 120 }, (_, index) => `Paragraph ${index} of padding text.`).join('\n\n');
+  const { open, owner } = await openFiles(page, { 'note.md': '# Note\n\nNote body.', 'code.ts': 'export const kept = 1;\n' }, padding);
+  const note = await open('note.md'), code = await open('code.ts');
+  await code.getByRole('button', { name: 'Minimize window', exact: true }).click();
+  const title = note.getByRole('group', { name: 'Move file window', exact: true });
+  await title.focus();
+  for (let index = 0; index < 5; index++) await page.keyboard.press('ArrowLeft');
+  for (let index = 0; index < 3; index++) await page.keyboard.press('Shift+ArrowDown');
+  await note.getByRole('button', { name: 'Zoom in', exact: true }).click();
+  await note.getByRole('button', { name: 'Zoom in', exact: true }).click();
+  await expect(note.getByRole('button', { name: 'Adjust content zoom' })).toHaveText('150%');
+  const canvas = page.locator('main.canvas');
+  await canvas.evaluate(node => node.scrollTo({ top: 600, behavior: 'instant' }));
+  await expect.poll(() => canvas.evaluate(node => node.scrollTop)).toBeGreaterThan(300);
+  const before = await box(note), scrolled = await canvas.evaluate(node => node.scrollTop);
+  await page.waitForTimeout(500);
+  await page.reload();
+  const restored = page.getByRole('dialog', { name: 'File: note.md', exact: true });
+  await expect(restored).toContainText('Note body.');
+  expect(near(await box(restored), before)).toBe(true);
+  await expect(restored.getByRole('button', { name: 'Adjust content zoom' })).toHaveText('150%');
+  const dock = page.getByRole('region', { name: 'Window dock', exact: true });
+  await expect(dock).toContainText('1 window');
+  await dock.getByRole('button', { name: 'Expand dock', exact: true }).click();
+  await expect(dock.getByRole('tabpanel')).toContainText('kept');
+  await expect(page.getByRole('dialog', { name: 'File: code.ts', exact: true })).toHaveCount(0);
+  await expect.poll(async () => Math.abs((await canvas.evaluate(node => node.scrollTop)) - scrolled)).toBeLessThan(40);
+  // sessionStorage is per tab: another tab on the same URL starts without the windows.
+  const other = await context.newPage();
+  await other.goto(`${f.gateway.url}/a/${owner.alias}/?document=${owner.doc.id}`);
+  await expect(other.locator('#document')).toContainText('Paragraph 0');
+  await expect(other.getByRole('dialog')).toHaveCount(0);
+  await expect(other.getByRole('region', { name: 'Window dock', exact: true })).toHaveCount(0);
+  await other.close();
+});
+
+test('a refresh still loads and file windows still open when session storage is blocked', async ({ page }) => {
+  test.setTimeout(45000);
+  await page.addInitScript(() => {
+    const proto = Storage.prototype as unknown as Record<string, (this: Storage, ...args: unknown[]) => unknown>;
+    for (const name of ['getItem', 'setItem']) {
+      const original = proto[name];
+      proto[name] = function (this: Storage, ...args: unknown[]) { if (this === window.sessionStorage) throw new Error('blocked'); return original.apply(this, args); };
+    }
+  });
+  const { open } = await openFiles(page, { 'note.md': '# Note\n\nNote body.' });
+  await expect(await open('note.md')).toContainText('Note body.');
+  await page.reload();
+  await expect(page.locator('#document')).toContainText('note.md');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(await open('note.md')).toContainText('Note body.');
+});
+
+test('a refresh restores the full-page HTML scroll and zoom while Run scripts is on', async ({ page }) => {
+  test.setTimeout(45000);
+  const { owner, full } = await htmlThreads();
+  await writeFile(join(owner.directory, 'page.html'), '<!doctype html><body style="margin:0"><div style="height:4000px">Tall page</div></body>');
+  await page.goto(full);
+  await page.getByRole('checkbox', { name: 'Run scripts' }).check();
+  await expect(page.getByRole('button', { name: 'Pick element' })).toBeEnabled();
+  const frame = page.frameLocator('.file-preview-frame');
+  await page.getByRole('button', { name: 'Zoom in', exact: true }).first().click();
+  await frame.locator('body').evaluate(() => scrollTo(0, 700));
+  await page.waitForTimeout(800);
+  await page.reload();
+  await expect(page.getByRole('checkbox', { name: 'Run scripts' })).toBeChecked();
+  await expect(page.getByRole('button', { name: 'Adjust content zoom' }).first()).toHaveText('125%');
+  await expect.poll(() => frame.locator('body').evaluate(() => scrollY), { timeout: 10000 }).toBeGreaterThan(600);
+});
+
+for (const scripts of [false, true]) test(`an HTML page keeps its #step across refreshes and agent edits without reloading on the click (Run scripts ${scripts ? 'on' : 'off'})`, async ({ page }) => {
+  test.setTimeout(60000);
+  const { owner, full } = await htmlThreads(), file = join(owner.directory, 'page.html');
+  const steps = (suffix: string) => `<!doctype html><style>.s{display:none}.s:target{display:block}</style><body><a href="#step1">one</a> <a href="#step2">two</a> <a id="to3" href="#step3">three</a><div id="step1" class="s">Step one</div><div id="step2" class="s">Step two</div><div id="step3" class="s">Step three${suffix}</div></body>`;
+  await writeFile(file, steps(''));
+  await page.goto(full);
+  if (scripts) { await page.getByRole('checkbox', { name: 'Run scripts' }).check(); await expect(page.getByRole('button', { name: 'Pick element' })).toBeEnabled(); }
+  const frame = page.frameLocator('.file-preview-frame');
+  await frame.locator('body').evaluate(body => { body.dataset.marker = 'first-load'; });
+  await frame.locator('#to3').click();
+  await expect(frame.getByText('Step three')).toBeVisible();
+  await expect(page).toHaveURL(/#step3$/);
+  const entries = await page.evaluate(() => history.length);
+  // The click did not reload the frame, and made no history entry in the viewer.
+  await page.waitForTimeout(500);
+  await expect(frame.locator('body')).toHaveAttribute('data-marker', 'first-load');
+  expect(await page.evaluate(() => history.length)).toBe(entries);
+  await page.reload();
+  await expect(frame.getByText('Step three')).toBeVisible();
+  await frame.locator('body').evaluate(body => { body.dataset.marker = 'second-load'; });
+  await writeFile(file, steps(' v2'));
+  await expect(frame.getByText('Step three v2')).toBeVisible({ timeout: 10000 });
+  await expect(page).toHaveURL(/#step3$/);
+});
+
+const frameTop = (frame: import('@playwright/test').FrameLocator, selector: string) => frame.locator(selector).evaluate(node => node.getBoundingClientRect().top);
+async function openScripted(page: import('@playwright/test').Page, html: string, scripts = true) {
+  const { owner, full } = await htmlThreads(), file = join(owner.directory, 'page.html');
+  await writeFile(file, html);
+  await page.goto(full);
+  if (scripts) { await page.getByRole('checkbox', { name: 'Run scripts' }).check(); await expect(page.getByRole('button', { name: 'Pick element' })).toBeEnabled(); }
+  return { file, frame: page.frameLocator('.file-preview-frame') };
+}
+
+for (const scripts of [false, true]) test(`a #step that an edit removes shows a notice, clears the URL hash and opens at the top (Run scripts ${scripts ? 'on' : 'off'})`, async ({ page }) => {
+  test.setTimeout(60000);
+  const steps = (three: string) => `<!doctype html><style>.s{display:none}.s:target{display:block}</style><body><a id="to3" href="#step3">three</a> <a id="route" href="#/route">route</a><div id="step1" class="s">Step one</div>${three}</body>`;
+  const { file, frame } = await openScripted(page, steps('<div id="step3" class="s">Step three</div>'), scripts);
+  await frame.locator('#to3').click();
+  await expect(page).toHaveURL(/#step3$/);
+  await page.waitForTimeout(500);
+  await writeFile(file, steps(''));
+  await expect(page.getByRole('status').filter({ hasText: 'Section #step3 is no longer on this page.' })).toBeVisible({ timeout: 10000 });
+  await expect(page).not.toHaveURL(/#/);
+  expect(await frame.locator('body').evaluate(() => scrollY)).toBe(0);
+  // A page's own #/route hash is its business: kept, no notice, also across a refresh.
+  await frame.locator('#route').click();
+  await expect(page).toHaveURL(/#\/route$/);
+  await page.reload();
+  await expect(frame.locator('#route')).toBeVisible();
+  await page.waitForTimeout(500);
+  await expect(page).toHaveURL(/#\/route$/);
+  await expect(page.getByText('is no longer on this page')).toHaveCount(0);
+});
+
+test('Run scripts: removing the hash target scrolls to its nearest surviving parent with a nearest-section notice', async ({ page }) => {
+  test.setTimeout(60000);
+  const doc = (three: string) => `<!doctype html><style>.s{display:none}.s:target{display:block}body{margin:0}</style><body><div style="height:2000px">filler</div><section id="steps"><a id="to3" href="#step3">three</a>${three}<div style="height:3000px">tail</div></section></body>`;
+  const { file, frame } = await openScripted(page, doc('<div id="step3" class="s">Step three</div>'));
+  await frame.locator('#to3').click();
+  await expect(page).toHaveURL(/#step3$/);
+  await page.waitForTimeout(800);
+  await writeFile(file, doc(''));
+  await expect(page.getByRole('status').filter({ hasText: 'Section #step3 is no longer on this page; showing the nearest remaining section.' })).toBeVisible({ timeout: 10000 });
+  await expect(page).not.toHaveURL(/#/);
+  await expect.poll(async () => Math.abs(await frameTop(frame, '#steps')), { timeout: 10000 }).toBeLessThan(20);
+});
+
+test('Run scripts: a revised page returns to the same paragraph (not the same pixel), across agent edits and refreshes', async ({ page }) => {
+  test.setTimeout(60000);
+  const doc = (inserted: string) => `<!doctype html><body style="margin:0">${inserted}<div style="height:1500px">filler</div><p id="target" style="margin:0">Target paragraph</p><div style="height:3000px">after</div></body>`;
+  const { file, frame } = await openScripted(page, doc(''));
+  await frame.locator('#target').evaluate(node => node.scrollIntoView({ block: 'start' }));
+  await page.waitForTimeout(800);
+  await writeFile(file, doc('<div id="inserted" style="height:900px">inserted</div>'));
+  await expect(frame.locator('#inserted')).toHaveCount(1, { timeout: 10000 });
+  await expect.poll(async () => Math.abs(await frameTop(frame, '#target')), { timeout: 10000 }).toBeLessThan(20);
+  await page.waitForTimeout(800);
+  await page.reload();
+  await expect(frame.locator('#inserted')).toHaveCount(1);
+  await expect.poll(async () => Math.abs(await frameTop(frame, '#target')), { timeout: 10000 }).toBeLessThan(20);
+});
+
+test('Run scripts: a removed anchored element falls back to its surviving parent section', async ({ page }) => {
+  test.setTimeout(60000);
+  const doc = (anchored: string) => `<!doctype html><body style="margin:0"><div style="height:800px">filler</div><section id="part2"><div style="height:700px">intro</div>${anchored}<div style="height:3000px">tail</div></section></body>`;
+  const { file, frame } = await openScripted(page, doc('<p style="margin:0">Anchored paragraph</p>'));
+  await frame.locator('#part2 p').evaluate(node => node.scrollIntoView({ block: 'start' }));
+  await page.waitForTimeout(800);
+  await writeFile(file, doc(''));
+  await expect(frame.locator('#part2 p')).toHaveCount(0, { timeout: 10000 });
+  await expect.poll(async () => Math.abs(await frameTop(frame, '#part2')), { timeout: 10000 }).toBeLessThan(20);
+});
+
+test('Run scripts: an id-less anchor never lands on a shifted sibling', async ({ page }) => {
+  test.setTimeout(60000);
+  const paragraphs = (from: number) => Array.from({ length: 60 }, (_, index) => `<p style="margin:0;height:60px">Para ${index + from}</p>`).join('');
+  const doc = (inserted: string) => `<!doctype html><body style="margin:0"><div>${inserted}${paragraphs(0)}</div></body>`;
+  const { file, frame } = await openScripted(page, doc(''));
+  await frame.getByText('Para 30', { exact: true }).evaluate(node => node.scrollIntoView({ block: 'start' }));
+  await page.waitForTimeout(800);
+  await writeFile(file, doc('<p id="inserted" style="margin:0;height:400px">New</p>'));
+  await expect(frame.locator('#inserted')).toHaveCount(1, { timeout: 10000 });
+  await page.waitForTimeout(800);
+  // Positionally the old anchor now names Para 29; its text no longer matches, so it must not be used to place the page.
+  expect(Math.abs(await frame.getByText('Para 29', { exact: true }).evaluate(node => node.getBoundingClientRect().top))).toBeGreaterThan(20);
 });
