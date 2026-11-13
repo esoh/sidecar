@@ -13,18 +13,22 @@ const rendererFonts = {
   geist: rendererRequire.resolve('@fontsource-variable/geist-mono/index.css'),
 };
 
-let appBundle: Promise<Uint8Array> | undefined;
+// The app and its lazily imported chunks (Prettier), built once per server; paths are relative to /.
+let appBundle: Promise<Map<string, Uint8Array>> | undefined;
 export async function viewerHtml(gateway = false) {
   const html = await readFile(new URL('../web/index.html', import.meta.url), 'utf8');
   return gateway ? html.replace('<head>', '<head><meta name="sidecar-gateway" content="1">') : html;
 }
 export async function serveViewerAsset(path: string, method: string, response: ServerResponse): Promise<boolean> {
-      if (method === 'GET' && path === '/app.js') {
+      const chunk = path.match(/^\/(app\.js|chunks\/[A-Za-z0-9_-]+\.js)$/);
+      if (method === 'GET' && chunk) {
         response.setHeader('Content-Type', 'text/javascript; charset=utf-8');
-        // One build per server; the browser revalidates the content hash on later loads.
-        appBundle ??= build({ entryPoints: [fileURLToPath(new URL('../web/app.tsx', import.meta.url))], outdir: 'bundle', bundle: true, write: false, minify: true, format: 'esm', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' } })
-          .then(bundle => bundle.outputFiles[0].contents).catch(error => { appBundle = undefined; throw error; });
-        sendBody(response, await appBundle, true);
+        // One build per server; the browser revalidates the content hash on later loads. Code splitting needs an outdir.
+        appBundle ??= build({ entryPoints: [fileURLToPath(new URL('../web/app.tsx', import.meta.url))], outdir: 'bundle', entryNames: 'app', chunkNames: 'chunks/[name]-[hash]', bundle: true, splitting: true, write: false, minify: true, format: 'esm', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' } })
+          .then(bundle => new Map(bundle.outputFiles.map(file => [relative(join(process.cwd(), 'bundle'), file.path), file.contents]))).catch(error => { appBundle = undefined; throw error; });
+        const file = (await appBundle).get(chunk[1]);
+        if (!file) throw new DomainError('Not found', 404);
+        sendBody(response, file, true);
         return true;
       }
       if (method === 'GET' && path === '/renderer.css') {

@@ -35,6 +35,23 @@ test('static assets are compressed and revalidated only after viewer authenticat
   }
 });
 
+test('lazily imported chunks are served like the app bundle, only after viewer authentication, and unknown ones are 404', async t => {
+  const f = await fixture(t);
+  const app = await (await fetch(f.url + '/app.js', { headers: { Cookie: f.cookie } })).text();
+  const chunk = app.match(/\.\/chunks\/standalone-[A-Za-z0-9_-]+\.js/)?.[0].slice(1);
+  assert.ok(chunk, 'Prettier is a lazily imported chunk');
+  const response = await fetch(f.url + chunk, { headers: { Cookie: f.cookie } });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-type'), 'text/javascript; charset=utf-8');
+  assert.equal(response.headers.get('cache-control'), 'private, no-cache');
+  assert.match(await response.text(), /Couldn't resolve parser/);
+  assert.ok(!app.includes("Couldn't resolve parser"));
+  const unauthenticated = await fetch(f.url + chunk);
+  assert.equal(unauthenticated.status, 403); await unauthenticated.text();
+  const unknown = await fetch(f.url + '/chunks/nope-AAAA.js', { headers: { Cookie: f.cookie } });
+  assert.equal(unknown.status, 404); await unknown.text();
+});
+
 test('saved progress retires by message identity even when later history is still in flight', async t => {
   const { mergeRuntime } = await import('../web/api.ts');
   const f = await fixture(t), doc = await f.register();

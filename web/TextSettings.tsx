@@ -23,7 +23,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   }}>{children}</MessageSettings.Provider>;
 }
 
-const targets = ['document', 'conversation'] as const;
+const targets = ['document', 'conversation', 'editor'] as const;
+const targetLabel = { document: 'Document', conversation: 'Conversation', editor: 'Editor' };
 function readSize(target: string) {
   const value = Number(storage.getItem(`sidecar-${target}-text-size`));
   return Number.isInteger(value) && value >= 80 && value <= 150 && value % 5 === 0 ? value : 100;
@@ -75,7 +76,7 @@ export function TextSettings({ version, children }: { version?: string; children
     document.documentElement.style.setProperty('--sidecar-text-brightness', `${brightness}%`);
     storage.setItem('sidecar-text-brightness', String(brightness));
   }, [brightness]);
-  const [sizes, setSizes] = useState(() => ({ document: readSize('document'), conversation: readSize('conversation') }));
+  const [sizes, setSizes] = useState(() => ({ document: readSize('document'), conversation: readSize('conversation'), editor: readSize('editor') }));
   useLayoutEffect(() => {
     for (const target of targets) {
       document.documentElement.style.setProperty(`--sidecar-${target}-scale`, String(sizes[target] / 100));
@@ -130,19 +131,19 @@ export function TextSettings({ version, children }: { version?: string; children
           <button
             type="button"
             aria-label="Reset text sizes"
-            disabled={sizes.document === 100 && sizes.conversation === 100}
-            onClick={() => setSizes({ document: 100, conversation: 100 })}
+            disabled={targets.every(target => sizes[target] === 100)}
+            onClick={() => setSizes({ document: 100, conversation: 100, editor: 100 })}
           >
             Reset
           </button>
         </div>
         {targets.map((target) => (
           <label className="text-size-control" key={target}>
-            <span>{target === 'document' ? 'Document' : 'Conversation'}</span>
+            <span>{targetLabel[target]}</span>
             <output>{sizes[target]}%</output>
             <input
               type="range"
-              aria-label={`${target === 'document' ? 'Document' : 'Conversation'} text size`}
+              aria-label={`${targetLabel[target]} text size`}
               aria-valuetext={`${sizes[target]}%`}
               min={80}
               max={150}

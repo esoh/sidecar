@@ -69,6 +69,11 @@ Inter and Geist Mono are served from Plannotator's Fontsource dependencies;
 the fonts use the SIL Open Font License 1.1 distributed with those packages.
 KaTeX and its fonts retain the licenses included in the KaTeX dependency.
 
+The Markdown editor's Format button loads Prettier 3.10.1
+(`prettier/standalone` and `prettier/plugins/markdown`) on demand. Prettier is
+distributed under the MIT License, Copyright (c) James Long and contributors.
+Source: https://github.com/prettier/prettier
+
 MIT License
 
 Copyright (c) 2025 backnotprop
