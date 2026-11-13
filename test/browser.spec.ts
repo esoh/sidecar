@@ -4984,3 +4984,36 @@ test('Keep mine then save conflicts; Save anyway overwrites', async ({ page }) =
   await expect(page.getByText('● Unsaved')).toHaveCount(0);
   expect(await readFile(doc.path, 'utf8')).toBe('# Title mine\n\nBody text.\n');
 });
+
+test('a disk change in flight during a save still reaches the editor', async ({ page }) => {
+  const doc = await f.register('flight.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' mine');
+  await page.route('**/api/documents/*/source', async route => {
+    const response = await route.fetch();
+    await writeFile(doc.path, '# Title mine\n\nBody text.\n\nAgent in flight.\n');
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    await route.fulfill({ response });
+  });
+  await page.keyboard.press('ControlOrMeta+s');
+  await expect(page.locator('.cm-content')).toContainText('Agent in flight.');
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+});
+
+test('Save anyway does not override a newer change than the one reviewed', async ({ page }) => {
+  const doc = await f.register('newer.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' mine');
+  await writeFile(doc.path, '# First agent\n\nBody text.\n');
+  await page.getByRole('button', { name: 'Keep mine', exact: true }).click();
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+s');
+  await expect(page.getByRole('button', { name: 'Save anyway', exact: true })).toBeVisible();
+  await writeFile(doc.path, '# Newest agent\n\nBody text.\n');
+  await page.waitForTimeout(1000);
+  await page.getByRole('button', { name: 'Save anyway', exact: true }).click();
+  await expect(page.getByText('This file changed on disk.')).toBeVisible();
+  expect(await readFile(doc.path, 'utf8')).toBe('# Newest agent\n\nBody text.\n');
+});

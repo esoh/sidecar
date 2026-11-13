@@ -28,6 +28,7 @@ export function MarkdownEditMode({ documentId, path, markdown, version, diskMark
   const [banner, setBanner] = useState(false), [canOverride, setCanOverride] = useState(false);
   const dismissed = useRef(''), disk = useRef({ markdown: diskMarkdown, version: diskVersion });
   disk.current = { markdown: diskMarkdown, version: diskVersion };
+  const conflictVersion = useRef('');
   const editor = useRef<MarkdownEditorHandle | null>(null), view = useRef<EditorView | null>(null);
   const synced = useRef(markdown), baseVersion = useRef(version), saving = useRef(false), dirtyNow = useRef(false);
   const [dirty, setDirty] = useState(false), [asking, setAsking] = useState(false), [isSaving, setSaving] = useState(false);
@@ -35,18 +36,33 @@ export function MarkdownEditMode({ documentId, path, markdown, version, diskMark
   const dialog = useRef<HTMLDialogElement>(null);
   const markDirty = (value: boolean) => { dirtyNow.current = value; setDirty(value); };
 
+  // An empty version means the file is unreadable: keep the edits and wait for it to come back.
+  function reconcile() {
+    const { markdown: text, version: next } = disk.current;
+    if (!next || next === baseVersion.current || saving.current) return;
+    if (view.current && (!dirtyNow.current || editor.current?.getMarkdown() === text)) {
+      synced.current = text; baseVersion.current = next;
+      applyExternalText(view.current, text); markDirty(false); setBanner(false); setCanOverride(false);
+    } else if (next !== dismissed.current) setBanner(true);
+  }
   const saveWith = useCallback(async (override: boolean) => {
     const text = editor.current?.getMarkdown();
     if (text === undefined || saving.current) return false;
     if (text === synced.current) { markDirty(false); return true; }
+    // Save anyway only overrides the change the user saw; a newer one needs a fresh look.
+    if (override && conflictVersion.current !== disk.current.version) { conflictVersion.current = disk.current.version; setBanner(true); return false; }
+    const startDisk = disk.current.version;
     saving.current = true; setSaving(true);
     try {
-      baseVersion.current = (await saveSource(documentId, text, override ? disk.current.version : baseVersion.current)).version;
+      baseVersion.current = (await saveSource(documentId, text, override ? conflictVersion.current : baseVersion.current)).version;
       synced.current = text; setBanner(false); setCanOverride(false);
       markDirty(editor.current?.getMarkdown() !== text);
+      saving.current = false;
+      // The file moved on while the save was in flight: reconcile it now, the effect skipped it.
+      if (disk.current.version !== startDisk && disk.current.version !== baseVersion.current) reconcile();
       return true;
     } catch (reason) {
-      if ((reason as { status?: number }).status === 409 && errorText(reason) === CHANGED) { setBanner(true); setCanOverride(true); }
+      if ((reason as { status?: number }).status === 409 && errorText(reason) === CHANGED) { conflictVersion.current = disk.current.version; setBanner(true); setCanOverride(true); }
       else onError(errorText(reason));
       return false;
     }
@@ -58,15 +74,7 @@ export function MarkdownEditMode({ documentId, path, markdown, version, diskMark
     markDirty(false); setBanner(false); setCanOverride(false); setMountKey(key => key + 1);
   };
   const keepMine = () => { dismissed.current = disk.current.version; setBanner(false); };
-  // An empty version means the file is unreadable: keep the edits and wait for it to come back.
-  useEffect(() => {
-    if (!diskVersion || diskVersion === baseVersion.current || saving.current) return;
-    if (view.current && (!dirtyNow.current || editor.current?.getMarkdown() === diskMarkdown)) {
-      synced.current = diskMarkdown; baseVersion.current = diskVersion;
-      applyExternalText(view.current, diskMarkdown); markDirty(false); setBanner(false); setCanOverride(false);
-    } else if (diskVersion !== dismissed.current) setBanner(true);
-    // ponytail: a disk change landing mid-save is skipped; the save itself 409s if it was a foreign change.
-  }, [diskVersion, diskMarkdown]);
+  useEffect(reconcile, [diskVersion, diskMarkdown]);
   const leave = useCallback(() => {
     onExit(view.current ? topVisibleLine(view.current) : startLine);
   }, [onExit, startLine]);
