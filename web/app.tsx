@@ -19,7 +19,7 @@ import {
 } from './conversations.tsx';
 import { useQuestionDrafts, forgetDocument, type QuestionDraft, type QuestionDrafts } from './useQuestionDrafts.ts';
 import { useWatchedFiles } from './useWatchedFiles.ts';
-import { locateQuote, quoteIssue, selectionText, sourceQuote, excludedSelection } from './selection.ts';
+import { freshQuote, locateQuote, quoteIssue, selectionText, sourceQuote, excludedSelection } from './selection.ts';
 import { quoteSourceRange, rangeToSource, sourceToRanges } from './source-dom.ts';
 import { revealRange } from './reveal-target.ts';
 import { MarkdownDocument, WorkspaceLinks, type OpenWorkspaceLink } from './MarkdownDocument.tsx';
@@ -358,7 +358,8 @@ function App() {
   // The main document's reading position, applied once its content has laid out (a few frames at most), then saved on scroll.
   const canvas = useRef<HTMLElement>(null), scrollRestored = useRef('');
   const [editAnchor, setEditAnchor] = useState<number | null>(null), editMode = useRef<EditModeHandle | null>(null), returnLine = useRef<number | null>(null);
-  const isEditing = editAnchor !== null, editorQuote = useRef<Quote | null>(null);
+  const isEditing = editAnchor !== null, editorQuote = useRef<Quote | null>(null), unsavedQuotes = useRef(new Set<string>());
+  const quoteKey = (quote: Quote) => JSON.stringify([quote.start, quote.end, quote.version, quote.exact]);
   const [unsavedText, setUnsavedText] = useState('');
   const [editStatus, setEditStatus] = useState({ dirty: false, saving: false });
   const hasCarriageReturn = content.markdown.includes('\r');
@@ -380,6 +381,8 @@ function App() {
     if (composing) passageDrafts.current.delete(draftKey);
     fileSelectionVisit.current++;
     editorQuote.current = picked.quote; lastRect.current = picked.rect;
+    // Made against unsaved text: its offsets are not in its version's source until it is found again in the saved text.
+    if (editMode.current?.isDirty()) unsavedQuotes.current.add(quoteKey(picked.quote));
     setSelection(picked.quote);
     if (activeThreadId && isSidebarShown) {
       const { messageQuote, fileQuote, ...rest } = drafts.get(activeThreadId) ?? { text: '', retry: null };
@@ -390,17 +393,25 @@ function App() {
   };
   // Painted in both panes; a click opens the thread they belong to.
   const editQuotes = selectedMessages.filter(({ selection }) => selection.isVisible).map(({ selection }) => ({ id: selection.id, quote: selection.quote }));
-  // While editing, every send saves dirty text first, then rebuilds the editor's own quote against the saved text
-  // (stamped with the saved version), or is blocked once its text was edited away.
-  const saveFirst = isEditing ? { beforeSend: async (quote?: Quote) => {
-    const handle = editMode.current;
-    if (!handle) return true;
-    if (!await handle.save()) return false;
-    if (!quote || !editorQuote.current || !sameQuote(quote, editorQuote.current)) return true;
-    const stamped = handle.pendingQuote();
-    if (!stamped) throw new Error('Passage changed');
-    return { quote: stamped };
-  }, sendLabel: editStatus.dirty ? 'Save & send' : undefined } : {};
+  // While editing, dirty text is saved first and the editor's own quote is rebuilt from its tracked range. Any other quote
+  // made against unsaved text (an older draft) is found again by its text in the saved source, or the send is blocked.
+  // A quote made against a saved version stays valid against that version, so it is sent as it is.
+  const saveFirst = { beforeSend: async (quote?: Quote) => {
+    const handle = isEditing ? editMode.current : null;
+    let checked = quote;
+    if (handle) {
+      if (!await handle.save()) return false;
+      if (quote && editorQuote.current && sameQuote(quote, editorQuote.current)) {
+        checked = handle.pendingQuote() ?? undefined;
+        if (!checked) throw new Error('Passage changed');
+      }
+    }
+    const source = handle ? handle.source() : { text: content.markdown, version: content.version };
+    if (!checked || !source.version || (checked === quote && !unsavedQuotes.current.has(quoteKey(checked)))) return true;
+    const fresh = freshQuote(checked, source.text, source.version);
+    if (typeof fresh === 'string') throw new Error(fresh);
+    return fresh === quote ? true : { quote: fresh };
+  }, sendLabel: isEditing && editStatus.dirty ? 'Save & send' : undefined };
   // Only while editing: asks to save or discard, and says whether the editor was left. View mode never waits.
   const leaveEditingFirst = () => editAnchor === null || !editMode.current ? Promise.resolve(true) : editMode.current.requestExit();
   // Leaving edit mode: a pending editor quote (in the toolbar, the floating composer or any thread's draft) was made against the
@@ -409,6 +420,7 @@ function App() {
   afterLeaving.current = (line, stamped) => {
     returnLine.current = line; setEditAnchor(null);
     const old = editorQuote.current;
+    editorQuote.current = null;
     if (!old) return;
     const same = (quote?: Quote) => !!quote && sameQuote(quote, old);
     for (const id of new Set([...threads.map(thread => thread.id), ...(activeThreadId ? [activeThreadId] : [])])) {
@@ -421,7 +433,6 @@ function App() {
     if (!stamped) { clearSelection(); return; }
     const floating = passageDrafts.current.get(draftKey);
     passageDrafts.current.delete(draftKey);
-    editorQuote.current = stamped;
     if (floating) passageDrafts.current.set(JSON.stringify(stamped), { ...floating, quote: stamped });
     setSelection(stamped);
   };

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { locateQuote, matchQuote, resolveQuote, sourceQuote } from '../web/selection.ts';
+import { freshQuote, locateQuote, matchQuote, resolveQuote, sourceQuote } from '../web/selection.ts';
 
 test('duplicate agent quotes are ambiguous, not changed, and need explicit disambiguation', () => {
   const text = 'Review\nAuthor Summary\nNew introduction.\nSee Author Summary.';
@@ -66,4 +66,21 @@ test('a duplicate passage resolves to the second occurrence through its source c
   const quote = sourceQuote(source, second, second + 'Same **line**.'.length, 'v1');
   assert.deepEqual(locateQuote(source, quote, 'v1'), { start: second, end: second + 14 });
   assert.deepEqual(locateQuote(source, { ...quote, isPositionVerified: false }, 'v1'), { start: second, end: second + 14 });
+});
+
+test('freshQuote passes a valid quote through, restamps a stale one and blocks a lost or ambiguous one', () => {
+  const source = '# Title\n\nBody with a marker inside.\n';
+  const valid = sourceQuote(source, source.indexOf('marker'), source.indexOf('marker') + 6, 'v2');
+  assert.equal(freshQuote(valid, source, 'v2'), valid);
+  // Made against unsaved text (typed text before it), stamped with the version before the save.
+  const stale = sourceQuote('Intro.\n\n' + source, 'Intro.\n\n'.length + source.indexOf('marker'), 'Intro.\n\n'.length + source.indexOf('marker') + 6, 'v1');
+  const fresh = freshQuote(stale, 'Intro.\n\n' + source, 'v2') as ReturnType<typeof sourceQuote>;
+  assert.equal(fresh.version, 'v2');
+  assert.equal(('Intro.\n\n' + source).slice(fresh.start, fresh.end), fresh.exact);
+  const unsavedSource = source;
+  const restamped = freshQuote(stale, unsavedSource, 'v2');
+  assert.equal(typeof restamped, 'string');
+  assert.equal(freshQuote(valid, 'Nothing here.', 'v3'), 'Passage changed');
+  const twice = 'a marker and another marker';
+  assert.equal(freshQuote({ ...valid, prefix: '', suffix: '' }, twice, 'v3'), 'Multiple matching passages');
 });

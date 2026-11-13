@@ -20,6 +20,8 @@ export type EditModeHandle = {
   revealQuote(id: string): void;
   /** The pending selection's range, mapped through later edits, as a quote of the last saved version (null once its text was edited away). */
   pendingQuote(): Quote | null;
+  /** The editor's text and the version it was last saved as (the source of that version while the editor is clean). */
+  source(): { text: string; version: string };
 };
 type Choice = 'save' | 'discard' | 'cancel';
 type Picked = { quote: Quote; rect: DOMRect } | null;
@@ -130,6 +132,7 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
   useImperativeHandle(handleRef, () => ({
     isDirty: () => dirtyNow.current, getText: text, save, requestExit, revealQuote,
     pendingQuote: () => view.current ? trackedQuote(view.current.state, baseVersion.current) : null,
+    source: () => ({ text: text(), version: baseVersion.current }),
   }), [save, requestExit, revealQuote]);
   useEffect(() => () => { handleRef.current = null; }, [handleRef]);
 

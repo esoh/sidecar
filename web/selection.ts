@@ -45,6 +45,20 @@ export function resolveQuote(text: string, quote: Quote, match: TextMatch): Quot
   return resolved;
 }
 
+/**
+ * The quote as it must be sent: its text a literal substring of `source` (the source of `version`) at `start`/`end`.
+ * A quote of another version is found again by its text and context and restamped, or the issue that blocks the send is returned.
+ */
+export function freshQuote(quote: Quote, source: string, version: string): Quote | string {
+  if (quote.version === version && source.slice(quote.start, quote.end) === quote.exact) return quote;
+  const result = matchQuote(source, quote);
+  if (result.status === 'found') {
+    const { start, end } = result.matches[0];
+    return { ...resolveQuote(source, { ...quote, exact: source.slice(start, end) }, result.matches[0]), version };
+  }
+  return quoteIssue(source, quote) ?? 'Passage changed';
+}
+
 export const excludedSelection =
   '.annotation-exclude, button, input, textarea, svg, style, script, .katex, [aria-hidden="true"]';
 export function selectionNodes(root: Node): Text[] {
