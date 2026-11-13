@@ -4932,3 +4932,55 @@ test('rendered H1 and last-paragraph spacing match the pre-editor layout in the 
   expect(await content.getByText('Last paragraph.', { exact: true }).evaluate(n => getComputedStyle(n).marginBottom)).toBe('0px');
   expect(await content.locator('[data-source-line]').count()).toBe(0);
 });
+
+test('agent edit flows into a clean editor and undo cannot revert it', async ({ page }) => {
+  const doc = await f.register('flow.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' mine');
+  await page.keyboard.press('ControlOrMeta+s');
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  await writeFile(doc.path, '# Title mine\n\nBody text.\n\nAgent paragraph.\n');
+  await expect(page.locator('.cm-content')).toContainText('Agent paragraph.');
+  await expect(page.getByText('This file changed on disk.')).toHaveCount(0);
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  for (let i = 0; i < 4; i++) await page.keyboard.press('ControlOrMeta+z');
+  await expect(page.locator('.cm-content')).toContainText('Agent paragraph.');
+});
+
+test('agent edit while dirty shows the banner; Reload loads it and clears undo', async ({ page }) => {
+  const doc = await f.register('banner.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' draft');
+  await writeFile(doc.path, '# Agent title\n\nBody text.\n');
+  await expect(page.getByText('This file changed on disk.')).toBeVisible();
+  await expect(page.locator('.cm-content')).toContainText('Title draft');
+  await page.getByRole('button', { name: 'Reload', exact: true }).click();
+  await expect(page.getByText('This file changed on disk.')).toHaveCount(0);
+  await expect(page.locator('.cm-content')).toContainText('Agent title');
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  await page.locator('.cm-content').click();
+  for (let i = 0; i < 3; i++) await page.keyboard.press('ControlOrMeta+z');
+  await expect(page.locator('.cm-content')).toContainText('Agent title');
+  await expect(page.locator('.cm-content')).not.toContainText('draft');
+});
+
+test('Keep mine then save conflicts; Save anyway overwrites', async ({ page }) => {
+  const doc = await f.register('keep.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' mine');
+  await writeFile(doc.path, '# Agent title\n\nBody text.\n');
+  await expect(page.getByText('This file changed on disk.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Save anyway', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Keep mine', exact: true }).click();
+  await expect(page.getByText('This file changed on disk.')).toHaveCount(0);
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+s');
+  await expect(page.getByText('This file changed on disk.')).toBeVisible();
+  expect(await readFile(doc.path, 'utf8')).toBe('# Agent title\n\nBody text.\n');
+  await page.getByRole('button', { name: 'Save anyway', exact: true }).click();
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  expect(await readFile(doc.path, 'utf8')).toBe('# Title mine\n\nBody text.\n');
+});

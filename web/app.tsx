@@ -1235,8 +1235,8 @@ function App() {
           <Icon name="panel" />
           <span>{isSidebarShown ? 'Document' : 'Chat'}</span>
         </button>
-        {current && !htmlView && !documentError && (editStartLine === null
-          ? <button className="sidebar-toggle edit-action" disabled={hasCarriageReturn} onClick={startEditing}
+        {current && !htmlView && (editStartLine === null
+          ? documentError ? null : <button className="sidebar-toggle edit-action" disabled={hasCarriageReturn} onClick={startEditing}
               title={hasCarriageReturn ? 'This file uses Windows (CRLF) line endings, which the editor would change. Edit it in your own editor.' : 'Edit this document'}>Edit</button>
           : <>
               {editStatus.dirty && <span className="markdown-edit-dirty">● Unsaved</span>}
@@ -1300,7 +1300,7 @@ function App() {
               </p>
             )}
             {editStartLine !== null && current ? (
-              <MarkdownEditMode documentId={documentId} path={current.path} markdown={content.markdown} version={content.version}
+              <MarkdownEditMode documentId={documentId} path={current.path} markdown={content.markdown} version={content.version} diskMarkdown={content.markdown} diskVersion={content.version}
                 startLine={editStartLine} handleRef={editMode} onExit={leaveEditing} onError={setError} onStatus={setEditStatus} />
             ) : (
             <article

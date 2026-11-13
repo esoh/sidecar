@@ -3,7 +3,7 @@ import { Prec } from '@codemirror/state';
 import { EditorView, keymap } from '@codemirror/view';
 import { MarkdownEditor, type MarkdownEditorHandle } from '@plannotator/ui/components/MarkdownEditor';
 import { errorText, saveSource } from './api.ts';
-import { scrollToLine, topVisibleLine, viewCapture } from './editor-view.ts';
+import { applyExternalText, scrollToLine, topVisibleLine, viewCapture } from './editor-view.ts';
 
 export type EditModeHandle = {
   isDirty(): boolean;
@@ -12,16 +12,22 @@ export type EditModeHandle = {
   requestExit(): Promise<boolean>;
   revealLines(start: number, end: number): void;
 };
+const CHANGED = 'The document changed on disk. Review it again.';
 type Choice = 'save' | 'discard' | 'cancel';
 
-export function MarkdownEditMode({ documentId, path, markdown, version, startLine, handleRef, onExit, onError, onStatus }: {
-  documentId: string; path: string; markdown: string; version: string; startLine: number;
+export function MarkdownEditMode({ documentId, path, markdown, version, diskMarkdown, diskVersion, startLine, handleRef, onExit, onError, onStatus }: {
+  documentId: string; path: string; markdown: string; version: string;
+  /** The live file content from the app; it changes whenever the file changes on disk. */
+  diskMarkdown: string; diskVersion: string; startLine: number;
   handleRef: MutableRefObject<EditModeHandle | null>;
   onExit: (line: number) => void; onError: (message: string) => void;
   /** Dirty and saving state, shown by the app header's controls. */
   onStatus: (status: { dirty: boolean; saving: boolean }) => void;
 }) {
-  const [mountKey] = useState(0);
+  const [mountKey, setMountKey] = useState(0), [seed, setSeed] = useState(markdown);
+  const [banner, setBanner] = useState(false), [canOverride, setCanOverride] = useState(false);
+  const dismissed = useRef(''), disk = useRef({ markdown: diskMarkdown, version: diskVersion });
+  disk.current = { markdown: diskMarkdown, version: diskVersion };
   const editor = useRef<MarkdownEditorHandle | null>(null), view = useRef<EditorView | null>(null);
   const synced = useRef(markdown), baseVersion = useRef(version), saving = useRef(false), dirtyNow = useRef(false);
   const [dirty, setDirty] = useState(false), [asking, setAsking] = useState(false), [isSaving, setSaving] = useState(false);
@@ -29,19 +35,38 @@ export function MarkdownEditMode({ documentId, path, markdown, version, startLin
   const dialog = useRef<HTMLDialogElement>(null);
   const markDirty = (value: boolean) => { dirtyNow.current = value; setDirty(value); };
 
-  const save = useCallback(async () => {
+  const saveWith = useCallback(async (override: boolean) => {
     const text = editor.current?.getMarkdown();
     if (text === undefined || saving.current) return false;
     if (text === synced.current) { markDirty(false); return true; }
     saving.current = true; setSaving(true);
     try {
-      baseVersion.current = (await saveSource(documentId, text, baseVersion.current)).version;
-      synced.current = text;
+      baseVersion.current = (await saveSource(documentId, text, override ? disk.current.version : baseVersion.current)).version;
+      synced.current = text; setBanner(false); setCanOverride(false);
       markDirty(editor.current?.getMarkdown() !== text);
       return true;
-    } catch (reason) { onError(errorText(reason)); return false; }
+    } catch (reason) {
+      if ((reason as { status?: number }).status === 409 && errorText(reason) === CHANGED) { setBanner(true); setCanOverride(true); }
+      else onError(errorText(reason));
+      return false;
+    }
     finally { saving.current = false; setSaving(false); }
   }, [documentId, onError]);
+  const save = useCallback(() => saveWith(false), [saveWith]);
+  const reload = () => {
+    setSeed(disk.current.markdown); baseVersion.current = disk.current.version; synced.current = disk.current.markdown;
+    markDirty(false); setBanner(false); setCanOverride(false); setMountKey(key => key + 1);
+  };
+  const keepMine = () => { dismissed.current = disk.current.version; setBanner(false); };
+  // An empty version means the file is unreadable: keep the edits and wait for it to come back.
+  useEffect(() => {
+    if (!diskVersion || diskVersion === baseVersion.current || saving.current) return;
+    if (view.current && (!dirtyNow.current || editor.current?.getMarkdown() === diskMarkdown)) {
+      synced.current = diskMarkdown; baseVersion.current = diskVersion;
+      applyExternalText(view.current, diskMarkdown); markDirty(false); setBanner(false); setCanOverride(false);
+    } else if (diskVersion !== dismissed.current) setBanner(true);
+    // ponytail: a disk change landing mid-save is skipped; the save itself 409s if it was a foreign change.
+  }, [diskVersion, diskMarkdown]);
   const leave = useCallback(() => {
     onExit(view.current ? topVisibleLine(view.current) : startLine);
   }, [onExit, startLine]);
@@ -89,8 +114,16 @@ export function MarkdownEditMode({ documentId, path, markdown, version, startLin
 
   return (
     <div className="markdown-edit-mode">
+      {banner && (
+        <p className="markdown-edit-banner" role="alert">
+          This file changed on disk.{' '}
+          <button onClick={reload}>Reload</button>{' '}
+          <button onClick={keepMine}>Keep mine</button>
+          {canOverride && <>{' '}<button onClick={() => { void saveWith(true); }}>Save anyway</button></>}
+        </p>
+      )}
       <MarkdownEditor
-        markdown={markdown}
+        markdown={seed}
         documentId={mountId}
         editorHandleRef={editor}
         onMarkdownChange={text => markDirty(text !== synced.current)}
