@@ -33,17 +33,20 @@ export async function bodyOf(request: IncomingMessage): Promise<Record<string, u
 export function sameSecret(value: unknown, secret: string): boolean {
   return typeof value === 'string' && Buffer.byteLength(value) === Buffer.byteLength(secret) && timingSafeEqual(Buffer.from(value), Buffer.from(secret));
 }
+// Sets the ETag of `content`; true (after answering 304 with no body) when the request's If-None-Match already has it.
+export function isNotModified(response: ServerResponse, content: string | Uint8Array, weak = false): boolean {
+  const etag = `${weak ? 'W/' : ''}"${createHash('sha256').update(content).digest('hex')}"`;
+  response.setHeader('ETag', etag);
+  if (!response.req.headers['if-none-match']?.split(',').map(value => value.trim()).some(value => value === etag || value === '*')) return false;
+  response.writeHead(304); response.end(); return true;
+}
 export function sendBody(response: ServerResponse, body: string | Uint8Array, isAsset = false): void {
   const bytes = Buffer.from(body);
   response.setHeader('Vary', 'Accept-Encoding');
   if (isAsset) {
-    const etag = `W/"${createHash('sha256').update(bytes).digest('hex')}"`;
     // Revalidate after authentication, including after an upgrade or passphrase change.
     response.setHeader('Cache-Control', 'private, no-cache');
-    response.setHeader('ETag', etag);
-    if (response.req.headers['if-none-match']?.split(',').map(value => value.trim()).some(value => value === etag || value === '*')) {
-      response.writeHead(304); response.end(); return;
-    }
+    if (isNotModified(response, bytes, true)) return;
   }
   const encodings = (response.req.headers['accept-encoding'] ?? '').toLowerCase().split(',').map(value => value.trim().split(/;\s*/));
   const encoding = encodings.find(([name]) => name === 'gzip') ?? encodings.find(([name]) => name === '*');

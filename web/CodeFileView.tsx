@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { File } from '@pierre/diffs/react';
 import type { SelectedLineRange } from '@pierre/diffs';
 import type { FileLineRange } from './links.ts';
@@ -14,6 +14,8 @@ export function CodeFileView({ path, contents, onQuote, lineRange, revision = 0 
   const onQuoteRef = useRef(onQuote);
   useLayoutEffect(() => { onQuoteRef.current = onQuote; }, [onQuote]);
   const [selectedLines, setSelectedLines] = useState<SelectedLineRange | null>(null);
+  // Edited contents shift line offsets: a stale selection would highlight the wrong lines.
+  useEffect(() => setSelectedLines(null), [contents]);
   const file = useMemo(() => ({ name: path.replace(/\.[^./]+$/, extension => extension.toLowerCase()), contents }), [path, contents]);
   const colors = getComputedStyle(document.documentElement);
   const bg = colors.getPropertyValue('--background').trim(), fg = colors.getPropertyValue('--foreground').trim();

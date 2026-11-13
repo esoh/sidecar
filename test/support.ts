@@ -26,7 +26,7 @@ export async function fixture(t: { after: (callback: () => Promise<void>) => voi
     get url() { return server.url; },
     get cookie() { return cookie; },
     agent: (path: string, body?: unknown, method = body === undefined ? 'GET' : 'POST') => fetch(server.url + path, { method, headers: { 'X-Sidecar-Token': token, 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }),
-    view: (path: string, body?: unknown, method = body === undefined ? 'GET' : 'POST') => fetch(server.url + path, { method, headers: { Cookie: cookie, Origin: server.url, 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }),
+    view: (path: string, body?: unknown, method = body === undefined ? 'GET' : 'POST', headers: Record<string, string> = {}) => fetch(server.url + path, { method, headers: { Cookie: cookie, Origin: server.url, 'Content-Type': 'application/json', ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }),
     async register(name = 'a.md', markdown = '# First heading\n\nHello **world**.\n') {
       const path = join(directory, name);
       await writeFile(path, markdown);

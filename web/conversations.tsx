@@ -398,6 +398,7 @@ export function ConversationSidebar({
   agentControl,
   isCompacting,
   passageIssue,
+  fileQuoteIssue,
   showPassage,
   showOriginal,
   isShown,
@@ -425,6 +426,7 @@ export function ConversationSidebar({
   agentControl?: ViewerState['agentControl'];
   isCompacting: boolean;
   passageIssue: (quote: Quote) => string | null;
+  fileQuoteIssue: (quote: FileQuote) => string | null;
   showPassage: (selection: SavedSelection) => void;
   showOriginal: (messageId: string) => void;
   isShown: boolean;
@@ -739,7 +741,7 @@ export function ConversationSidebar({
               return (
                 <div className={`message ${message.role}`} key={message.id} tabIndex={-1} data-message-id={message.id} data-active={message.id === activeMessageId || undefined}>
                   <div className="message-content">
-                    <MessageContent message={message} documentId={documentId} threadId={active.id} activeSelectionId={activeSelectionId} passageIssue={passageIssue} showPassage={showPassage} showOriginal={showOriginal} onQuoteMessage={onQuoteMessage} onGoToMessage={onGoToMessage} onOpenFileQuote={onOpenFileQuote} />
+                    <MessageContent message={message} documentId={documentId} threadId={active.id} activeSelectionId={activeSelectionId} passageIssue={passageIssue} fileQuoteIssue={fileQuoteIssue} showPassage={showPassage} showOriginal={showOriginal} onQuoteMessage={onQuoteMessage} onGoToMessage={onGoToMessage} onOpenFileQuote={onOpenFileQuote} />
                     <MessageActions message={message} threadId={active.id} onPinned={() => onOpenPin(message.id)} />
                   </div>
                   {isLatest && requestId !== recovering?.id && !hasStreamedReply && (status === 'claimed' || status === 'stopped') && (
@@ -858,11 +860,13 @@ export function ConversationSidebar({
 
 export type MessageContentProps = {
   message: Message; documentId: string; threadId: string; activeSelectionId: string | null;
-  passageIssue: (quote: Quote) => string | null; showPassage: (selection: SavedSelection) => void; showOriginal: (id: string) => void;
+  passageIssue: (quote: Quote) => string | null; fileQuoteIssue: (quote: FileQuote) => string | null; showPassage: (selection: SavedSelection) => void; showOriginal: (id: string) => void;
   onQuoteMessage: (quote: MessageQuote) => void; onGoToMessage: (id: string) => void;
   onOpenFileQuote: (quote: FileQuote, revealId?: string) => void;
 };
-export function MessageContent({ message, documentId, threadId, activeSelectionId, passageIssue, showPassage, showOriginal, onQuoteMessage, onOpenFileQuote, onGoToMessage, prefix = 'message' }: MessageContentProps & { prefix?: string }) {
+// Same markup as MessageSelection's issue line.
+const QuoteIssue = ({ issue }: { issue: string | null }) => issue ? <div className="passage-context"><span className="changed">{issue}</span></div> : null;
+export function MessageContent({ message, documentId, threadId, activeSelectionId, passageIssue, fileQuoteIssue, showPassage, showOriginal, onQuoteMessage, onOpenFileQuote, onGoToMessage, prefix = 'message' }: MessageContentProps & { prefix?: string }) {
   const review = useProposalContext(), proposals = review?.proposals.filter(p => p.messageId === message.id) ?? [];
   function capture(root: HTMLElement) {
     const selected = window.getSelection();
@@ -876,6 +880,7 @@ export function MessageContent({ message, documentId, threadId, activeSelectionI
     {message.fileQuote && <div className="message-selection file-quote quote">
       <span className="selection-badge text-[9px] font-semibold tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary" title={message.fileQuote.path}>{fileQuoteLabel(message.fileQuote)}</span>
       <button aria-label={`Open quoted file: ${fileQuoteLabel(message.fileQuote)}`} onClick={() => onOpenFileQuote(message.fileQuote!, message.id)}><span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={message.fileQuote.exact}>{message.fileQuote.exact}</span><span className="passage-arrow"><Icon name="arrowUpRight" /></span></button>
+      <QuoteIssue issue={fileQuoteIssue(message.fileQuote)} />
     </div>}
     {message.messageQuote && <div className="message-selection message-quote quote">
       <span className="selection-badge text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary">quote</span>
@@ -885,6 +890,7 @@ export function MessageContent({ message, documentId, threadId, activeSelectionI
     {message.fileSelections?.map(selection => <div key={selection.id} className="message-selection file-quote quote" data-selection-id={selection.id}>
       <span className="selection-badge text-[9px] font-semibold tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary" title={selection.fileQuote.path}>{selection.label ?? fileQuoteLabel(selection.fileQuote)}</span>
       <button aria-label={`Show on page: ${selection.label ?? selection.fileQuote.exact}`} onClick={() => onOpenFileQuote(selection.fileQuote, selection.id)}><span className="quote-excerpt text-[10px] text-muted-foreground/70 border-l border-border pl-2 mb-1.5" title={selection.fileQuote.exact}>{selection.fileQuote.exact}</span><span className="passage-arrow"><Icon name="arrowUpRight" /></span></button>
+      <QuoteIssue issue={fileQuoteIssue(selection.fileQuote)} />
     </div>)}
     {message.selections?.map(selection => {
       const proposal = proposals.find(p => p.selectionId === selection.id);

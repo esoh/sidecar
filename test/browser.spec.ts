@@ -906,7 +906,8 @@ test('pinned references retain selections and dock expansion after the last tab 
   await options.getByRole('button', { name: 'Go to message', exact: true }).press('Enter');
   await expect(options).toBeHidden();
   await expect(message).toBeFocused();
-  await expect(page.getByRole('dialog', { name: 'Pinned message', exact: true })).toHaveCount(0);
+  // The pinned window itself survives the refresh now (restored from this tab's session).
+  await expect(page.getByRole('dialog', { name: 'Pinned message', exact: true })).toHaveCount(1);
   await pins.getByRole('button', { name: /Read/ }).click();
   const floating = page.getByRole('dialog', { name: 'Pinned message', exact: true });
   await expect(floating).toContainText('A useful passage.');
