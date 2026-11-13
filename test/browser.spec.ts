@@ -5613,7 +5613,7 @@ test('a thread draft holding a dirty editor quote is restamped on Done, and drop
   expect(sent[0].quote.version).toBe(saved.at(-1));
   expect(text.slice(sent[0].quote.start, sent[0].quote.end)).toBe('marker');
   await answer('Ok again.');
-  // Discard: the quote made against unsaved text is dropped from the draft.
+  // Discard: the quote's text is still in the saved source, so the draft keeps it, restamped for the saved version.
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
   await typeAtEndOfFirstLine(page, ' more');
   await selectEditorText(page, 3, 'Body with a '.length, 'marker'.length);
@@ -5621,7 +5621,60 @@ test('a thread draft holding a dirty editor quote is restamped on Done, and drop
   await page.getByRole('button', { name: 'Done', exact: true }).click();
   await page.getByRole('dialog', { name: 'Unsaved changes' }).getByRole('button', { name: 'Discard', exact: true }).click();
   await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await input.fill('After discard'); await input.press('Enter');
+  await expect.poll(() => sent.length).toBe(2);
+  expect(text.slice(sent[1].quote.start, sent[1].quote.end)).toBe('marker');
+  expect(sent[1].quote.version).toBe(saved.at(-1));
+  await answer('Ok third.');
+  // Discard when the quoted text only existed in the unsaved edit: the quote is dropped from the draft.
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' freshword');
+  await selectEditorText(page, 1, '# Title typed '.length, 'freshword'.length);
+  await expect(page.locator('.draft-selection')).toContainText('freshword');
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Unsaved changes' }).getByRole('button', { name: 'Discard', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
   await expect(page.locator('.draft-selection')).toHaveCount(0);
+});
+
+test('Done then Discard keeps the floating composer text as a draft when its quote only existed in the unsaved edit', async ({ page }) => {
+  const doc = await f.register('discard-composer.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' freshword');
+  await selectEditorText(page, 1, '# Title '.length, 'freshword'.length);
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('Keep these words');
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Unsaved changes' }).getByRole('button', { name: 'Discard', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await expect(page.getByRole('dialog', { name: 'Comment on selection' })).toHaveCount(0);
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep these words');
+  expect(await readFile(doc.path, 'utf8')).toBe('# Title\n\nBody with a marker inside.\n');
+});
+
+test('Done then Discard keeps a floating composer open on a quote that is still in the saved text', async ({ page }) => {
+  const doc = await f.register('discard-composer-kept.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const sent: any[] = [], saved: string[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  await selectEditorText(page, 3, 'Body with a '.length, 'marker'.length);
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('Still valid');
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Unsaved changes' }).getByRole('button', { name: 'Discard', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await expect(page.getByLabel('Comment', { exact: true })).toHaveValue('Still valid');
+  await page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('button', { name: /send/i }).click();
+  await expect.poll(() => sent.length).toBe(1);
+  const text = await readFile(doc.path, 'utf8');
+  expect(text).toBe('# Title\n\nBody with a marker inside.\n');
+  expect(text.slice(sent[0].quote.start, sent[0].quote.end)).toBe('marker');
+  expect(sent[0].quote.version).toBe((await state()).documents[doc.id].version);
+  await expect(page.getByRole('dialog', { name: 'Comment on selection' })).toHaveCount(0);
 });
 
 test('without the Custom Highlight API, edit mode still renders both panes', async ({ page }) => {
@@ -5954,10 +6007,15 @@ test('accepting a proposal while dirty is blocked; once clean it flows into the 
   const original = await readFile(doc.path, 'utf8');
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
   await typeAtEndOfFirstLine(page, ' typed');
-  // Cancelling the leave prompt keeps the editor and opens no proposal window.
+  // Reviewing never switches modes or asks to leave: the window opens over the editor, and only accepting is blocked.
   await page.locator('.sidebar .proposal-card').getByRole('button', { name: 'Review change', exact: true }).click();
-  await page.getByRole('dialog', { name: 'Unsaved changes' }).getByRole('button', { name: 'Cancel', exact: true }).click();
-  await expect(page.getByRole('dialog', { name: 'Proposed change' })).toHaveCount(0);
+  await expect(page.getByRole('dialog', { name: 'Unsaved changes' })).toHaveCount(0);
+  const window = page.getByRole('dialog', { name: 'Proposed change' });
+  await expect(window).toBeVisible();
+  await window.getByRole('button', { name: 'Accept', exact: true }).click();
+  await expect(window.getByRole('alert')).toContainText('Save or discard your edits first');
+  await page.keyboard.press('Escape');
+  await expect(window).toHaveCount(0);
   await expect(page.locator('.cm-content')).toContainText('Retry policy typed');
   const acceptAll = page.locator('.sidebar').getByRole('button', { name: /^Accept all/ });
   await acceptAll.click();
@@ -5970,4 +6028,228 @@ test('accepting a proposal while dirty is blocked; once clean it flows into the 
   await acceptAll.click();
   await expect(page.locator('.cm-content')).toContainText('temporary failures');
   expect(await readFile(doc.path, 'utf8')).toContain('temporary failures');
+});
+
+test('a proposal click in a clean editor stays in edit mode, reveals the passage and opens the window', async ({ page }) => {
+  const doc = await proposalReply(page);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toBeVisible();
+  await page.locator('.cm-scroller').evaluate(el => { el.scrollTop = 0; });
+  await page.locator('.sidebar .proposal-card').getByRole('button', { name: 'Review change', exact: true }).click();
+  const window = page.getByRole('dialog', { name: 'Proposed change' });
+  await expect(window).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Unsaved changes' })).toHaveCount(0);
+  await expect(page.locator('.cm-editor')).toBeVisible();
+  await expect(page.locator('.cm-content .edit-quote-active')).toBeVisible();
+  const box = (await window.boundingBox())!;
+  expect(box.width).toBeGreaterThan(0);
+  expect(await readFile(doc.path, 'utf8')).not.toContain('temporary failures');
+});
+
+test('phone edit mode fits the viewport: no page scroll, all header controls visible, follows a shorter viewport', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  cleanup.unshift(() => context.close());
+  const page = await context.newPage();
+  page.on('pageerror', error => pageErrors.push(error.message));
+  const doc = await f.register('phone-edit.md', Array.from({ length: 80 }, (_, i) => `Line ${i + 1} of the phone document.`).join('\n\n') + '\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.cm-content')).toBeVisible();
+  await typeAtEndOfFirstLine(page, ' x');
+  await expect(page.getByText('● Unsaved')).toBeVisible();
+  const editorBottom = () => page.locator('.markdown-edit-mode').evaluate(el => el.getBoundingClientRect().bottom);
+  expect(await editorBottom()).toBeLessThanOrEqual(844);
+  expect(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight && document.body.scrollHeight <= innerHeight)).toBe(true);
+  const header = [page.getByText('● Unsaved'), ...['Format', 'Save', 'Done'].map(name => page.getByRole('button', { name, exact: true }))];
+  const boxes = [];
+  for (const control of header) { await expect(control).toBeVisible(); boxes.push((await control.boundingBox())!); }
+  for (const box of boxes) { expect(box.x).toBeGreaterThanOrEqual(0); expect(box.x + box.width).toBeLessThanOrEqual(390); }
+  for (let a = 0; a < boxes.length; a++) for (let b = a + 1; b < boxes.length; b++) {
+    const x = boxes[a], y = boxes[b];
+    expect(x.x + x.width <= y.x + 0.5 || y.x + y.width <= x.x + 0.5 || x.y + x.height <= y.y || y.y + y.height <= x.y).toBe(true);
+  }
+  // The keyboard shrinks the viewport: the app sets --mobile-height; the editor shrinks with it.
+  await page.locator('.viewer').evaluate(el => (el as HTMLElement).style.setProperty('--mobile-height', '500px'));
+  await expect.poll(editorBottom).toBeLessThanOrEqual(500);
+  expect(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight)).toBe(true);
+  expect(await page.locator('.markdown-edit-mode').evaluate(el => el.getBoundingClientRect().height)).toBeGreaterThan(200);
+});
+
+test('Save & send quotes the saved text even when more is typed while the save is in flight', async ({ page }) => {
+  const doc = await f.register('typing-during-save.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const sent: any[] = [], saved: string[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  page.on('response', async response => { if (response.url().endsWith('/source') && response.request().method() !== 'GET') saved.push((await response.json()).version); });
+  let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
+  let isHeld = false;
+  await page.route('**/source', async route => {
+    if (route.request().method() === 'GET' || isHeld) return route.continue();
+    isHeld = true; await held; await route.continue();
+  });
+  await commentWithDraft(page);
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+Home');
+  await page.keyboard.type('Intro line.\n\n');
+  await page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('button', { name: 'Save & send' }).click();
+  await expect.poll(() => isHeld).toBe(true);
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+Home');
+  await page.keyboard.type('Typed during the save.\n\n');
+  release();
+  await expect.poll(() => sent.length).toBe(1);
+  const text = await readFile(doc.path, 'utf8');
+  expect(text).toBe('Intro line.\n\n# Title\n\nBody with a marker inside.\n');
+  expect(sent[0].quote).toMatchObject({ exact: 'marker', start: text.indexOf('marker'), end: text.indexOf('marker') + 6, version: saved[0] });
+  expect(text.slice(sent[0].quote.start, sent[0].quote.end)).toBe(sent[0].quote.exact);
+  await expect(page.locator('.cm-content')).toContainText('Typed during the save.');
+});
+
+test('a draft from before the source quotes, whose offsets no longer fit its own version, is restamped at send', async ({ page }) => {
+  const doc = await f.register('v5-draft.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Start'); await input.press('Enter'); await expect(input).toHaveValue('');
+  await answer('Ok.');
+  const snapshot = await state(), threadId = Object.keys(snapshot.threads)[0], version = snapshot.documents[doc.id].version;
+  const source = await readFile(doc.path, 'utf8'), at = source.indexOf('marker');
+  const draft = { text: 'About it', retry: null, quote: { exact: 'marker', prefix: source.slice(Math.max(0, at - 32), at), suffix: source.slice(at + 6, at + 38), start: 3, end: 9, version, isPositionVerified: true } };
+  await page.evaluate(({ key, draft }) => localStorage.setItem(key, JSON.stringify(draft)), { key: `sidecar-draft:${doc.id}:${threadId}`, draft });
+  const sent: any[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  await page.reload();
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await input.press('Enter');
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent[0].quote).toMatchObject({ exact: 'marker', start: at, end: at + 6, version });
+  await expect(page.locator('.draft-selection')).toHaveCount(0);
+});
+
+test('while editing, a thread quote whose passage was edited away is flagged against the editor text', async ({ page }) => {
+  await passageThread(page);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  const quote = page.locator('.sidebar .message-selection').first();
+  await expect(quote.locator('.passage-context .changed')).toHaveCount(0);
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+Home');
+  await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowDown'); await page.keyboard.press('End');
+  await page.keyboard.press('Backspace');
+  await expect(page.getByText('● Unsaved')).toBeVisible();
+  await expect(quote.locator('.passage-context .changed')).toBeVisible();
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  await expect(quote.locator('.passage-context .changed')).toHaveCount(0);
+});
+
+test('a draft changed while Save & send was saving is kept, not overwritten', async ({ page }) => {
+  const doc = await f.register('draft-race.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Start'); await input.press('Enter'); await expect(input).toHaveValue('');
+  await answer('Ok.');
+  let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
+  let isHeld = false;
+  await page.route('**/source', async route => {
+    if (route.request().method() === 'GET' || isHeld) return route.continue();
+    isHeld = true; await held; await route.continue();
+  });
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  await selectEditorText(page, 3, 'Body with a '.length, 'marker'.length);
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await input.fill('About it');
+  await input.press('Enter');
+  await expect.poll(() => isHeld).toBe(true);
+  await selectEditorText(page, 3, 0, 'Body'.length);
+  await expect(page.locator('.draft-selection')).toContainText('Body');
+  release();
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  await expect.poll(async () => (await state()).requests && Object.keys((await state()).requests).length).toBe(2);
+  await expect(page.locator('.draft-selection')).toContainText('Body');
+});
+
+test('the editor text size setting scales the source pane, persists across reload and is covered by Reset', async ({ page }) => {
+  const doc = await f.register('editor-size.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  const size = () => page.locator('.cm-content').evaluate(el => getComputedStyle(el).fontSize);
+  const previewSize = () => page.locator('.edit-preview').evaluate(el => getComputedStyle(el).fontSize);
+  expect(await size()).toBe('13px');
+  const preview = await previewSize();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const slider = page.getByRole('slider', { name: 'Editor text size', exact: true });
+  await expect(slider).toHaveAttribute('min', '80'); await expect(slider).toHaveAttribute('max', '150'); await expect(slider).toHaveAttribute('step', '5');
+  await slider.fill('150');
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await expect.poll(size).toBe('19.5px');
+  expect(await previewSize()).toBe(preview);
+  expect(await page.evaluate(() => document.cookie)).toContain('sidecar-editor-text-size=150');
+  await page.reload();
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect.poll(size).toBe('19.5px');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('slider', { name: 'Editor text size', exact: true })).toHaveValue('150');
+  await page.getByRole('button', { name: 'Reset text sizes', exact: true }).click();
+  await expect(page.getByRole('slider', { name: 'Editor text size', exact: true })).toHaveValue('100');
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await expect.poll(size).toBe('13px');
+});
+
+test('the source pane colours Markdown tokens and the code inside fences', async ({ page }) => {
+  const doc = await f.register('highlight.md', '# Heading\n\nSome *emphasis* and **strong** here.\n\n```ts\nconst answer: number = 42; // note\nfunction go(name: string) { return `hi ${name}`; }\n```\n\n```py\ndef go(): return "x"\n```\n\n```sh\necho "$HOME" # list\n```\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  const style = (text: string) => page.locator('.cm-line', { hasText: text }).first().evaluate(line => [...line.querySelectorAll('span')].map(span => { const css = getComputedStyle(span); return { text: span.textContent, color: css.color, italic: css.fontStyle, weight: css.fontWeight }; }));
+  const heading = await style('Heading');
+  expect(heading.some(span => span.weight === '600' || span.weight === '700')).toBe(true);
+  expect((await style('emphasis')).some(span => span.italic === 'italic')).toBe(true);
+  for (const line of ['const answer', 'function go', 'def go', 'echo']) {
+    const spans = await style(line);
+    expect(new Set(spans.map(span => span.color)).size, line).toBeGreaterThan(1);
+  }
+  // Colours come from Sidecar's tokens, not the editor defaults.
+  const keyword = (await style('const answer')).find(span => span.text === 'const')!;
+  expect(keyword.color).toBe(await page.evaluate(() => { const probe = document.createElement('i'); probe.style.color = 'var(--code-keyword)'; document.body.append(probe); const color = getComputedStyle(probe).color; probe.remove(); return color; }));
+});
+
+test('Format applies Prettier to the source as one undoable edit, never saves, and loads Prettier only on first use', async ({ page }) => {
+  const source = '# Title\n\n*a*\n\n-   item\n-   other\n';
+  const prettier = await import('prettier');
+  const expected = await prettier.format(source, { parser: 'markdown' });
+  expect(expected).not.toBe(source);
+  const doc = await f.register('format-me.md', source);
+  // Prettier's own error text marks the script that carries it.
+  const marker = 'Couldn\'t resolve parser', carriers: string[] = [];
+  page.on('response', async response => { if (response.request().resourceType() === 'script' && (await response.text()).includes(marker)) carriers.push(new URL(response.url()).pathname); });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.cm-content')).toContainText('-   item');
+  await page.waitForLoadState('networkidle');
+  expect(carriers).toEqual([]);
+  const main = await (await page.request.get(`${f.url}/app.js`)).text();
+  expect(main).not.toContain(marker);
+  const text = () => page.locator('.cm-line').evaluateAll(lines => lines.map(line => line.textContent).join('\n'));
+  await page.getByRole('button', { name: 'Format', exact: true }).click();
+  await expect.poll(text).toBe(expected);
+  expect(carriers).toHaveLength(1);
+  expect(carriers[0]).toMatch(/^\/chunks\/.+\.js$/);
+  await expect(page.getByText('● Unsaved')).toBeVisible();
+  expect(await readFile(doc.path, 'utf8')).toBe(source);
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect.poll(text).toBe(source);
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  expect(await readFile(doc.path, 'utf8')).toBe(source);
+});
+
+test('Format failures are shown and leave the text alone', async ({ page }) => {
+  const doc = await f.register('format-fail.md', '# Title\n\n*a*\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.cm-content')).toBeVisible();
+  await page.waitForLoadState('networkidle');
+  // The chunks the page needs are loaded; only Prettier's is still to come.
+  await page.route('**/chunks/*.js', route => route.fulfill({ status: 500, body: 'no' }));
+  await page.getByRole('button', { name: 'Format', exact: true }).click();
+  await expect(page.getByRole('alert').filter({ hasText: 'Could not format' })).toBeVisible();
+  await expect(page.locator('.cm-content')).toContainText('*a*');
+  await expect(page.getByRole('button', { name: 'Format', exact: true })).toBeEnabled();
 });

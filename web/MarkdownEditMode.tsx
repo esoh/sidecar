@@ -7,12 +7,14 @@ import { EditPreview, previewTopLine, scrollPreviewToLine } from './EditPreview.
 import { SourceEditor } from './SourceEditor.tsx';
 import { syncScroll } from './scroll-sync.ts';
 import { applyExternalText, minimalChange, quoteMarks, revealRange, selectionQuote, setQuoteMarks, setTracked, trackedQuote, trackedRange } from './editor-view.ts';
-import { locateQuote, sourceQuote } from './selection.ts';
+import { freshQuote, locateQuote, sourceQuote } from './selection.ts';
 import { rangeToSource } from './source-dom.ts';
 
 export type EditModeHandle = {
   isDirty(): boolean;
   save(): Promise<boolean>;
+  /** Formats the Markdown with Prettier (loaded on first use) as one undoable edit; never saves. */
+  format(): Promise<void>;
   /** The editor's current text, to keep it when the document disappears. */
   getText(): string;
   /** Resolves true when edit mode was left (clean, or Save/Discard chosen) and false on Cancel. */
@@ -21,7 +23,7 @@ export type EditModeHandle = {
   revealQuote(id: string): void;
   /** The pending selection's range, mapped through later edits, as a quote of the last saved version (null once its text was edited away). */
   pendingQuote(): Quote | null;
-  /** The editor's text and the version it was last saved as (the source of that version while the editor is clean). */
+  /** The text last saved and its version: what the server holds, even if more was typed while a save ran. */
   source(): { text: string; version: string };
 };
 type Choice = 'save' | 'discard' | 'cancel';
@@ -42,7 +44,7 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
   /** `quote` is the pending selection restamped against the saved text (null when discarded or edited away). */
   onExit: (line: number, quote: Quote | null) => void; onError: (message: string) => void;
   /** Dirty and saving state, shown by the app header's controls. */
-  onStatus: (status: { dirty: boolean; saving: boolean }) => void;
+  onStatus: (status: { dirty: boolean; saving: boolean; formatting: boolean }) => void;
 }) {
   const [mountKey, setMountKey] = useState(0), [seed, setSeed] = useState(markdown), [preview, setPreview] = useState(markdown);
   const [banner, setBanner] = useState(false), [canOverride, setCanOverride] = useState(false);
@@ -52,7 +54,7 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
   const conflict = useRef({ version: '', seen: '' });
   const view = useRef<EditorView | null>(null), previewRoot = useRef<HTMLElement | null>(null), previewScroller = useRef<HTMLDivElement | null>(null), previewRanges = useRef(new Map<string, Range[]>());
   const synced = useRef(markdown), baseVersion = useRef(version), saving = useRef(false), dirtyNow = useRef(false);
-  const [dirty, setDirty] = useState(false), [asking, setAsking] = useState(false), [isSaving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false), [asking, setAsking] = useState(false), [isSaving, setSaving] = useState(false), [formatting, setFormatting] = useState(false), isFormatting = useRef(false);
   const choose = useRef<((choice: Choice) => void) | null>(null);
   const dialog = useRef<HTMLDialogElement>(null), activeId = useRef('');
   const [narrow, setNarrow] = useState(() => innerWidth <= 850), [pane, setPane] = useState<'source' | 'preview'>('source');
@@ -93,6 +95,20 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
     finally { saving.current = false; setSaving(false); }
   }, [documentId, onError]);
   const save = useCallback(() => saveWith(false), [saveWith]);
+  // Prettier is a separate chunk, fetched on the first click; the result replaces the text as a single history step.
+  const format = useCallback(async () => {
+    const editor = view.current, before = text();
+    if (!editor || isFormatting.current || before.includes('\r')) return;
+    isFormatting.current = true; setFormatting(true);
+    try {
+      const [prettier, plugin] = await Promise.all([import('prettier/standalone'), import('prettier/plugins/markdown')]);
+      const formatted = await prettier.format(before, { parser: 'markdown', plugins: [plugin] });
+      if (view.current !== editor || text() !== before) { onError('The text changed while formatting. Try again.'); return; }
+      const change = minimalChange(before, formatted);
+      if (change) editor.dispatch({ changes: change, userEvent: 'input.format', scrollIntoView: true });
+    } catch (reason) { onError(`Could not format: ${errorText(reason)}`); }
+    finally { isFormatting.current = false; setFormatting(false); }
+  }, [onError]);
   const reload = () => {
     setSeed(disk.current.markdown); setPreview(disk.current.markdown); baseVersion.current = disk.current.version; synced.current = disk.current.markdown;
     markDirty(false); setBanner(false); setCanOverride(false); setMountKey(key => key + 1);
@@ -102,14 +118,24 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
 
   // Done returns the reader to the passage at the top of the preview (it follows the source even while hidden).
   const topLine = () => previewScroller.current && previewRoot.current ? previewTopLine(previewScroller.current, previewRoot.current) : 1;
-  const leave = useCallback((keep: boolean) => onExit(topLine(), keep && view.current ? trackedQuote(view.current.state, baseVersion.current) : null), [onExit]);
+  // The pending selection survives leaving when its text is still in the saved source (after Discard, the saved text is what remains).
+  const leave = useCallback(() => {
+    const tracked = view.current ? trackedQuote(view.current.state, baseVersion.current) : null, saved = synced.current;
+    let kept = tracked && freshQuote(tracked, saved, baseVersion.current);
+    // Edits next to the passage change its context; its text alone, if it occurs once in the saved source, is still that passage.
+    if (typeof kept === 'string' && tracked && saved.indexOf(tracked.exact) !== -1 && saved.indexOf(tracked.exact) === saved.lastIndexOf(tracked.exact)) {
+      const at = saved.indexOf(tracked.exact);
+      kept = sourceQuote(saved, at, at + tracked.exact.length, baseVersion.current);
+    }
+    onExit(topLine(), typeof kept === 'object' ? kept : null);
+  }, [onExit]);
   const requestExit = useCallback(async () => {
-    if (!dirtyNow.current) { leave(true); return true; }
+    if (!dirtyNow.current) { leave(); return true; }
     const choice = await new Promise<Choice>(resolve => { choose.current = resolve; setAsking(true); });
     setAsking(false);
     if (choice === 'cancel' || (choice === 'save' && !await save())) return false;
     dirtyNow.current = false;
-    leave(choice === 'save');
+    leave();
     return true;
   }, [leave, save]);
 
@@ -129,14 +155,14 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
     previewRanges.current.get(id)?.[0]?.startContainer.parentElement?.scrollIntoView({ block: 'center' });
   }, [paint]);
   useImperativeHandle(handleRef, () => ({
-    isDirty: () => dirtyNow.current, getText: text, save, requestExit, revealQuote,
+    isDirty: () => dirtyNow.current, getText: text, save, format, requestExit, revealQuote,
     pendingQuote: () => view.current ? trackedQuote(view.current.state, baseVersion.current) : null,
-    source: () => ({ text: text(), version: baseVersion.current }),
-  }), [save, requestExit, revealQuote]);
+    source: () => ({ text: synced.current, version: baseVersion.current }),
+  }), [save, format, requestExit, revealQuote]);
   useEffect(() => () => { handleRef.current = null; }, [handleRef]);
 
-  useEffect(() => { onStatus({ dirty, saving: isSaving }); }, [dirty, isSaving]);
-  useEffect(() => () => onStatus({ dirty: false, saving: false }), []);
+  useEffect(() => { onStatus({ dirty, saving: isSaving, formatting }); }, [dirty, isSaving, formatting]);
+  useEffect(() => () => onStatus({ dirty: false, saving: false, formatting: false }), []);
   useEffect(() => { if (asking) dialog.current?.showModal(); }, [asking]);
   useEffect(() => {
     if (!dirty) return;

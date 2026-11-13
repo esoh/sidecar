@@ -149,8 +149,11 @@ export function QuestionForm({
           if (typeof prepared === 'object') sent = { ...body, quote: prepared.quote };
           const signature = JSON.stringify(sent);
           if (retry.current?.signature !== signature) retry.current = { signature, id: randomId() };
-          submittedDraft = { text, retry: retry.current, ...attachment };
-          updateDraft(submittedDraft, true);
+          // A newer draft written while beforeSend was pending (another quote, more text) is kept.
+          if (drafts.get(draftKey) === submittedDraft) {
+            submittedDraft = { text, retry: retry.current, ...attachment };
+            updateDraft(submittedDraft, true);
+          }
           const request = await api<RequestRecord>('/api/questions', { ...sent, clientMessageId: retry.current.id });
           // A remounted composer or a newly attached quote may hold a newer draft.
           if (drafts.get(draftKey) === submittedDraft) {
@@ -429,6 +432,7 @@ export function ConversationSidebar({
   threadFile,
   beforeSend,
   sendLabel,
+  composerRevision = 0,
 }: {
   documentId: string;
   threads: Thread[];
@@ -459,6 +463,8 @@ export function ConversationSidebar({
   threadFile?: string;
   beforeSend?: (quote?: Quote) => Promise<boolean | { quote: Quote }>;
   sendLabel?: string;
+  /** Bumped when a draft's text was written from outside the composer, so it is read again. */
+  composerRevision?: number;
 }) {
   const [filter, setFilter] = useState('unresolved'),
     [search, setSearch] = useState(''),
@@ -813,7 +819,7 @@ export function ConversationSidebar({
             </ol>
           </section>}
           <QuestionForm
-            key={active.id}
+            key={`${active.id}:${composerRevision}`}
             documentId={documentId}
             threadId={active.id}
             drafts={drafts}

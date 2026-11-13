@@ -125,6 +125,7 @@ function App() {
     else if (current && !closedDocument) document.title = `${prefix}${current.title}`;
   }, [current?.title, unreadCount, closedDocument]);
   const drafts = useQuestionDrafts(documentId);
+  const [composerRevision, setComposerRevision] = useState(0);
   const floatingDrafts = useMemo<QuestionDrafts>(() => ({
     get: id => passageDrafts.current.get(id),
     set: (id, draft) => { passageDrafts.current.set(id, draft); },
@@ -360,7 +361,7 @@ function App() {
   const [editAnchor, setEditAnchor] = useState<number | null>(null), editMode = useRef<EditModeHandle | null>(null), returnLine = useRef<number | null>(null);
   const isEditing = editAnchor !== null, editorQuote = useRef<Quote | null>(null);
   const [unsavedText, setUnsavedText] = useState('');
-  const [editStatus, setEditStatus] = useState({ dirty: false, saving: false });
+  const [editStatus, setEditStatus] = useState({ dirty: false, saving: false, formatting: false });
   const hasCarriageReturn = content.markdown.includes('\r');
   const startEditing = () => {
     const top = canvas.current?.getBoundingClientRect().top ?? 0;
@@ -405,8 +406,12 @@ function App() {
         if (!checked) throw new Error('Passage changed');
       }
     }
+    // The saved text, not what was typed while the save ran: the quote is restamped against what the server holds.
     const source = handle ? handle.source() : { text: content.markdown, version: content.version };
-    if (!checked || (checked === quote && checked.version !== '')) return true;
+    // A quote of its own saved version stays valid for it; an unversioned one, or an older draft whose offsets no longer
+    // fit the current source (a v5-era draft), is found again by its text.
+    if (!checked) return true;
+    if (checked === quote && checked.version !== '' && (checked.version !== source.version || source.text.slice(checked.start, checked.end) === checked.exact)) return true;
     if (!source.version) throw new Error('Passage changed');
     const fresh = freshQuote(checked, source.text, source.version);
     if (typeof fresh === 'string') throw new Error(fresh);
@@ -430,12 +435,33 @@ function App() {
       drafts.set(id, stamped ? { ...rest, quote: stamped } : rest);
     }
     if (!same(selection)) return;
-    if (!stamped) { clearSelection(); return; }
+    if (!stamped) {
+      // The quote is gone but the words typed for it are not: they move to the conversation's draft.
+      const typed = composing ? passageDrafts.current.get(draftKey)?.text : '';
+      clearSelection();
+      if (typed?.trim()) void keepTyped(typed);
+      return;
+    }
     const floating = passageDrafts.current.get(draftKey);
     passageDrafts.current.delete(draftKey);
     if (floating) passageDrafts.current.set(JSON.stringify(stamped), { ...floating, quote: stamped });
     setSelection(stamped);
   };
+  async function keepTyped(typed: string) {
+    try {
+      let target = activeThreadId;
+      if (!target) {
+        fileThread.current ??= api<Thread>('/api/threads', { id: randomId(), documentId, ...(threadFile ? { file: threadFile } : {}) });
+        const thread = await fileThread.current;
+        setState(previous => previous ? { ...previous, threads: { ...previous.threads, [thread.id]: thread } } : previous);
+        target = thread.id;
+      }
+      const draft = drafts.get(target) ?? { text: '', retry: null };
+      drafts.set(target, { ...draft, text: draft.text ? `${draft.text}\n${typed}` : typed });
+      setComposerRevision(revision => revision + 1);
+      openThread(target);
+    } catch (reason) { setError(errorText(reason)); }
+  }
   const leaveEditing = useCallback((line: number, stamped: Quote | null) => afterLeaving.current(line, stamped), []);
   useEffect(() => {
     if (editAnchor !== null || returnLine.current === null) return;
@@ -911,7 +937,16 @@ function App() {
     return ids.length > 0;
   }
   // The editor's own selection is of unsaved text until Save & send saves it; it is checked then.
-  const passageIssue = (quote: Quote) => documentError ? 'Document unavailable' : !content.version ? null : isEditing && editStatus.dirty && editorQuote.current && sameQuote(quote, editorQuote.current) ? null : quoteIssue(content.markdown, quote, content.version);
+  // View mode checks the saved source; edit mode the editor's current text (matched by text once it differs from the saved source).
+  const passageIssue = (quote: Quote) => {
+    if (documentError) return 'Document unavailable';
+    if (!content.version) return null;
+    if (isEditing && editStatus.dirty) {
+      if (editorQuote.current && sameQuote(quote, editorQuote.current)) return null;
+      return quoteIssue(editMode.current?.getText() ?? content.markdown, quote);
+    }
+    return quoteIssue(content.markdown, quote, content.version);
+  };
   async function attachToConversation(attachment: { fileQuote: FileQuote } | { quote: Quote }) {
     const visit = ++fileSelectionVisit.current;
     if ('fileQuote' in attachment) clearPendingSelection();
@@ -1087,7 +1122,6 @@ function App() {
   // null means fine or unknown; a quote is never called changed without evidence.
   const fileQuoteIssue = (quote: FileQuote): string | null => {
     if (quote.kind === 'html') return isBridgeReady && quote.path === htmlAbsolute && htmlChecks[htmlQuoteKey(quote)] === false ? 'Selection changed' : null;
-    if (quote.kind === 'doc' && quote.startLine && quote.path === current?.path) return !content.version || documentError ? null : locateFileQuote(content.markdown, quote) ? null : 'Selection changed';
     const file = files.find(file => !file.refusal && `${(file.root ?? current?.workspace ?? '').replace(/\/$/, '')}/${file.path}` === quote.path), entry = file && watched[file.id];
     if (entry?.status === 404) return 'File unavailable';
     if (!file || entry?.data === undefined) return null;
@@ -1151,19 +1185,17 @@ function App() {
       if (innerWidth <= 850) setSidebarShown(false);
       return true;
     },
-    showPassage: (selection: import('../src/store.ts').MessageSelection, wasEditing = false): boolean | Promise<boolean> => {
+    showPassage: (selection: import('../src/store.ts').MessageSelection): boolean => {
       const entry = selectedMessages.find(item => item.selection.id === selection.id);
       if (entry) setActiveThreadId(entry.thread.id);
       setActiveMessageId(selection.id);
       setOriginalMessageId(null);
       setPreviewPath(null);
       // Editing stays editing: scroll the source pane to the quote.
-      if (editAnchor !== null && !wasEditing) { editMode.current?.revealQuote(selection.id); if (innerWidth <= 850) setSidebarShown(false); return true; }
-      let tries = 0;
+      if (editAnchor !== null) { editMode.current?.revealQuote(selection.id); if (innerWidth <= 850) setSidebarShown(false); return true; }
       const reveal = () => {
         const root = article.current, range = root && quoteSourceRange(root, content.markdown, selection.quote, content.version);
-        // Leaving the editor (for a proposal review) mounts the article a render later.
-        if (!range) { if (wasEditing && ++tries < 60) requestAnimationFrame(reveal); return; }
+          if (!range) return;
         revealRange(range);
         const node = range.startContainer.parentElement;
         node?.scrollIntoView({ block: 'center', behavior: 'smooth' });
@@ -1198,7 +1230,8 @@ function App() {
     selections: selectedMessages.map(item => item.selection), article, markdown: content.markdown, version: content.version,
     isHistorical: !!originalMessageId || !!previewPath,
     decisionBlocked: editAnchor !== null && editStatus.dirty ? 'Save or discard your edits first' : undefined,
-    onShowSelection: selection => editAnchor !== null ? leaveEditingFirst().then(left => { if (left) selectionActions.showPassage(selection, true); return left; }) : selectionActions.showPassage(selection), onShowOriginal: selectionActions.showOriginal,
+    // Clicking a reference never switches modes: while editing, the passage is revealed in the source pane.
+    onShowSelection: selection => selectionActions.showPassage(selection), onShowOriginal: selectionActions.showOriginal,
     onReturnToCurrent: () => { setOriginalMessageId(null); setPreviewPath(null); },
   });
   const cancel = () => {
@@ -1248,7 +1281,7 @@ function App() {
       <ProposalReviewContext.Provider value={proposalReview.context}>
       {proposalReview.popover}
       <div className={`viewer${htmlView ? ' html-view' : ''}`} ref={viewer} data-chat-open={isSidebarShown}>
-      <header className={`topbar${htmlView ? ' html-topbar' : ''}`}>
+      <header className={`topbar${htmlView ? ' html-topbar' : ''}`} data-editing={isEditing && !htmlView || undefined}>
         {htmlView ? <HtmlControls file={htmlView} isDocument={!urlHtmlView} areScriptsEnabled={areScriptsEnabled} onScripts={changeScripts} isReady={areScriptsEnabled && isBridgeReady}
           isPicking={isPicking} onPick={() => togglePicker(!isPicking)} zoom={htmlZoom} onZoom={changeHtmlZoom} /> : <>
         <div className="brand">
@@ -1299,6 +1332,7 @@ function App() {
               title={hasCarriageReturn ? 'This file uses Windows (CRLF) line endings, which the editor would change. Edit it in your own editor.' : 'Edit this document'}>Edit</button>
           : <>
               {editStatus.dirty && <span className="markdown-edit-dirty">● Unsaved</span>}
+              <button className="sidebar-toggle edit-action" disabled={hasCarriageReturn || editStatus.formatting} title="Format the Markdown with Prettier (undo with Cmd/Ctrl+Z)" onClick={() => { void editMode.current?.format(); }}>{editStatus.formatting ? 'Format…' : 'Format'}</button>
               <button className="sidebar-toggle edit-action" disabled={!editStatus.dirty || editStatus.saving} onClick={() => { void editMode.current?.save(); }}>Save</button>
               <button className="sidebar-toggle edit-action" onClick={() => { void editMode.current?.requestExit(); }}>Done</button>
             </>)}
@@ -1336,7 +1370,7 @@ function App() {
           </>
         )}
         <div className="document-workspace" id="document-workspace" ref={workspace}>
-        <main ref={canvas} className={`canvas${htmlView ? ' html-canvas' : ''}`} style={htmlView ? { '--html-zoom': htmlZoom / 100 } as React.CSSProperties : undefined}>
+        <main ref={canvas} className={`canvas${htmlView ? ' html-canvas' : ''}${isEditing && !htmlView ? ' editing' : ''}`} style={htmlView ? { '--html-zoom': htmlZoom / 100 } as React.CSSProperties : undefined}>
           {htmlView ? <>
             {htmlNotice && <p className="html-notice" role="status">{htmlNotice}</p>}
             {pageDown ? <p role="alert">This HTML file is unavailable (HTTP {pageStatus}). It reloads when the file is back.</p>
@@ -1442,6 +1476,7 @@ function App() {
           onGoToMessage={goToMessage}
           messageJump={messageJump}
           threadFile={threadFile}
+          composerRevision={composerRevision}
           {...saveFirst}
         />
       </div>

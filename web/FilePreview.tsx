@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import { guideLanguageForPath } from '@plannotator/core/guide-format';
 import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
 import type { FileDiffData } from '../src/files.ts';

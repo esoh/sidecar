@@ -85,25 +85,3 @@ export function sourceQuote(source: string, start: number, end: number, version:
     start, end, version, isPositionVerified: true,
   };
 }
-
-// Convert our UTF-16 text anchors to text-node endpoints for web-highlighter.
-export function quoteRange(article: HTMLElement, quote: Quote, version?: string): Range | null {
-  const match = locateQuote(selectionText(article), quote, version);
-  if (!match) return null;
-  const range = document.createRange();
-  let at = 0,
-    started = false;
-  for (const node of selectionNodes(article)) {
-    const length = node.textContent?.length ?? 0;
-    if (!started && at + length > match.start) {
-      range.setStart(node, match.start - at);
-      started = true;
-    }
-    if (started && at + length >= match.end) {
-      range.setEnd(node, match.end - at);
-      return range;
-    }
-    at += length;
-  }
-  return null;
-}

@@ -1,5 +1,5 @@
 import { EditorSelection, StateEffect, StateField, Transaction, type EditorState, type Extension } from '@codemirror/state';
-import { Decoration, EditorView, ViewPlugin, type DecorationSet } from '@codemirror/view';
+import { Decoration, EditorView, type DecorationSet } from '@codemirror/view';
 import type { Quote } from '../src/store.ts';
 import { sourceQuote } from './selection.ts';
 
