@@ -19,7 +19,7 @@ import {
 } from './conversations.tsx';
 import { useQuestionDrafts, forgetDocument, type QuestionDraft, type QuestionDrafts } from './useQuestionDrafts.ts';
 import { useWatchedFiles } from './useWatchedFiles.ts';
-import { locateQuote, matchQuote, quoteIssue, selectionText, sourceQuote, excludedSelection } from './selection.ts';
+import { locateQuote, quoteIssue, selectionText, sourceQuote, excludedSelection } from './selection.ts';
 import { quoteSourceRange, rangeToSource, sourceToRanges } from './source-dom.ts';
 import { revealRange } from './reveal-target.ts';
 import { MarkdownDocument, WorkspaceLinks, type OpenWorkspaceLink } from './MarkdownDocument.tsx';
@@ -34,7 +34,7 @@ import { OriginalDocument } from './OriginalDocument.tsx';
 import { FilesPanel } from './FilesPanel.tsx';
 import { useComparison, type WorkspaceFileChange } from './useComparison.ts';
 import { isAnnotatableDocPath } from '@plannotator/core/annotatable';
-import { RenderedTextProbe, type OpenFile } from './FilePreview.tsx';
+import type { OpenFile } from './FilePreview.tsx';
 import { pageTextSelector, type FileQuote } from '../src/quote.ts';
 import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
 import { ResizeHandle } from '@plannotator/ui/components/ResizeHandle';
@@ -209,7 +209,6 @@ function App() {
     ...(htmlView && htmlRoot ? [{ key: 'page', url: `/api/files/html?${fileQuery({ ...htmlView, root: htmlRoot })}`, method: 'HEAD' as const }] : []),
   ], [files, documentId, current?.workspace, htmlView?.path, htmlView?.root, htmlRoot]);
   const watched = useWatchedFiles(watchedSources);
-  const [renderedText, setRenderedText] = useState<Record<string, { version: string; text: string }>>({});
   const comparison = useComparison(documentId, current?.workspace, current?.baseBranch, !!current?.workspace && (isFilesShown || !!changesScope || files.length > 0));
   const fileThread = useRef<Promise<Thread> | null>(null);
   const fileSelectionVisit = useRef(0);
@@ -1047,17 +1046,6 @@ function App() {
     checkRequest.current = { id: checkRequest.current.id + 1, keys: htmlQuotes.map(([key]) => key) };
     postBridge({ type: 'check', id: checkRequest.current.id, items: htmlQuotes.map(([, quote]) => ({ selector: quote.selector, exact: quote.exact, isElement: !!quote.isElement, fingerprint: quote.fingerprint })) });
   }, [isBridgeReady, htmlQuotesJson]);
-  // Docked or collapsed Markdown has no mounted article, so a hidden probe renders just the files whose saved rendered-text quotes need it.
-  const probes = useMemo(() => {
-    const exacts = new Map<string, string[]>();
-    for (const thread of threads) for (const message of thread.messages) for (const quote of [message.fileQuote, ...(message.fileSelections ?? []).map(selection => selection.fileQuote)])
-      if (quote && quote.kind !== 'html' && !quote.startLine) exacts.set(quote.path, [...(exacts.get(quote.path) ?? []), quote.exact]);
-    return files.flatMap(file => {
-      const entry = watched[file.id], data = entry?.data, wanted = exacts.get(`${(file.root ?? current?.workspace ?? '').replace(/\/$/, '')}/${file.path}`);
-      if (file.refusal || file.kind !== 'doc' || data?.renderAs !== 'markdown' || !wanted || renderedText[file.id]?.version === entry.version) return [];
-      return wanted.some(exact => matchQuote(data.text, { exact, prefix: '', suffix: '' } as Quote).status === 'missing') ? [{ id: file.id, version: entry.version, text: data.text }] : [];
-    });
-  }, [threads, files, watched, renderedText, current?.workspace]);
   // null means fine or unknown; a quote is never called changed without evidence.
   const fileQuoteIssue = (quote: FileQuote): string | null => {
     if (quote.kind === 'html') return isBridgeReady && quote.path === htmlAbsolute && htmlChecks[htmlQuoteKey(quote)] === false ? 'Selection changed' : null;
@@ -1065,11 +1053,8 @@ function App() {
     const file = files.find(file => !file.refusal && `${(file.root ?? current?.workspace ?? '').replace(/\/$/, '')}/${file.path}` === quote.path), entry = file && watched[file.id];
     if (entry?.status === 404) return 'File unavailable';
     if (!file || entry?.data === undefined) return null;
-    const has = (text: string) => matchQuote(text, { exact: quote.exact, prefix: '', suffix: '' } as Quote).status !== 'missing';
-    if (has(entry.data.text)) return null;
-    // A line quote is source text; a rendered-Markdown quote may still be on screen even where the source differs.
-    const shown = renderedText[file.id];
-    return quote.startLine || (shown?.version === entry.version && !has(shown.text)) ? 'Selection changed' : null;
+    // Code and Markdown file quotes are source lines; they hold while their text is still in the file.
+    return locateFileQuote(entry.data.text, quote) ? null : 'Selection changed';
   };
   const togglePicker = (on: boolean) => { setPicking(on); postBridge({ type: 'picker', on }); };
   useEffect(() => {
@@ -1373,8 +1358,7 @@ function App() {
             )}
           </div>}
         </main>
-        {probes.map(probe => <RenderedTextProbe key={`${probe.id}:${probe.version}`} text={probe.text} onText={text => setRenderedText(previous => previous[probe.id]?.version === probe.version && previous[probe.id].text === text ? previous : { ...previous, [probe.id]: { version: probe.version, text } })} />)}
-        <PinnedWindows key={documentId} viewScope={viewScope} isRestored={restoredView === documentId} watched={watched} onRenderedText={(id, version, text) => setRenderedText(previous => previous[id]?.version === version && previous[id].text === text ? previous : { ...previous, [id]: { version, text } })} workspace={workspace} threads={threads} files={files} onSetLineRangeVisible={(id, visible) => setFiles(previous => previous.map(file => file.id === id ? { ...file, isLineRangeVisible: visible } : file))} onSetFileScripts={(id, enabled) => setFiles(previous => previous.map(file => file.id === id ? { ...file, areScriptsEnabled: enabled } : file))} root={current?.workspace} documentId={documentId} comparison={comparison} changesScope={changesScope} onCloseChanges={() => setChangesScope(null)} onOpenChange={openChange} onQuoteFile={fileQuote => attachToConversation({ fileQuote })} onRevealFile={revealFile} openRequests={openPins} onOpened={ids => setOpenPins(previous => previous.filter(id => !ids.includes(id)))} onCloseFile={id => {
+        <PinnedWindows key={documentId} viewScope={viewScope} isRestored={restoredView === documentId} watched={watched} workspace={workspace} threads={threads} files={files} onSetLineRangeVisible={(id, visible) => setFiles(previous => previous.map(file => file.id === id ? { ...file, isLineRangeVisible: visible } : file))} onSetFileScripts={(id, enabled) => setFiles(previous => previous.map(file => file.id === id ? { ...file, areScriptsEnabled: enabled } : file))} root={current?.workspace} documentId={documentId} comparison={comparison} changesScope={changesScope} onCloseChanges={() => setChangesScope(null)} onOpenChange={openChange} onQuoteFile={fileQuote => attachToConversation({ fileQuote })} onRevealFile={revealFile} openRequests={openPins} onOpened={ids => setOpenPins(previous => previous.filter(id => !ids.includes(id)))} onCloseFile={id => {
           setFiles(previous => previous.filter(file => file.id !== id));
           setPreviewPath(previous => `file:${previous}` === id ? null : previous);
         }} {...selectionActions} onGoToMessage={goToMessage} />

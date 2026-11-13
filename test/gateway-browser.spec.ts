@@ -1716,12 +1716,12 @@ test('files displaced by one-at-a-time mode or its switch stop polling once clos
   expect(requests).toEqual([]);
 });
 
-test('a docked, collapsed Markdown file still refreshes its saved rendered-text quote validity', async ({ page }) => {
+test('a docked, collapsed Markdown file still refreshes its saved source line quote validity', async ({ page }) => {
   test.setTimeout(60000);
   const owner = f.owners[1], workspace = owner.doc.workspace.replace(/\/$/, ''), thread = '00000000-0000-4000-8000-000000000003';
   const post = (path: string, body: object) => f.view(`/a/${owner.alias}${path}`, body);
   await post('/api/threads', { id: thread, documentId: owner.doc.id });
-  await post('/api/questions', { documentId: owner.doc.id, threadId: thread, text: 'Quote bold', clientMessageId: 'bold', fileQuote: { path: `${workspace}/note.md`, kind: 'doc', exact: 'Alpha bold selected.' } });
+  await post('/api/questions', { documentId: owner.doc.id, threadId: thread, text: 'Quote bold', clientMessageId: 'bold', fileQuote: { path: `${workspace}/note.md`, kind: 'doc', exact: 'Alpha **bold** selected.', startLine: 1, endLine: 1 } });
   await agentReply(owner, thread, [], 'Noted.');
   const { open, file } = await openFiles(page, { 'note.md': 'Alpha **bold** selected.' });
   const note = await open('note.md'), issues = page.locator('.sidebar .passage-context .changed');

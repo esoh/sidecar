@@ -6,6 +6,7 @@ import { ADDED_CLOSE, ADDED_OPEN, REMOVED_CLOSE, REMOVED_OPEN, buildUnits, foldU
 // Plannotator's block diff (MIT) rendered with Sidecar's Markdown renderer. Removed text carries
 // .annotation-exclude, so quotes taken from this view can only contain the current file's text.
 const SENTINELS = new RegExp(`([${ADDED_OPEN}-${REMOVED_CLOSE}])`);
+const REMOVED_WORDS = new RegExp(`${REMOVED_OPEN}[^${REMOVED_CLOSE}]*${REMOVED_CLOSE}`, 'g'), ADDED_MARKS = new RegExp(`[${ADDED_OPEN}${ADDED_CLOSE}]`, 'g');
 function markWords(root: HTMLElement) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), nodes: Text[] = [];
   for (let node = walker.nextNode(); node; node = walker.nextNode()) nodes.push(node as Text);
@@ -32,13 +33,13 @@ function Unit({ unit, anchorPrefix, linkBase }: { unit: DiffUnit; anchorPrefix: 
   const ref = useRef<HTMLDivElement>(null);
   const isInline = unit.type === 'modified' && !!unit.tokens;
   useLayoutEffect(() => { if (ref.current) markWords(ref.current); }, []);
-  const render = (markdown: string) => <MarkdownDocument markdown={markdown} documentId="" anchorPrefix={anchorPrefix} linkBase={linkBase} />;
+  const render = (markdown: string, sourceLines = true) => <MarkdownDocument markdown={markdown} documentId="" anchorPrefix={anchorPrefix} linkBase={linkBase} sourceLines={sourceLines} />;
   if (unit.type === 'unchanged') return render(unit.markdown);
   if (unit.type === 'added') return <div className="plan-diff-added">{render(unit.markdown)}</div>;
-  if (unit.type === 'removed') return <div className="plan-diff-removed md-diff-removed annotation-exclude">{render(unit.markdown)}</div>;
+  if (unit.type === 'removed') return <div className="plan-diff-removed md-diff-removed annotation-exclude">{render(unit.markdown, false)}</div>;
   if (isInline) return <div className="plan-diff-modified" ref={ref}>{render(unit.markdown)}</div>;
   return <>
-    <div className="plan-diff-removed md-diff-removed annotation-exclude">{render(unit.old ?? '')}</div>
+    <div className="plan-diff-removed md-diff-removed annotation-exclude">{render(unit.old ?? '', false)}</div>
     <div className="plan-diff-added">{render(unit.markdown)}</div>
   </>;
 }
@@ -47,6 +48,8 @@ export function MarkdownDiff({ old, current, anchorPrefix, linkBase, source }: {
   old: string; current: string; anchorPrefix: string; linkBase?: string; source: ReactNode;
 }) {
   const units = useMemo(() => buildUnits(computePlanDiff(old, current).blocks), [old, current]);
+  // Where each current-text unit sits in the file, so a selection in it can be quoted as source.
+  const spans = useMemo(() => { let cursor = 0; return units.map(unit => { const text = unit.markdown.replace(REMOVED_WORDS, '').replace(ADDED_MARKS, ''), at = unit.type === 'removed' ? -1 : current.indexOf(text, cursor); if (at < 0) return null; cursor = at + text.length; return { start: at, end: cursor }; }); }, [units, current]);
   const [view, setView] = useState<'rendered' | 'source'>('rendered');
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [at, setAt] = useState(-1);
@@ -90,7 +93,7 @@ export function MarkdownDiff({ old, current, anchorPrefix, linkBase, source }: {
       {view === 'source' ? source : items.map((item, index) => {
         if ('fold' in item) return <button key={item.fold.key + index} className="md-diff-fold" onClick={() => setExpanded(previous => new Set(previous).add(item.fold.key))}>⋯ {item.fold.units.length} unchanged {item.fold.units.length === 1 ? 'block' : 'blocks'}</button>;
         const change = changeAt[item.index];
-        return <div key={`${item.unit.type === 'modified' ? item.unit.markdown : item.unit.markdown.slice(0, 40)}:${item.index}`} className={`md-diff-unit${change >= 0 && change === at ? ' is-current' : ''}`} data-change={change >= 0 ? change : undefined}>
+        return <div key={`${item.unit.type === 'modified' ? item.unit.markdown : item.unit.markdown.slice(0, 40)}:${item.index}`} className={`md-diff-unit${change >= 0 && change === at ? ' is-current' : ''}`} data-change={change >= 0 ? change : undefined} data-source-start={spans[item.index]?.start} data-source-end={spans[item.index]?.end}>
           <Unit unit={item.unit} anchorPrefix={anchorPrefix} linkBase={linkBase} />
         </div>;
       })}

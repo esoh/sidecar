@@ -49,7 +49,7 @@ function restoreWindows(stored: Record<string, unknown> | null) {
   };
 }
 
-export function PinnedWindows({ workspace, isRestored, viewScope, threads, files, root, documentId, comparison, changesScope, openRequests, onOpened, onCloseFile, onSetFileScripts, onSetLineRangeVisible, onCloseChanges, onOpenChange, onQuoteFile, onRevealFile, onGoToMessage, watched, onRenderedText, ...contentProps }: {
+export function PinnedWindows({ workspace, isRestored, viewScope, threads, files, root, documentId, comparison, changesScope, openRequests, onOpened, onCloseFile, onSetFileScripts, onSetLineRangeVisible, onCloseChanges, onOpenChange, onQuoteFile, onRevealFile, onGoToMessage, watched, ...contentProps }: {
   workspace: RefObject<HTMLDivElement | null>; isRestored: boolean; viewScope: string; threads: Thread[]; documentId: string;
   files: OpenFile[]; root?: string; onCloseFile: (id: string) => void; onSetFileScripts: (id: string, enabled: boolean) => void;
   onSetLineRangeVisible: (id: string, visible: boolean) => void;
@@ -58,7 +58,7 @@ export function PinnedWindows({ workspace, isRestored, viewScope, threads, files
   onRevealFile: (path: string) => void;
   openRequests: string[]; onOpened: (ids: string[]) => void;
   onGoToMessage: (id: string) => void;
-  watched: Record<string, WatchedFile>; onRenderedText: (id: string, version: string, text: string) => void;
+  watched: Record<string, WatchedFile>;
 } & Pick<MessageContentProps, 'activeSelectionId' | 'passageIssue' | 'fileQuoteIssue' | 'showPassage' | 'showOriginal' | 'onQuoteMessage' | 'onOpenFileQuote'>) {
   // Array order records when a window was opened; docking, focus and tab order are independent.
   const [initial] = useState(() => restoreWindows(documentId ? readView(viewKey(documentId + viewScope, 'windows')) : null));
@@ -254,7 +254,7 @@ export function PinnedWindows({ workspace, isRestored, viewScope, threads, files
   const zoomControls = (id: string) => <ZoomControls zoom={zoomFor(id)} onZoom={zoom => updateWindow(id, { zoom })} />;
   const renderContent = (id: string, prefix: string) => {
     const entry = find(id);
-    if (entry?.kind === 'file') return <FilePreview key={entry.id} {...entry.file} documentId={documentId} root={entry.file.root ?? root} loaded={watched[entry.id]} onRenderedText={(version, text) => onRenderedText(entry.id, version, text)} comparison={comparison} onQuoteFile={onQuoteFile} onRevealFile={onRevealFile} onSetLineRangeVisible={visible => onSetLineRangeVisible(entry.id, visible)} onSetScripts={enabled => onSetFileScripts(entry.id, enabled)} />;
+    if (entry?.kind === 'file') return <FilePreview key={entry.id} {...entry.file} documentId={documentId} root={entry.file.root ?? root} loaded={watched[entry.id]} comparison={comparison} onQuoteFile={onQuoteFile} onRevealFile={onRevealFile} onSetLineRangeVisible={visible => onSetLineRangeVisible(entry.id, visible)} onSetScripts={enabled => onSetFileScripts(entry.id, enabled)} />;
     if (entry?.kind === 'changes') return <ChangedFiles documentId={documentId} scope={entry.scope} comparison={comparison} onOpenFile={onOpenChange} />;
     return entry && <div className={`message ${entry.message.role}`}><MessageContent {...contentProps} {...entry} documentId={documentId} prefix={prefix} onGoToMessage={onGoToMessage} /></div>;
   };

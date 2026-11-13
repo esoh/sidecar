@@ -291,7 +291,7 @@ test('annotation and heading links reveal only the required folded ancestors', a
 test('fold animations finish before annotation and heading navigation scrolls', async ({ page }) => {
   const doc = await f.register('animated-folds.md', '[Jump to inner](#inner)\n\n## Outer\n\n' + 'Outer context.\n\n'.repeat(15) + '### Inner\n\n' + 'Inner context.\n\n'.repeat(15) + 'Animated target passage.\n\n## End\n\nEnd body.\n');
   await page.goto(`${f.url}/?document=${doc.id}`);
-  const input = page.getByLabel('Message', { exact: true }); await input.fill('Where?'); await input.press('Enter'); await expect(input).toHaveValue('');
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Where?'); await input.press('Enter'); await expect(input).toHaveValue(''); await expect(input).toHaveValue('');
   await answer('[[sidecar-meta {"highlights":[{"exact":"Animated target passage."}]}]]\nSee [animated target](#selection-1).');
   await expect(page.locator('#document mark')).toHaveCount(1);
   const fold = (name: string) => page.locator('#document details.document-section').filter({ has: page.locator(`:scope > summary #${name}`) });
@@ -3804,6 +3804,48 @@ test('file previews attach a file quote after the conversation pane toggles', as
   await expect(page.locator('.draft-selection')).toContainText('Other text.');
 });
 
+test('File window line quote: a Markdown file selection is a source slice with lines and goes stale when the text is removed', async ({ page }) => {
+  const root = await filesWorkspace({ 'note.md': '# Note\n\nHello **world** again.\n' });
+  const doc = await f.register('main.md', '# Main\n\nBody.\n');
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Show files' }).click();
+  await page.getByRole('complementary', { name: 'Files' }).getByTitle('note.md', { exact: true }).click();
+  const preview = page.getByRole('region', { name: 'File preview' });
+  await expect(preview.getByRole('heading', { name: 'Note' })).toBeVisible();
+  // No hidden rendered-text probe is mounted for docked files.
+  await expect(page.locator('[inert]')).toHaveCount(0);
+  await page.evaluate(() => {
+    const p = document.querySelector('.file-preview p')!;
+    const range = document.createRange(); range.setStart(p.firstChild!, 0); range.setEnd(p.querySelector('strong')!.firstChild!, 3);
+    getSelection()!.removeAllRanges(); getSelection()!.addRange(range);
+    document.querySelector('.file-preview article')!.dispatchEvent(new Event('mouseup', { bubbles: true }));
+  });
+  const input = page.getByLabel('Message', { exact: true });
+  await expect(page.locator('.draft-selection')).toContainText('note.md:3');
+  await input.fill('About this'); await input.press('Enter'); await expect(input).toHaveValue('');
+  expect((await lastRequest()).fileQuote).toEqual({ path: `${root}/note.md`, kind: 'doc', exact: 'Hello **wor', startLine: 3, endLine: 3 });
+  await answer('Noted.');
+  await expect(page.locator('.sidebar .passage-context .changed')).toHaveCount(0);
+  await writeFile(join(root, 'note.md'), '# Note\n\nEntirely different.\n');
+  await expect(page.locator('.sidebar .passage-context .changed')).toHaveText('Selection changed', { timeout: 10000 });
+});
+
+test('Original view source: a quote saved before a file change still shows and paints on Show original', async ({ page }) => {
+  const markdown = '# Review\n\nKeep **this bold** passage.\n';
+  const doc = await f.register('orig-source.md', markdown);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Where?'); await input.press('Enter'); await expect(input).toHaveValue('');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"**this bold** passage"}]}]]\nSee [it](#selection-1).');
+  await page.locator('.sidebar').getByRole('link', { name: 'it', exact: true }).click();
+  await expect(page.locator('#document mark')).toHaveText(['this bold', ' passage']);
+  await writeFile(doc.path, '# Review\n\nKeep something else.\n');
+  await expect(page.getByText('Passage changed', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'View original document', exact: true }).click();
+  await expect(page.locator('.original-document mark')).toHaveText(['this bold', ' passage']);
+});
+
 test('opened files retain their own roots when the document workspace changes', async ({ page }) => {
   const first = await filesWorkspace({ 'a.md': '# From first root\n' });
   const second = await filesWorkspace({ 'a.md': '# From second root\n' });
@@ -4818,7 +4860,7 @@ test('file reference ranges reveal source lines from documents and replies with 
   await expect.poll(() => isRevealed(40)).toBe(true);
   await expect(file.locator('[data-file-reference]')).toHaveText(['export const value40 = 40;\n', 'export const value41 = 41;\n', 'export const value42 = 42;\n']);
   await file.getByRole('button', { name: 'Close file window' }).click();
-  await input.fill('Where?'); await input.press('Enter');
+  await input.fill('Where?'); await input.press('Enter'); await expect(input).toHaveValue('');
   await expect(input).toHaveValue('');
   await answer(`See [these lines](${root}/src/a.ts:170-172).`);
   await input.fill('Keep my follow-up');
@@ -5402,7 +5444,7 @@ test('clicking an edit-mode quote while editing scrolls the editor to its lines'
 async function passageThread(page: Page) {
   const doc = await f.register('passage-guard.md', '# Title\n\nHighlighted passage here.\n');
   await page.goto(`${f.url}/?document=${doc.id}`);
-  const input = page.getByLabel('Message', { exact: true }); await input.fill('Where?'); await input.press('Enter');
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Where?'); await input.press('Enter'); await expect(input).toHaveValue('');
   await expect(input).toHaveValue('');
   await answer('[[sidecar-meta {"highlights":[{"exact":"Highlighted passage here."}]}]]\nSee [the passage](#selection-1).');
   await expect(page.locator('.sidebar').getByRole('button', { name: /Show passage/ }).first()).toBeVisible();
