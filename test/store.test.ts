@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { isFileQuote } from '../src/quote.ts';
+import { isFileQuote, isQuote } from '../src/quote.ts';
 import { createState, createThread, registerDocument, submit, claim, reply, resolveThread, setTitle, setBaseBranch, openStore, readSavedState } from '../src/store.ts';
 
 for (const order of ['combined', 'older-first'] as const) test(`mid-turn receipts preserve immutable batches: ${order}`, () => {
@@ -45,7 +45,7 @@ const owner = { agent: 'codex' as const, sessionId: '11111111-1111-4111-8111-111
 test('unsupported state versions are rejected without overwriting saved input', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'sidecar-unsupported-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  for (const version of [1, 2, 3, 4, 6, 99]) {
+  for (const version of [1, 2, 3, 4, 7, 99]) {
     const raw = JSON.stringify({ ...createState(owner), version });
     await writeFile(join(directory, 'state.json'), raw);
     await assert.rejects(openStore(directory, owner), /Unsupported Sidecar state version/);
@@ -156,13 +156,12 @@ test('replies validate routing, deduplicate, and retain user resolution', () => 
 
 test('follow-ups remain in their document and use only their own quote context', () => {
   const { state, input, other } = setup();
-  const quote = { exact: 'hello', prefix: '', suffix: ' world', start: 0, end: 5, version: 'v1', sentence: 'hello world.' };
+  const quote = { exact: 'hello', prefix: '', suffix: ' world', start: 0, end: 5, version: 'v1' };
   const first = submit(state, { ...input, quote });
   const follow = submit(state, { ...input, threadId: first.threadId, text: 'Why?', clientMessageId: 'follow' });
   assert.equal(follow.threadId, first.threadId);
   assert.equal(follow.quote, undefined);
-  assert.throws(() => submit(state, { ...input, quote: { ...quote, sentence: 'unrelated' }, clientMessageId: 'invalid-sentence' }));
-  assert.throws(() => submit(state, { ...input, quote: { ...quote, sentence: 'hello' + 'x'.repeat(512) }, clientMessageId: 'long-sentence' }));
+  assert.throws(() => submit(state, { ...input, quote: { ...quote, sentence: 'hello world.' } as any, clientMessageId: 'has-sentence' }));
   assert.throws(() => submit(state, { ...input, documentId: other.id, threadId: first.threadId, clientMessageId: 'bad' }));
   assert.throws(() => submit(state, { ...input, documentId: '__proto__', clientMessageId: 'bad' }));
   assert.throws(() => submit(state, { ...input, text: ' ', clientMessageId: 'empty' }));
@@ -301,4 +300,41 @@ test('threads may be bound to an absolute file and html file quotes need a selec
     { ...html, fingerprint: undefined }, { ...html, fingerprint: 'abc' }, { ...html, isElement: undefined }, { ...html, kind: 'doc' }, { ...html, kind: 'code', isElement: undefined, fingerprint: undefined }]) assert.equal(isFileQuote(bad), false);
   assert.equal(submit(state, { ...input, fileQuote: html, clientMessageId: 'html' }).fileQuote?.selector, 'body > b');
   assert.deepEqual(readSavedState(JSON.parse(JSON.stringify(state))), state);
+});
+
+test('version 5 state migrates to source anchors and keeps non-Markdown references', () => {
+  const { state } = (() => { const state = createState(owner); return { state }; })();
+  const md = registerDocument(state, { path: '/tmp/a.md', generated: false, workspace: '/tmp' }), html = registerDocument(state, { path: '/tmp/p.html', generated: false });
+  const base = { clientMessageId: 'c' };
+  const quote = { exact: 'hello', prefix: '', suffix: ' world', start: 0, end: 5, version: 'v1' };
+  const first = submit(state, { documentId: md.id, text: 'Q', quote, clientMessageId: 'q1' });
+  const thread = state.threads[first.threadId];
+  const html1 = { path: '/tmp/p.html', kind: 'html', exact: 'x', selector: 'body' }, code = { path: '/tmp/c.ts', kind: 'code', exact: 'y', startLine: 1, endLine: 1 };
+  const doc1 = { path: '/tmp/b.md', kind: 'doc', exact: 'z' }, own = { path: '/tmp/a.md', kind: 'doc', exact: 'w', startLine: 2, endLine: 2 };
+  const withFile = (fileQuote: object, id: string) => submit(state, { documentId: md.id, threadId: thread.id, text: id, fileQuote: fileQuote as any, clientMessageId: id });
+  const reqs = [withFile(html1, 'h'), withFile(code, 'c'), withFile(doc1, 'd'), withFile(own, 'o')];
+  const msgQuote = submit(state, { documentId: md.id, threadId: thread.id, text: 'm', messageQuote: { threadId: thread.id, messageId: thread.messages[0].id, exact: 'Q' }, clientMessageId: 'm' });
+  const answer = (requestId: string) => { claim(state, requestId, {}); reply(state, { requestId, documentId: md.id, threadId: thread.id, text: 'A', selectionVersion: 'v1', metadata: { highlights: [{ exact: 'hello' }] } as any }); };
+  answer(first.id);
+  const selection = thread.messages.filter(m => m.role === 'agent').flatMap(m => m.selections ?? [])[0];
+  assert.ok(selection);
+  const saved: any = structuredClone({ ...state, version: 5 });
+  saved.requests[first.id].quote.sentence = 'hello world.';
+  saved.proposals['00000000-0000-4000-8000-000000000001'] = { id: '00000000-0000-4000-8000-000000000001', documentId: md.id, threadId: thread.id, messageId: thread.messages.find(m => m.role === 'agent' && m.selections?.length)!.id, selectionId: selection.id, before: 'hello', after: 'bye', prefix: '', suffix: '', baseRange: { start: 0, end: 5 }, status: 'pending', baseVersion: 'v1', createdAt: 1 };
+  const migrated = (() => { try { return readSavedState(saved); } catch (error) { return error as Error; } })();
+  assert.ok(!(migrated instanceof Error), String(migrated));
+  assert.equal(migrated.version, 6);
+  assert.equal(migrated.requests[first.id].quote, undefined);
+  assert.equal(migrated.requests[reqs[0].id].fileQuote?.kind, 'html');
+  assert.equal(migrated.requests[reqs[1].id].fileQuote?.kind, 'code');
+  assert.equal(migrated.requests[reqs[2].id].fileQuote, undefined);
+  assert.equal(migrated.requests[reqs[3].id].fileQuote, undefined);
+  assert.ok(migrated.requests[msgQuote.id].messageQuote);
+  assert.equal(migrated.threads[thread.id].messages.length, thread.messages.length);
+  assert.ok(!JSON.stringify(migrated).includes('sentence'));
+  assert.equal(html.id.length > 0, true); void base;
+  const kept = migrated.threads[thread.id].messages.flatMap(m => m.selections ?? []);
+  assert.deepEqual(kept.map(s => [s.id, s.isVisible]), [[selection.id, false]]);
+  assert.equal(Object.keys(migrated.proposals).length, 1);
+  assert.equal(isQuote({ ...selection.quote, sentence: 'hello' }), false);
 });

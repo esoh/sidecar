@@ -446,3 +446,15 @@ test('closing the last document leaves its server available for browsing with no
   assert.deepEqual(state.requests, {});
   assert.match(await readFile(doc.path, 'utf8'), /Hello/);
 });
+
+test('request payload carries 1-based source lines for a source quote', async t => {
+  const f = await fixture(t), markdown = '# Title\n\nSome **world** here\nand more\n', doc = await f.register('lines.md', markdown);
+  const version = (await import('node:crypto')).createHash('sha256').update(markdown).digest('hex');
+  const at = (exact: string) => { const start = markdown.indexOf(exact); return { exact, prefix: '', suffix: '', start, end: start + exact.length, version }; };
+  const ask = async (exact: string, clientMessageId: string) => {
+    const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'Why?', quote: at(exact), clientMessageId })).json();
+    return (await (await f.agent(`/agent/requests/${request.id}/prepare`, {})).json()).quote;
+  };
+  assert.deepEqual(await ask('**world**', 'one'), { exact: '**world**', startLine: 3, endLine: 3 });
+  assert.deepEqual(await ask('here\nand more', 'two'), { exact: 'here\nand more', startLine: 3, endLine: 4 });
+});

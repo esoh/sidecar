@@ -5,6 +5,7 @@ import { compactNotification, compactContext } from './agent-protocol.ts';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { type IncomingMessage, type ServerResponse } from 'node:http';
+import { readFileSync } from 'node:fs';
 import { readFile, writeFile, realpath, rm, stat } from 'node:fs/promises';
 import { basename, join, dirname, relative, isAbsolute, extname } from 'node:path';
 import { notifyCodex } from './agent.ts';
@@ -26,7 +27,7 @@ import { getGitRepositoryInfoAsync, listBranches, type ComparisonRequest } from 
 import { htmlBridge, shortcutHelper } from './html-bridge.ts';
 import { claim, createThread, closeDocument, discardEmptyThread, nameThread, pinMessage, DomainError, get, isObject, isQuote, isRepoInfo, isThreadFile, openStore, ownerKey, registerDocument, reply, recordProgress, resolveThread, reanchorSelection, setBaseBranch, isBranchName, setSelectionVisibility, setTitle, submit, type DocumentRecord, type Owner, type SubmitInput, type ReplyInput } from './store.ts';
 import { isPinStyle } from './pin-style.ts';
-import { stopRequest, prepareBatch, requestBatch, setMessageSelectionVisibility, type State } from './store.ts';
+import { stopRequest, prepareBatch, requestBatch, setMessageSelectionVisibility, type State, type RequestRecord } from './store.ts';
 import { isMessageQuote, isFileQuote } from './quote.ts';
 
 type DocumentData = Awaited<ReturnType<typeof readDocument>>;
@@ -59,13 +60,27 @@ function markAccepted(state: State, id: string, nativeTurnId?: string) {
     }
   }
 }
-function requestContext(state: State, id: string) {
+// 1-based lines of a source quote, read from its version snapshot (or the current file while it still matches there).
+// Without either source the lines are omitted rather than guessed.
+function quoteLines(directory: string, state: State, request: RequestRecord) {
+  const quote = request.quote!;
+  const sources = [join(directory, 'versions', request.documentId, `${quote.version}.md`), state.documents[request.documentId]?.path];
+  for (const path of sources) {
+    let source: string;
+    try { source = readFileSync(path ?? '', 'utf8'); } catch { continue; }
+    if (source.slice(quote.start, quote.end) !== quote.exact) continue;
+    const line = (offset: number) => source.slice(0, offset).split('\n').length;
+    return { startLine: line(quote.start), endLine: line(Math.max(quote.start, quote.end - 1)) };
+  }
+  return {};
+}
+function requestContext(directory: string, state: State, id: string) {
   const requests = requestBatch(state, id), request = get(state.requests, id), thread = get(state.threads, request.threadId);
   const questions = thread.messages.filter(message => message.role === 'user');
   const previous = questions[questions.findIndex(message => message.requestId === requests[0].id) - 1];
   const messages = requests.map(request => ({
     requestId: request.id, text: request.text,
-    ...(request.quote ? { quote: { exact: request.quote.exact, ...(request.quote.sentence ? { sentence: request.quote.sentence } : {}) } } : {}),
+    ...(request.quote ? { quote: { exact: request.quote.exact, ...quoteLines(directory, state, request) } } : {}),
     ...(request.messageQuote ? { messageQuote: request.messageQuote } : {}),
     ...(request.fileQuote ? { fileQuote: request.fileQuote } : {}),
   }));
@@ -581,12 +596,12 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
       if (request.status === 'uncertain') return {};
       if (request.status !== 'queued') return { claimStatus: request.status === 'claimed' ? 'already-claimed' : 'completed' };
       prepareBatch(state, id);
-      const context = requestContext(state, id);
+      const context = requestContext(directory, state, id);
       // ponytail: large contexts retain the fetch path; avoid OS argument and native watcher output limits.
       if (Buffer.byteLength(JSON.stringify(context)) > 48 * 1024) return {};
       const result = claim(state, id, {});
       request.handoff = 'prepared';
-      return { claimStatus: result.claimStatus, context: requestContext(state, id) };
+      return { claimStatus: result.claimStatus, context: requestContext(directory, state, id) };
     });
     if (!prepared.context) return wire({ ...notification, ...(prepared.claimStatus ? { claimStatus: prepared.claimStatus } : {}) });
     const request = get(store.read().requests, id);
@@ -941,7 +956,7 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
               type: 'sidecar.recovery', ownerKey: ownerKey(owner), requestId: id, recoveryId: request.replyRecovery.id,
               documentId: request.documentId, thread: { id: request.threadId }, stream,
               instruction: 'Follow the Sidecar skill. Reply recovery only: resend the existing answer. Do not repeat the original task, tools, or edits.',
-            } : { type: 'sidecar.request', ownerKey: ownerKey(owner), requestId: id, stream, ...requestContext(state, id), instruction: 'Follow the Sidecar skill.' })];
+            } : { type: 'sidecar.request', ownerKey: ownerKey(owner), requestId: id, stream, ...requestContext(directory, state, id), instruction: 'Follow the Sidecar skill.' })];
           }));
           changed(); json(response, { ok: true, notifications }); return;
         }
@@ -1149,7 +1164,7 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
         const markers = result.claimStatus === 'already-claimed' && active
           ? active.error ? { error: active.error } : { prefix: active.prefix, suffix: active.suffix, progress: active.progress }
           : undefined;
-        const context = { ...result, ...requestContext(state, id), ...(markers ? { stream: markers } : {}), document, thread: get(state.threads, result.request.threadId), proposals: Object.values(state.proposals).filter(p => p.threadId === result.request.threadId) };
+        const context = { ...result, ...requestContext(directory, state, id), ...(markers ? { stream: markers } : {}), document, thread: get(state.threads, result.request.threadId), proposals: Object.values(state.proposals).filter(p => p.threadId === result.request.threadId) };
         changed(); json(response, compact ? await compactContext(owner, context, ids) : context); return;
       }
       if (method === 'POST' && path === '/agent/streams') {
