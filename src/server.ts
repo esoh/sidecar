@@ -16,6 +16,7 @@ import { isHtmlPath, readDocument } from './documents.ts';
 import { prepareProposal } from './proposals.ts';
 import { createProposalService } from './proposal-service.ts';
 import { saveDocumentVersion } from './snapshots.ts';
+import { saveDocumentSource } from './document-save.ts';
 import { readAppVersion } from './version.ts';
 import { readTunnelConfig } from './tunnel-config.ts';
 import { libraryDocument, listLibrary, recordDocumentOpen, closeLibraryDocument, cleanupClosedDocument } from './library.ts';
@@ -790,6 +791,15 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
         documentReads.add(reading);
         try { await reading.done; } finally { documentReads.delete(reading); }
         return;
+      }
+      const sourceSave = path.match(/^\/api\/documents\/([^/]+)\/source$/);
+      if (method === 'POST' && sourceSave) {
+        const document = get(store.read().documents, sourceSave[1]), body = await bodyOf(request, 16 * 1024 * 1024);
+        if (typeof body.markdown !== 'string' || typeof body.baseVersion !== 'string' || !/^[a-f0-9]{64}$/.test(body.baseVersion)) throw new DomainError('Expected markdown and a 64-character baseVersion');
+        const { markdown, baseVersion } = body;
+        const saved = await proposalService.withDocument(document.id, () => saveDocumentSource({ directory, documentId: document.id, path: document.path, markdown, baseVersion }));
+        await refresh(document);
+        json(response, { version: saved.version }); return;
       }
       const closingDocument = path.match(/^\/api\/documents\/([^/]+)$/);
       if (method === 'DELETE' && closingDocument) {

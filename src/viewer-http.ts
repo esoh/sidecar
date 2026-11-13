@@ -15,15 +15,15 @@ type ViewerHostOptions = {
   isPage?: (path: string) => boolean;
   handle: (request: IncomingMessage, response: ServerResponse, context: ViewerContext) => Promise<void>;
 };
-export async function bodyOf(request: IncomingMessage): Promise<Record<string, unknown>> {
+export async function bodyOf(request: IncomingMessage, limit = 256 * 1024): Promise<Record<string, unknown>> {
   let size = 0;
   const chunks: Buffer[] = [];
   for await (const chunk of request) {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += bytes.length;
-    if (size <= 256 * 1024) chunks.push(bytes);
+    if (size <= limit) chunks.push(bytes);
   }
-  if (size > 256 * 1024) throw new DomainError('Request exceeds 256 KiB', 413);
+  if (size > limit) throw new DomainError(`Request exceeds ${limit >= 1048576 ? limit / 1048576 + ' MiB' : limit / 1024 + ' KiB'}`, 413);
   let value: unknown;
   try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
   catch { throw new DomainError('Invalid JSON'); }
