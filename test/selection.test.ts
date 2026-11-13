@@ -77,9 +77,11 @@ test('freshQuote passes a valid quote through, restamps a stale one and blocks a
   const fresh = freshQuote(stale, 'Intro.\n\n' + source, 'v2') as ReturnType<typeof sourceQuote>;
   assert.equal(fresh.version, 'v2');
   assert.equal(('Intro.\n\n' + source).slice(fresh.start, fresh.end), fresh.exact);
-  const unsavedSource = source;
-  const restamped = freshQuote(stale, unsavedSource, 'v2');
-  assert.equal(typeof restamped, 'string');
+  assert.equal(typeof freshQuote(stale, source, 'v2'), 'string'); // the typed prefix is not in this source: context changed
+  const unsaved = freshQuote({ ...valid, version: '' }, source, 'v3') as ReturnType<typeof sourceQuote>;
+  assert.equal(unsaved.version, 'v3');
+  assert.equal(source.slice(unsaved.start, unsaved.end), 'marker');
+  assert.equal(typeof freshQuote({ ...valid, version: '', start: 0, end: 6, exact: 'marker', prefix: 'zzz' }, 'No match.', 'v3'), 'string');
   assert.equal(freshQuote(valid, 'Nothing here.', 'v3'), 'Passage changed');
   const twice = 'a marker and another marker';
   assert.equal(freshQuote({ ...valid, prefix: '', suffix: '' }, twice, 'v3'), 'Multiple matching passages');

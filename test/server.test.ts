@@ -468,3 +468,12 @@ test('a traversal-style quote version never reads outside the versions directory
   const prepared = await (await f.agent(`/agent/requests/${request.id}/prepare`, {})).json();
   assert.deepEqual(prepared.quote, { exact: 'SECRET' });
 });
+
+test('a question quoting unsaved text (empty version) is rejected', async t => {
+  const f = await fixture(t);
+  const doc = await f.register('unsaved-quote.md', 'Some marker text.\n');
+  const quote = { exact: 'marker', prefix: 'Some ', suffix: ' text.', start: 5, end: 11, version: '', isPositionVerified: true };
+  const response = await f.view('/api/questions', { documentId: doc.id, text: 'Q', clientMessageId: 'unsaved', quote });
+  assert.equal(response.status, 400);
+  assert.match(await response.text(), /Passage changed/);
+});

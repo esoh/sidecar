@@ -252,6 +252,7 @@ export function submit(state: State, input: SubmitInput): RequestRecord {
   const document = get(state.documents, input.documentId);
   if (!input.text.trim() || !input.clientMessageId || input.clientMessageId.length > 128) throw new DomainError('A question and message ID are required');
   if (input.quote !== undefined && !isQuote(input.quote)) throw new DomainError('Invalid selection');
+  if (input.quote?.version === '') throw new DomainError('Passage changed');
   if ([input.quote, input.messageQuote, input.fileQuote].filter(value => value !== undefined).length > 1) throw new DomainError('Attach only one selection per message');
   if (input.fileQuote !== undefined) {
     if (!isFileQuote(input.fileQuote)) throw new DomainError('Invalid file quote');

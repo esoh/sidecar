@@ -358,8 +358,7 @@ function App() {
   // The main document's reading position, applied once its content has laid out (a few frames at most), then saved on scroll.
   const canvas = useRef<HTMLElement>(null), scrollRestored = useRef('');
   const [editAnchor, setEditAnchor] = useState<number | null>(null), editMode = useRef<EditModeHandle | null>(null), returnLine = useRef<number | null>(null);
-  const isEditing = editAnchor !== null, editorQuote = useRef<Quote | null>(null), unsavedQuotes = useRef(new Set<string>());
-  const quoteKey = (quote: Quote) => JSON.stringify([quote.start, quote.end, quote.version, quote.exact]);
+  const isEditing = editAnchor !== null, editorQuote = useRef<Quote | null>(null);
   const [unsavedText, setUnsavedText] = useState('');
   const [editStatus, setEditStatus] = useState({ dirty: false, saving: false });
   const hasCarriageReturn = content.markdown.includes('\r');
@@ -380,13 +379,13 @@ function App() {
     if (!picked) { if (editorQuote.current) { if (composing) passageDrafts.current.delete(draftKey); clearSelection(); } return; }
     if (composing) passageDrafts.current.delete(draftKey);
     fileSelectionVisit.current++;
-    editorQuote.current = picked.quote; lastRect.current = picked.rect;
-    // Made against unsaved text: its offsets are not in its version's source until it is found again in the saved text.
-    if (editMode.current?.isDirty()) unsavedQuotes.current.add(quoteKey(picked.quote));
-    setSelection(picked.quote);
+    // Made against unsaved text: it carries no version (''), so it is found again in the saved text at send, even after a reload.
+    const quote = editMode.current?.isDirty() ? { ...picked.quote, version: '' } : picked.quote;
+    editorQuote.current = quote; lastRect.current = picked.rect;
+    setSelection(quote);
     if (activeThreadId && isSidebarShown) {
       const { messageQuote, fileQuote, ...rest } = drafts.get(activeThreadId) ?? { text: '', retry: null };
-      drafts.set(activeThreadId, { ...rest, quote: picked.quote });
+      drafts.set(activeThreadId, { ...rest, quote });
     }
     setComposing(false);
     setChoices(null);
@@ -407,7 +406,8 @@ function App() {
       }
     }
     const source = handle ? handle.source() : { text: content.markdown, version: content.version };
-    if (!checked || !source.version || (checked === quote && !unsavedQuotes.current.has(quoteKey(checked)))) return true;
+    if (!checked || (checked === quote && checked.version !== '')) return true;
+    if (!source.version) throw new Error('Passage changed');
     const fresh = freshQuote(checked, source.text, source.version);
     if (typeof fresh === 'string') throw new Error(fresh);
     return fresh === quote ? true : { quote: fresh };

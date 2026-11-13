@@ -5544,6 +5544,60 @@ test('an older thread draft with a dirty editor quote is restamped at send, afte
   await expect(page.locator('.draft-selection')).toHaveCount(0);
 });
 
+test('a thread draft quoting unsaved text survives save and reload, and is restamped when sent', async ({ page }) => {
+  const doc = await f.register('reload-draft.md', '# Title\n\nBody with a marker and a second word.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Start'); await input.press('Enter'); await expect(input).toHaveValue('');
+  await answer('Ok.');
+  const sent: any[] = [], saved: string[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  page.on('response', async response => { if (response.url().endsWith('/source') && response.request().method() !== 'GET') saved.push((await response.json()).version); });
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  await selectEditorText(page, 3, 'Body with a '.length, 'marker'.length);
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await page.keyboard.press('ControlOrMeta+s');
+  await expect.poll(() => saved.length).toBe(1);
+  await page.reload();
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await page.getByLabel('Message', { exact: true }).fill('About marker'); await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect.poll(() => sent.length).toBe(1);
+  const text = await readFile(doc.path, 'utf8');
+  expect(sent[0].quote.version).toBe(saved.at(-1));
+  expect(sent[0].quote.exact).toBe('marker');
+  expect(text.slice(sent[0].quote.start, sent[0].quote.end)).toBe('marker');
+  await expect(page.locator('.draft-selection')).toHaveCount(0);
+});
+
+test('a quote made while dirty, with the sidebar closed and another selection taken, is restamped when Done saves and sent later', async ({ page }) => {
+  const doc = await f.register('flow-b.md', '# Title\n\nBody with a marker and a second word.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Start'); await input.press('Enter'); await expect(input).toHaveValue('');
+  await answer('Ok.');
+  const sent: any[] = [], saved: string[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  page.on('response', async response => { if (response.url().endsWith('/source') && response.request().method() !== 'GET') saved.push((await response.json()).version); });
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  await selectEditorText(page, 3, 'Body with a '.length, 'marker'.length);
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await expect(page.locator('.draft-selection')).toHaveCount(0);
+  await selectEditorText(page, 3, 'Body with a marker and a '.length, 'second'.length);
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await page.locator('.thread-row').filter({ hasText: 'Ok.' }).first().click();
+  await page.getByLabel('Message', { exact: true }).fill('About marker'); await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect.poll(() => sent.length).toBe(1);
+  const text = await readFile(doc.path, 'utf8');
+  expect(sent[0].quote.version).toBe(saved.at(-1));
+  expect(sent[0].quote.exact).toBe('marker');
+  expect(text.slice(sent[0].quote.start, sent[0].quote.end)).toBe('marker');
+  await expect(page.locator('.message.user').filter({ hasText: 'About marker' })).toBeVisible();
+  await expect(page.locator('.draft-selection')).toHaveCount(0);
+});
+
 test('re-entering edit mode and pressing Done untouched keeps the restamped quote and the composer text', async ({ page }) => {
   const doc = await f.register('reenter.md', '# Title\n\nBody with a marker inside.\n');
   await page.goto(`${f.url}/?document=${doc.id}`);
