@@ -20,7 +20,7 @@ export async function viewerHtml(gateway = false) {
   return gateway ? html.replace('<head>', '<head><meta name="sidecar-gateway" content="1">') : html;
 }
 export async function serveViewerAsset(path: string, method: string, response: ServerResponse): Promise<boolean> {
-      const chunk = path.match(/^\/(app\.js|chunks\/[A-Za-z0-9_-]+\.js)$/);
+      const chunk = path.match(/^\/(app\.js|chunks\/[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.js)$/);
       if (method === 'GET' && chunk) {
         response.setHeader('Content-Type', 'text/javascript; charset=utf-8');
         // One build per server; the browser revalidates the content hash on later loads. Code splitting needs an outdir.

@@ -48,6 +48,18 @@ test('lazily imported chunks are served like the app bundle, only after viewer a
   assert.ok(!app.includes("Couldn't resolve parser"));
   const unauthenticated = await fetch(f.url + chunk);
   assert.equal(unauthenticated.status, 403); await unauthenticated.text();
+  // Every chunk reachable from the app (including dotted names such as mermaid.core) is served.
+  const seen = new Set<string>(), queue = [chunk, ...[...app.matchAll(/(?:from|import)\s*\(?\s*["']\.(\/chunks\/[A-Za-z0-9_.-]+\.js)["']/g)].map(match => match[1])];
+  for (let next = queue.pop(); next; next = queue.pop()) {
+    if (seen.has(next)) continue;
+    seen.add(next);
+    const served = await fetch(f.url + next, { headers: { Cookie: f.cookie } });
+    assert.equal(served.status, 200, next);
+    for (const [, name] of (await served.text()).matchAll(/(?:from|import)\s*\(?\s*["']\.\/(?:chunks\/)?([A-Za-z0-9_.-]+\.js)["']/g)) queue.push(`/chunks/${name}`);
+  }
+  assert.ok([...seen].some(path => /\/mermaid\.core-/.test(path)));
+  const traversal = await fetch(f.url + '/chunks/..%2Fapp.js', { headers: { Cookie: f.cookie } });
+  assert.equal(traversal.status, 404); await traversal.text();
   const unknown = await fetch(f.url + '/chunks/nope-AAAA.js', { headers: { Cookie: f.cookie } });
   assert.equal(unknown.status, 404); await unknown.text();
 });
