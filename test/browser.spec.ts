@@ -4885,8 +4885,7 @@ test('entering edit mode opens near the reading position and Done returns near t
     const target = [...document.querySelectorAll('#document h2')].find(e => e.textContent?.trim() === `Heading ${n}`)!;
     canvas.scrollTo({ top: canvas.scrollTop + target.getBoundingClientRect().top - canvas.getBoundingClientRect().top, behavior: 'instant' });
   }, 30);
-  // The button sits at the top of the document; dispatching the click keeps Playwright from scrolling the page back up first.
-  await page.getByRole('button', { name: 'Edit', exact: true }).dispatchEvent('click');
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
   const topLine = () => page.locator('.cm-scroller').evaluate(scroller => {
     const top = scroller.getBoundingClientRect().top;
     return [...scroller.querySelectorAll('.cm-line')].find(line => line.getBoundingClientRect().bottom > top + 1)?.textContent ?? '';
@@ -4910,4 +4909,5 @@ test('phone width shows the same single editor pane', async ({ page }) => {
   await expect(page.locator('.cm-editor')).toHaveCount(1);
   await expect(page.locator('.cm-editor')).toBeVisible();
   await expect(page.locator('#document')).toHaveCount(0);
+  for (const name of ['Save', 'Done']) await expect(page.getByRole('button', { name, exact: true })).toBeInViewport({ ratio: 1 });
 });

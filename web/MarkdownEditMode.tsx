@@ -14,10 +14,12 @@ export type EditModeHandle = {
 };
 type Choice = 'save' | 'discard' | 'cancel';
 
-export function MarkdownEditMode({ documentId, path, markdown, version, startLine, handleRef, onExit, onError }: {
+export function MarkdownEditMode({ documentId, path, markdown, version, startLine, handleRef, onExit, onError, onStatus }: {
   documentId: string; path: string; markdown: string; version: string; startLine: number;
   handleRef: MutableRefObject<EditModeHandle | null>;
   onExit: (line: number) => void; onError: (message: string) => void;
+  /** Dirty and saving state, shown by the app header's controls. */
+  onStatus: (status: { dirty: boolean; saving: boolean }) => void;
 }) {
   const [mountKey] = useState(0);
   const editor = useRef<MarkdownEditorHandle | null>(null), view = useRef<EditorView | null>(null);
@@ -58,6 +60,8 @@ export function MarkdownEditMode({ documentId, path, markdown, version, startLin
   }), [save, requestExit]);
   useEffect(() => () => { handleRef.current = null; }, [handleRef]);
 
+  useEffect(() => { onStatus({ dirty, saving: isSaving }); }, [dirty, isSaving]);
+  useEffect(() => () => onStatus({ dirty: false, saving: false }), []);
   useEffect(() => { if (asking) dialog.current?.showModal(); }, [asking]);
   useEffect(() => {
     if (!dirty) return;
@@ -85,12 +89,6 @@ export function MarkdownEditMode({ documentId, path, markdown, version, startLin
 
   return (
     <div className="markdown-edit-mode">
-      <div className="markdown-edit-bar annotation-exclude">
-        <span className="markdown-edit-path" title={path}>{path.split('/').pop()}</span>
-        {dirty && <span className="markdown-edit-dirty">● Unsaved</span>}
-        <button className="markdown-edit-save" disabled={!dirty || isSaving} onClick={() => void save()}>Save</button>
-        <button className="markdown-edit-done" onClick={() => void requestExit()}>Done</button>
-      </div>
       <MarkdownEditor
         markdown={markdown}
         documentId={mountId}

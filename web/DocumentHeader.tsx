@@ -4,10 +4,9 @@ import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
 import type { RepoInfo } from '../src/store.ts';
 
 // Badge markup and copy-button styling reuse Plannotator's DocBadges/Viewer (MIT).
-export function DocumentHeader({ repoInfo, markdown, onEdit, onError }: {
-  repoInfo?: RepoInfo; markdown: string; onEdit?: () => void; onError: (message: string) => void;
+export function DocumentHeader({ repoInfo, markdown, onError }: {
+  repoInfo?: RepoInfo; markdown: string; onError: (message: string) => void;
 }) {
-  const hasCarriageReturn = markdown.includes('\r');
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     if (!copied) return;
@@ -17,14 +16,6 @@ export function DocumentHeader({ repoInfo, markdown, onEdit, onError }: {
   return (
     <div className="document-tools annotation-exclude">
       <DocBadges layout="column" repoInfo={repoInfo} />
-      {onEdit && (
-        <button
-          className="document-edit flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted rounded-md transition-colors"
-          disabled={hasCarriageReturn}
-          title={hasCarriageReturn ? 'This file uses Windows (CRLF) line endings, which the editor would change. Edit it in your own editor.' : 'Edit this document'}
-          onClick={onEdit}
-        >Edit</button>
-      )}
       <button
         className="document-copy flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted rounded-md transition-colors"
         title={copied ? 'Copied!' : 'Copy file'}

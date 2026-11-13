@@ -356,6 +356,8 @@ function App() {
   // The main document's reading position, applied once its content has laid out (a few frames at most), then saved on scroll.
   const canvas = useRef<HTMLElement>(null), scrollRestored = useRef('');
   const [editStartLine, setEditStartLine] = useState<number | null>(null), editMode = useRef<EditModeHandle | null>(null), returnLine = useRef<number | null>(null);
+  const [editStatus, setEditStatus] = useState({ dirty: false, saving: false });
+  const hasCarriageReturn = content.markdown.includes('\r');
   const startEditing = () => {
     const top = canvas.current?.getBoundingClientRect().top ?? 0;
     const first = [...document.querySelectorAll<HTMLElement>('#document [data-source-line]')].find(node => {
@@ -1233,6 +1235,14 @@ function App() {
           <Icon name="panel" />
           <span>{isSidebarShown ? 'Document' : 'Chat'}</span>
         </button>
+        {current && !htmlView && !documentError && (editStartLine === null
+          ? <button className="sidebar-toggle edit-action" disabled={hasCarriageReturn} onClick={startEditing}
+              title={hasCarriageReturn ? 'This file uses Windows (CRLF) line endings, which the editor would change. Edit it in your own editor.' : 'Edit this document'}>Edit</button>
+          : <>
+              {editStatus.dirty && <span className="markdown-edit-dirty">● Unsaved</span>}
+              <button className="sidebar-toggle edit-action" disabled={!editStatus.dirty || editStatus.saving} onClick={() => { void editMode.current?.save(); }}>Save</button>
+              <button className="sidebar-toggle edit-action" onClick={() => { void editMode.current?.requestExit(); }}>Done</button>
+            </>)}
         {current && !htmlView && (
           <button className="sidebar-toggle" aria-label="Close document" title="Close document" disabled={isClosing} onClick={() => { void closeCurrentDocument(); }}>
             <Icon name="close" />
@@ -1291,7 +1301,7 @@ function App() {
             )}
             {editStartLine !== null && current ? (
               <MarkdownEditMode documentId={documentId} path={current.path} markdown={content.markdown} version={content.version}
-                startLine={editStartLine} handleRef={editMode} onExit={leaveEditing} onError={setError} />
+                startLine={editStartLine} handleRef={editMode} onExit={leaveEditing} onError={setError} onStatus={setEditStatus} />
             ) : (
             <article
               className="document-card w-full bg-card rounded-xl p-5 md:p-8 lg:p-10 xl:p-12 shadow-xl border border-border/50"
@@ -1321,7 +1331,7 @@ function App() {
                 }
               }}
             >
-              {current && !documentError && <DocumentHeader key={documentId} repoInfo={current.repoInfo} markdown={content.markdown} onEdit={isHtmlDocument ? undefined : startEditing} onError={setError} />}
+              {current && !documentError && <DocumentHeader key={documentId} repoInfo={current.repoInfo} markdown={content.markdown} onError={setError} />}
               <MarkdownDocument markdown={content.markdown} documentId={documentId} linkBase={current?.path.replace(/\/[^/]*$/, '')} canCollapseHeadings />
             </article>
             )}
