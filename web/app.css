@@ -1255,6 +1255,9 @@ pre code.pn-code[data-keep-layout] {
 .markdown-edit-mode { isolation: isolate; display: flex; flex-direction: column; height: calc(100vh - 110px); min-height: 320px; background: var(--card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
 .topbar .edit-action { width: auto; padding: 0 10px; font-size: 13px; }
 .topbar .markdown-edit-dirty { white-space: nowrap; color: var(--primary); font-size: 12px; }
+.markdown-edit-banner { margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--muted); }
+.markdown-edit-banner button, .markdown-edit-leave button { border: 1px solid var(--border); background: transparent; color: inherit; border-radius: 6px; padding: 5px 9px; font: inherit; cursor: pointer; }
+.markdown-edit-banner button:hover, .markdown-edit-leave button:hover { background: var(--muted); }
 .markdown-edit-leave { background: var(--popover); color: var(--foreground); border: 1px solid var(--border); border-radius: 8px; }
 .markdown-edit-leave div { display: flex; gap: 8px; justify-content: flex-end; }
 @media (min-width: 768px) {

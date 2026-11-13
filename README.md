@@ -102,7 +102,7 @@ Network access is initially off and is never inherited from old owner settings. 
 
 Trusted browsers stay signed in with no Sidecar time limit, including after app restarts. Sidecar renews its persistent cookie on visits; browsers may still expire or clear their own storage. Changing the passphrase revokes all remembered browsers. Gateway credentials are saved privately in `~/.local/state/sidecar/gateway/network-auth.json`; localhost access does not require the passphrase. Trust follows the browser and hostname, not the client IP, so switching networks with the same public hostname keeps you signed in. A different hostname/browser or cleared cookies requires login.
 
-Anyone with the passphrase can use the viewer, including sending requests to the agent, editing documents through proposals, browsing files, and closing saved documents. Use it on a trusted network. The agent credential and agent-only endpoints remain local; viewer cookies and same-origin checks also apply over the LAN. HTTP traffic, including the passphrase, is not encrypted.
+Anyone with the passphrase can use the viewer, including sending requests to the agent, editing documents through proposals or directly from edit mode (which writes the registered Markdown file), browsing files, and closing saved documents. Use it on a trusted network. The agent credential and agent-only endpoints remain local; viewer cookies and same-origin checks also apply over the LAN. HTTP traffic, including the passphrase, is not encrypted.
 
 The phone's root page lists all saved agents; their running viewers share this origin and passphrase. Stopped owners offer read-only previews. Unsent drafts and reading preferences stay in each browser. Rich-text copying falls back to plain text when the browser requires HTTPS.
 
@@ -305,6 +305,10 @@ Selections belong to individual messages: one optional selection per user input,
 “Where?”, “show me where”, and “which passage?” count as requests to identify document text; you do not need to name the highlight feature. For insertion points, both agents use a short existing anchor and say under/before/after it, without editing the document just to point at it. Other routine explanations and edits do not add unrelated highlights.
 
 The final reply may start with `[[sc-meta {"threadTitle":"Retry settings","highlights":[{"exact":"The retry limit is three.","label":"Retries"}]}]]` on its own line, inside the existing reply markers. The answer can link to `[Retries](#selection-1)`. Metadata is hidden during streaming and saved with the completed answer; invalid optional fields are ignored. `isError: true` marks a failed request without a separate command. Assigned titles remain unchanged. Both native adapters and complete-reply fallback share the same format, documented in the shared Sidecar skill. Highlights never edit the backing Markdown, and only the user changes visibility/resolution.
+
+### Editing Markdown directly
+
+**Edit** opens the Markdown source in an editor; **Save** (or Ctrl/Cmd+S) writes the file and **Done** returns to the reading view, asking first if there are unsaved edits. If the file changes on disk while you edit, a **This file changed on disk.** banner offers **Reload** (take the disk version), **Keep mine**, and, after a conflicting save, **Save anyway** (overwrite the version you reviewed; a newer change needs a fresh look). Files with Windows (CRLF) line endings cannot be edited, because the editor would change them. Selections made in edit mode are sent to the agent as source quotes with line numbers. Sending while there are unsaved edits is labeled **Save & send**: it saves first and aborts if the save conflicts. If a document is closed elsewhere while you have unsaved edits, the closed screen keeps your text so you can copy it.
 
 ### Proposed document edits
 

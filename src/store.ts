@@ -32,7 +32,7 @@ export type ReplyInput = { requestId: string; documentId: string; threadId: stri
 export type ClaimResult = { claimStatus: 'claimed' | 'already-claimed' | 'completed' | 'uncertain'; request: RequestRecord };
 
 export class DomainError extends Error {
-  constructor(message: string, public status: number = 400) { super(message); }
+  constructor(message: string, public status: number = 400, public extra: Record<string, unknown> = {}) { super(message); }
 }
 export function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

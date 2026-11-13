@@ -358,6 +358,7 @@ function App() {
   const canvas = useRef<HTMLElement>(null), scrollRestored = useRef('');
   const [editStartLine, setEditStartLine] = useState<number | null>(null), editMode = useRef<EditModeHandle | null>(null), returnLine = useRef<number | null>(null);
   const isEditing = editStartLine !== null;
+  const [unsavedText, setUnsavedText] = useState('');
   const [editStatus, setEditStatus] = useState({ dirty: false, saving: false });
   const hasCarriageReturn = content.markdown.includes('\r');
   const startEditing = () => {
@@ -396,6 +397,7 @@ function App() {
     const span = { start: quote.startLine ?? 1, end: quote.endLine ?? quote.startLine ?? 1 };
     if (editStartLine !== null) editMode.current?.revealLines(span.start, span.end);
     else { setEditReveal(span); startEditing(); }
+    if (innerWidth <= 850) setSidebarShown(false);
   };
   const leaveEditing = useCallback((line: number) => { returnLine.current = line; setEditStartLine(null); setEditReveal(null); }, []);
   useEffect(() => {
@@ -507,6 +509,8 @@ function App() {
   const documentClosed = useCallback((result: ClosedDocument) => {
     const storageError = forgetDocument(result.documentId, result.threadIds);
     if (result.documentId === documentId) {
+      // Unmounting the editor drops its unsaved text and its unload warning, so keep the text on screen.
+      setUnsavedText(editMode.current?.isDirty() ? editMode.current.getText() : '');
       passageDrafts.current.clear();
       setClosedDocument({ ...result, cleanupError: result.cleanupError ?? storageError });
       setContent({ html: '', markdown: '', version: '' });
@@ -1205,8 +1209,8 @@ function App() {
       setError('Wait for this document’s pending agent requests to finish before closing it.');
       return;
     }
-    if (editMode.current && !await editMode.current.requestExit()) return;
     if (!confirmCloseDocument(current.title)) return;
+    if (editMode.current && !await editMode.current.requestExit()) return;
     setClosing(true);
     try {
       documentClosed(await api<ClosedDocument>(`/api/documents/${documentId}`, undefined, 'DELETE'));
@@ -1221,6 +1225,10 @@ function App() {
           <h1>Document closed</h1>
           <p>Your Markdown file is unchanged.</p>
           {closedDocument.cleanupError && <p role="alert">{closedDocument.cleanupError}</p>}
+          {unsavedText && <>
+            <p>This document was closed while you had unsaved edits. Copy them below.</p>
+            <textarea aria-label="Unsaved edits" readOnly rows={16} value={unsavedText} style={{ width: '100%' }} />
+          </>}
           <a href={libraryPath()}>Browse all documents</a>
         </div>
       </main>
@@ -1278,7 +1286,7 @@ function App() {
           <span>{isSidebarShown ? 'Document' : 'Chat'}</span>
         </button>
         {current && !htmlView && (editStartLine === null
-          ? documentError ? null : <button className="sidebar-toggle edit-action" disabled={hasCarriageReturn} onClick={startEditing}
+          ? documentError ? null : <button className="sidebar-toggle edit-action" disabled={hasCarriageReturn || !content.version} onClick={startEditing}
               title={hasCarriageReturn ? 'This file uses Windows (CRLF) line endings, which the editor would change. Edit it in your own editor.' : 'Edit this document'}>Edit</button>
           : <>
               {editStatus.dirty && <span className="markdown-edit-dirty">● Unsaved</span>}

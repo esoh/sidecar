@@ -78,3 +78,11 @@ test('publish re-check refuses when the file changes between prepare and publish
   finally { await discardFileWrite(write); }
   assert.equal(await readFile(doc.path, 'utf8'), '# External\n');
 });
+
+test('a stale-version 409 carries code and the current disk version', async t => {
+  const f = await fixture(t), doc = await f.register('a.md', '# A\n'), before = await versionOf(f, doc.id);
+  await writeFile(doc.path, '# Agent\n');
+  const response = await save(f, doc.id, '# B\n', before);
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { error: 'The document changed on disk. Review it again.', code: 'changed', version: sha('# Agent\n') });
+});

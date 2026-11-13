@@ -5025,6 +5025,59 @@ test('Save anyway does not override a newer change than the one reviewed', async
   expect(await readFile(doc.path, 'utf8')).toBe('# Newest agent\n\nBody text.\n');
 });
 
+test('Save anyway works on the first click even before the editor refetched the agent version', async ({ page }) => {
+  const doc = await f.register('first-click.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' mine');
+  // Hold the document refetch so the 409 arrives first.
+  await page.route(new RegExp(`/api/documents/${doc.id}$`), async route => { await new Promise(resolve => setTimeout(resolve, 3000)); await route.continue(); });
+  await writeFile(doc.path, '# Agent title\n\nBody text.\n');
+  await page.keyboard.press('ControlOrMeta+s');
+  await expect(page.getByRole('button', { name: 'Save anyway', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Save anyway', exact: true }).click();
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  expect(await readFile(doc.path, 'utf8')).toBe('# Title mine\n\nBody text.\n');
+});
+
+test('the conflict banner and leave dialog buttons are styled as buttons', async ({ page }) => {
+  const doc = await f.register('styled.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' mine');
+  await writeFile(doc.path, '# Agent title\n\nBody text.\n');
+  await expect(page.getByText('This file changed on disk.')).toBeVisible();
+  await expect(page.locator('.markdown-edit-banner button').first()).toHaveCSS('border-top-width', '1px');
+});
+
+test('an external close keeps unsaved edits on the closed screen', async ({ page }) => {
+  const doc = await f.register('closing.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' unsaved words');
+  await expect(page.getByText('● Unsaved')).toBeVisible();
+  expect((await f.view(`/api/documents/${doc.id}`, undefined, 'DELETE')).status).toBe(200);
+  await expect(page.getByRole('heading', { name: 'Document closed' })).toBeVisible();
+  await expect(page.getByText('closed while you had unsaved edits')).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Unsaved edits' })).toHaveValue('# Title unsaved words\n\nBody text.\n');
+});
+
+test('an agent edit in a clean editor leaves the sidebar draft attachment alone', async ({ page }) => {
+  const doc = await f.register('remote.md', '# Title\n\nQuoted marker text.\n\nTail.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await page.getByRole('button', { name: 'Hide conversations' }).click();
+  await selectEditorText(page, 3, 'Quoted '.length, 'marker'.length);
+  await page.getByRole('button', { name: 'Show conversations' }).click();
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await selectEditorText(page, 3, 'Quoted '.length, 'marker'.length);
+  await expect(page.getByRole('button', { name: 'Comment', exact: true })).toBeVisible();
+  await writeFile(doc.path, '# Title\n\nTail.\n');
+  await expect(page.locator('.cm-content')).not.toContainText('marker');
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+});
+
 // Real keystrokes: select `length` characters starting at `offset` on 1-based `line`.
 async function selectEditorText(page: Page, line: number, offset: number, length: number) {
   await page.locator('.cm-content').click();

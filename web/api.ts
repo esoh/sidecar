@@ -42,7 +42,7 @@ export async function api<T>(path: string, body?: unknown, method = body === und
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const result = await response.json();
-  if (!response.ok) throw Object.assign(new Error(result.error ?? `Request failed: ${response.status}`), { status: response.status });
+  if (!response.ok) throw Object.assign(new Error(result.error ?? `Request failed: ${response.status}`), { ...result, status: response.status });
   return result;
 }
 export const saveSource = (documentId: string, markdown: string, baseVersion: string) =>

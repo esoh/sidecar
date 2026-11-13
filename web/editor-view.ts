@@ -38,7 +38,7 @@ export function minimalChange(from: string, to: string): { from: number; to: num
 // Agent text enters the document without becoming an undo step, so Undo never removes it.
 export function applyExternalText(view: EditorView, text: string): void {
   const change = minimalChange(view.state.doc.toString(), text);
-  if (change) view.dispatch({ changes: change, annotations: Transaction.addToHistory.of(false) });
+  if (change) view.dispatch({ changes: change, annotations: [Transaction.addToHistory.of(false), Transaction.remote.of(true)] });
 }
 
 /** The editor's selected source text as a line quote, with the viewport box the selection toolbar anchors to. */

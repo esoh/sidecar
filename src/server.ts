@@ -1180,7 +1180,7 @@ export async function startServer({ owner, directory, stateRoot, port = 0, pollM
       throw new DomainError('Not found', 404);
     } catch (error) {
       const info = error instanceof URIError ? { error: 'Invalid URL', status: 400 } : errorInfo(error);
-      if (!response.headersSent) json(response, { error: info.error }, info.status);
+      if (!response.headersSent) json(response, { ...(error instanceof DomainError ? error.extra : {}), error: info.error }, info.status);
       else response.end();
     }
   }

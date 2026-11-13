@@ -10,11 +10,12 @@ import { applyExternalText, quoteMarks, revealLineRange, scrollToLine, selection
 export type EditModeHandle = {
   isDirty(): boolean;
   save(): Promise<boolean>;
+  /** The editor's current text, to keep it when the document disappears. */
+  getText(): string;
   /** Resolves true when edit mode was left (clean, or Save/Discard chosen) and false on Cancel. */
   requestExit(): Promise<boolean>;
   revealLines(start: number, end: number): void;
 };
-const CHANGED = 'The document changed on disk. Review it again.';
 type Choice = 'save' | 'discard' | 'cancel';
 
 export function MarkdownEditMode({ documentId, path, markdown, version, diskMarkdown, diskVersion, startLine, reveal, handleRef, quotes, onSelect, onOpenQuote, onExit, onError, onStatus }: {
@@ -37,7 +38,8 @@ export function MarkdownEditMode({ documentId, path, markdown, version, diskMark
   const [banner, setBanner] = useState(false), [canOverride, setCanOverride] = useState(false);
   const dismissed = useRef(''), disk = useRef({ markdown: diskMarkdown, version: diskVersion });
   disk.current = { markdown: diskMarkdown, version: diskVersion };
-  const conflictVersion = useRef('');
+  // The disk version a Save anyway overrides, and the app's disk version when the conflict was reported.
+  const conflict = useRef({ version: '', seen: '' });
   const editor = useRef<MarkdownEditorHandle | null>(null), view = useRef<EditorView | null>(null);
   const synced = useRef(markdown), baseVersion = useRef(version), saving = useRef(false), dirtyNow = useRef(false);
   const [dirty, setDirty] = useState(false), [asking, setAsking] = useState(false), [isSaving, setSaving] = useState(false);
@@ -59,11 +61,11 @@ export function MarkdownEditMode({ documentId, path, markdown, version, diskMark
     if (text === undefined || saving.current) return false;
     if (text === synced.current) { markDirty(false); return true; }
     // Save anyway only overrides the change the user saw; a newer one needs a fresh look.
-    if (override && conflictVersion.current !== disk.current.version) { conflictVersion.current = disk.current.version; setBanner(true); return false; }
+    if (override && ![conflict.current.version, conflict.current.seen].includes(disk.current.version)) { conflict.current = { version: disk.current.version, seen: disk.current.version }; setBanner(true); return false; }
     const startDisk = disk.current.version;
     saving.current = true; setSaving(true);
     try {
-      baseVersion.current = (await saveSource(documentId, text, override ? conflictVersion.current : baseVersion.current)).version;
+      baseVersion.current = (await saveSource(documentId, text, override ? conflict.current.version : baseVersion.current)).version;
       synced.current = text; setBanner(false); setCanOverride(false);
       markDirty(editor.current?.getMarkdown() !== text);
       saving.current = false;
@@ -71,7 +73,8 @@ export function MarkdownEditMode({ documentId, path, markdown, version, diskMark
       if (disk.current.version !== startDisk && disk.current.version !== baseVersion.current) reconcile();
       return true;
     } catch (reason) {
-      if ((reason as { status?: number }).status === 409 && errorText(reason) === CHANGED) { conflictVersion.current = disk.current.version; setBanner(true); setCanOverride(true); }
+      const { status, code, version } = reason as { status?: number; code?: string; version?: string };
+      if (status === 409 && code === 'changed') { conflict.current = { version: version || disk.current.version, seen: disk.current.version }; setBanner(true); setCanOverride(true); }
       else onError(errorText(reason));
       return false;
     }
@@ -97,7 +100,7 @@ export function MarkdownEditMode({ documentId, path, markdown, version, diskMark
     return true;
   }, [leave, save]);
   useImperativeHandle(handleRef, () => ({
-    isDirty: () => dirtyNow.current, save, requestExit,
+    isDirty: () => dirtyNow.current, getText: () => editor.current?.getMarkdown() ?? '', save, requestExit,
     revealLines: (start, end) => { if (view.current) revealLineRange(view.current, start, end); },
   }), [save, requestExit]);
   useEffect(() => () => { handleRef.current = null; }, [handleRef]);
@@ -130,7 +133,8 @@ export function MarkdownEditMode({ documentId, path, markdown, version, diskMark
     EditorView.updateListener.of(update => {
       if (update.docChanged) queueMicrotask(() => paint());
       // Typing over a selection, Mod-a and the like change what is selected; a pointer drag reports on release.
-      if ((update.docChanged || update.selectionSet) && !dragging.current) queueMicrotask(() => latest.current.onSelect(selectionQuote(update.view, latest.current.path)));
+      // Agent text applied to a clean editor is not the user changing their selection.
+      if ((update.docChanged || update.selectionSet) && !dragging.current && !update.transactions.every(tr => tr.annotation(Transaction.remote))) queueMicrotask(() => latest.current.onSelect(selectionQuote(update.view, latest.current.path)));
     }),
     EditorView.domEventHandlers({
       mousedown: () => {
