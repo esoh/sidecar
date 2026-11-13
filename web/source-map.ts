@@ -1,5 +1,9 @@
 // Pure, DOM-free map from one rendered Markdown block to its source text.
 // Offsets are relative to the block's own source.
+//
+// `visible` models what Plannotator renders (parseMarkdownToBlocks content, then
+// InlineMarkdown's regex scanner, ported below), NOT CommonMark. The conformance
+// test in test/source-map.test.ts renders the real components and compares.
 
 export type BlockKind =
   | 'paragraph' | 'heading' | 'blockquote' | 'list-item' | 'code'
@@ -16,67 +20,34 @@ export type BlockMap = {
   elements: SyntaxElement[];
 };
 
-const ENTITIES: Record<string, string> = {
-  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
-};
-const SKIP = '\u0000'; // masks block syntax (continuation prefixes) so the scanner ignores it
-const isSpace = (c: string | undefined) => c === undefined || c === SKIP || /\s/.test(c);
-const isWord = (c: string | undefined) => c !== undefined && /[\p{L}\p{N}_]/u.test(c);
-
 class Unmappable extends Error {}
 
-export function blockMap(source: string, kind: BlockKind): BlockMap | null {
-  try {
-    return build(source, kind);
-  } catch (e) {
-    if (e instanceof Unmappable) return null;
-    throw e;
-  }
-}
+/** Text with a source range per character (from[i], to[i]). */
+type Txt = { s: string; from: number[]; to: number[] };
 
-function build(source: string, kind: BlockKind): BlockMap | null {
-  if (kind === 'html' || kind === 'directive' || kind === 'math') return null;
-  const end = source.replace(/\s+$/, '').length;
-  const b = new Builder(source);
-  if (kind === 'hr') return b.finish();
-  if (kind === 'code') return codeMap(source, end, b);
-  if (kind === 'table') return tableMap(source, end, b);
-
-  // Block marker on the first line, then mask continuation prefixes on later lines.
-  let markerEnd = 0;
-  if (kind === 'heading') {
-    const m = /^#{1,6}[ \t]+/.exec(source);
-    if (!m) return null;
-    markerEnd = m[0].length;
-  } else if (kind === 'list-item') {
-    const m = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?/.exec(source);
-    if (!m) return null;
-    markerEnd = m[0].length;
-  } else if (kind === 'blockquote') {
-    const m = /^[ \t]*(?:>[ \t]?)+/.exec(source);
-    if (!m) return null;
-    markerEnd = m[0].length;
-  }
-  let masked = source.slice(0, end);
-  const mask = (from: number, to: number) => {
-    masked = masked.slice(0, from) + SKIP.repeat(to - from) + masked.slice(to);
-  };
-  mask(0, markerEnd);
-  for (let i = masked.indexOf('\n'); i >= 0 && i < end; i = masked.indexOf('\n', i + 1)) {
-    const m = (kind === 'blockquote' ? /^[ \t]*(?:>[ \t]?)*/ : /^[ \t]*/).exec(masked.slice(i + 1))!;
-    mask(i + 1, i + 1 + m[0].length);
-  }
-  if (markerEnd > 0) b.elements.push({ open: [0, markerEnd], close: [end, end] });
-  new Inline(masked, b).scan(markerEnd, end);
-  return b.finish();
-}
+const txtOf = (source: string, a: number, b: number): Txt => ({
+  s: source.slice(a, b),
+  from: Array.from({ length: b - a }, (_, i) => a + i),
+  to: Array.from({ length: b - a }, (_, i) => a + i + 1),
+});
+const sub = (t: Txt, a: number, b: number): Txt => ({ s: t.s.slice(a, b), from: t.from.slice(a, b), to: t.to.slice(a, b) });
+const rng = (t: Txt, a: number, b: number): [number, number] => {
+  if (b > a) return [t.from[a], t.to[b - 1]];
+  const p = a < t.s.length ? t.from[a] : (t.to[a - 1] ?? 0);
+  return [p, p];
+};
+const concat = (parts: Txt[]): Txt => ({
+  s: parts.map((p) => p.s).join(''),
+  from: parts.flatMap((p) => p.from),
+  to: parts.flatMap((p) => p.to),
+});
+const lit = (s: string, a: number, b: number): Txt => ({ s, from: Array(s.length).fill(a), to: Array(s.length).fill(b) });
 
 class Builder {
   chars: string[] = [];
   starts: number[] = [];
   ends: number[] = [];
   elements: SyntaxElement[] = [];
-  constructor(readonly source: string) {}
   add(ch: string, start: number, end: number) {
     this.chars.push(ch);
     this.starts.push(start);
@@ -88,219 +59,401 @@ class Builder {
   }
 }
 
+export function blockMap(source: string, kind: BlockKind): BlockMap | null {
+  try {
+    return build(source, kind);
+  } catch {
+    // Unmappable syntax, or anything unexpected: the caller falls back to whole lines.
+    return null;
+  }
+}
+
+const lineList = (source: string, end: number) => {
+  const out: { text: string; start: number }[] = [];
+  let start = 0;
+  for (const text of source.slice(0, end).split('\n')) {
+    out.push({ text, start });
+    start += text.length + 1;
+  }
+  return out;
+};
+// Offsets of `line.trim()` inside the source.
+const trimmed = (l: { text: string; start: number }) => {
+  const lead = l.text.length - l.text.trimStart().length;
+  const t = l.text.trim();
+  return { t, a: l.start + lead, b: l.start + lead + t.length };
+};
+
+function build(source: string, kind: BlockKind): BlockMap | null {
+  if (kind === 'html' || kind === 'directive' || kind === 'math') return null;
+  const end = source.replace(/\s+$/, '').length;
+  const b = new Builder();
+  if (kind === 'hr') return b.finish();
+  if (kind === 'code') return codeMap(source, end, b);
+  if (kind === 'table') return tableMap(source, end, b);
+
+  const lines = lineList(source, end);
+  let segments: Txt[];
+  let markerEnd = -1;
+  if (kind === 'paragraph') {
+    // Plannotator keeps paragraph lines raw (untrimmed) joined by \n.
+    segments = [txtOf(source, 0, source.replace(/[\r\n]+$/, '').length)];
+  } else if (kind === 'heading') {
+    if (lines.length !== 1) return null;
+    const { t, a, b: e } = trimmed(lines[0]);
+    if (!t.startsWith('#')) return null;
+    const m = /^#+\s*/.exec(t)![0].length;
+    markerEnd = a + m;
+    segments = [txtOf(source, a + m, e)];
+  } else if (kind === 'list-item') {
+    const first = trimmed(lines[0]);
+    const lm = /^(\*|-|(\d+)\.)\s/.exec(first.t);
+    if (!lm) return null;
+    let at = lm[0].length;
+    const cb = /^\[([ xX])\]\s*/.exec(first.t.slice(at));
+    if (cb) at += cb[0].length;
+    markerEnd = first.a + at;
+    const parts = [txtOf(source, markerEnd, first.b)];
+    let prevBlank = false;
+    let prevNl = lines[0].start + lines[0].text.length;
+    for (const line of lines.slice(1)) {
+      const tr = trimmed(line);
+      if (tr.t === '') { prevBlank = true; continue; }
+      const nl = line.start - 1;
+      parts.push(lit(prevBlank ? '\n\n' : '\n', prevBlank ? prevNl : nl, prevBlank ? nl + 1 : nl + 1));
+      parts.push(txtOf(source, tr.a, tr.b));
+      prevBlank = false;
+      prevNl = nl;
+    }
+    segments = splitParagraphs(concat(parts));
+  } else {
+    // blockquote
+    const parts: Txt[] = [];
+    for (const line of lines) {
+      const tr = trimmed(line);
+      if (tr.t === '') continue;
+      if (!tr.t.startsWith('>')) return null;
+      const m = /^>\s*/.exec(tr.t)![0].length;
+      const body = tr.t.slice(m);
+      if (parts.length === 0) {
+        if (/^\[!(NOTE|TIP|WARNING|CAUTION|IMPORTANT)\]\s*$/i.test(body)) return null; // alert: rendered with a title
+        markerEnd = tr.a + m;
+      } else {
+        parts.push(lit('\n', line.start - 1, line.start));
+      }
+      parts.push(txtOf(source, tr.a + m, tr.b));
+    }
+    if (markerEnd < 0) return null;
+    segments = splitParagraphs(concat(parts));
+  }
+  if (markerEnd >= 0) b.elements.push({ open: [0, markerEnd], close: [end, end] });
+  for (const seg of segments) scan(seg, b);
+  return b.finish();
+}
+
+// Plannotator renders `content.split(/\n\n+/)` as separate <p>; the separators leave no text node.
+function splitParagraphs(t: Txt): Txt[] {
+  const out: Txt[] = [];
+  let last = 0;
+  for (const m of t.s.matchAll(/\n\n+/g)) {
+    out.push(sub(t, last, m.index));
+    last = m.index + m[0].length;
+  }
+  out.push(sub(t, last, t.s.length));
+  return out;
+}
+
 function codeMap(source: string, end: number, b: Builder): BlockMap | null {
-  const open = /^[ \t]*(`{3,}|~{3,})[^\n]*\n?/.exec(source);
-  if (!open) return null;
-  let contentEnd = end;
-  let closeFrom = end;
-  const lines = source.slice(open[0].length, end);
-  const closing = new RegExp(`\\n?[ \\t]*${open[1][0]}{${open[1].length},}[ \\t]*$`).exec(lines);
-  if (closing) {
-    contentEnd = open[0].length + closing.index;
-    closeFrom = contentEnd;
-  }
-  b.elements.push({ open: [0, open[0].length], close: [closeFrom, end] });
-  for (let i = open[0].length; i < contentEnd; i++) b.add(source[i], i, i + 1);
+  const lines = lineList(source, end);
+  const open = trimmed(lines[0]);
+  if (!open.t.startsWith('```')) return null;
+  const fenceLen = /^`+/.exec(open.t)![0].length;
+  const closing = new RegExp('^\\s*`{' + fenceLen + ',}');
+  let k = 1;
+  const body: typeof lines = [];
+  while (k < lines.length && !closing.test(lines[k].text)) body.push(lines[k++]);
+  const openEnd = lines.length > 1 ? lines[1].start : end;
+  const closeFrom = k >= lines.length ? end : body.length ? lines[k].start - 1 : lines[k].start;
+  b.elements.push({ open: [0, openEnd], close: [closeFrom, end] });
+  body.forEach((line, i) => {
+    if (i > 0) b.add('\n', line.start - 1, line.start);
+    // \r before \n is not part of the rendered text (innerHTML normalises CRLF).
+    const n = line.text.endsWith('\r') && (i < body.length - 1 || k < lines.length) ? line.text.length - 1 : line.text.length;
+    for (let c = 0; c < n; c++) b.add(line.text[c], line.start + c, line.start + c + 1);
+  });
   return b.finish();
 }
 
+// Port of TableBlock.parseTableContent, keeping source offsets.
 function tableMap(source: string, end: number, b: Builder): BlockMap | null {
-  const text = source.slice(0, end);
-  let pos = 0;
-  let first = true;
-  for (const line of text.split('\n')) {
-    const lineStart = pos;
-    pos += line.length + 1;
-    const body = line.replace(/\r$/, '');
-    if (/^[\s|:-]+$/.test(body) && body.includes('-')) continue; // delimiter row
-    // split on unescaped pipes
-    const pipes: number[] = [];
-    for (let i = 0; i < body.length; i++) {
-      if (body[i] === '\\') i++;
-      else if (body[i] === '|') pipes.push(i);
-    }
-    const bounds: [number, number][] = [];
+  const lines = lineList(source, end).filter((l) => l.text.trim());
+  if (!lines.length) return null;
+  lines.forEach((line, idx) => {
+    // The header row is parsed untrimmed, body rows trimmed.
+    const row = idx === 0 ? { t: line.text, a: line.start, b: line.start + line.text.length } : trimmed(line);
+    if (idx > 0 && /^[|\-:\s]+$/.test(row.t)) return; // separator row
+    let a = row.a;
+    let e = row.b;
+    if (row.t.startsWith('|')) a++;
+    if (row.t.endsWith('|') && e > a) e--;
+    const text = source.slice(a, e);
+    const cells: [number, number][] = [];
     let from = 0;
-    for (const p of [...pipes, body.length]) {
-      bounds.push([from, p]);
-      from = p + 1;
+    for (let i = 0; i <= text.length; i++) {
+      if (i === text.length || (text[i] === '|' && text[i - 1] !== '\\')) {
+        cells.push([a + from, a + i]);
+        from = i + 1;
+      }
     }
-    if (pipes[0] === first_nonspace(body)) bounds.shift();
-    const lastPipeAtEnd = pipes.length && pipes[pipes.length - 1] === body.trimEnd().length - 1;
-    if (lastPipeAtEnd) bounds.pop();
-    if (!bounds.length) return null;
-    if (!first) b.add('\n', lineStart - 1, lineStart);
-    first = false;
-    const rowOpen = b.elements.push({ open: [0, 0], close: [0, 0] }) - 1;
-    let rowFrom = -1;
-    let rowTo = lineStart;
-    bounds.forEach(([s, e], idx) => {
-      let cs = s;
-      let ce = e;
-      while (cs < ce && /\s/.test(body[cs])) cs++;
-      while (ce > cs && /\s/.test(body[ce - 1])) ce--;
-      if (idx > 0) b.add(' ', lineStart + s - 1, lineStart + s);
-      if (rowFrom < 0) rowFrom = lineStart + cs;
-      rowTo = lineStart + ce;
-      new Inline(source, b).scan(lineStart + cs, lineStart + ce);
+    const el = { open: [line.start, line.start] as [number, number], close: [e, line.start + line.text.length] as [number, number] };
+    cells.forEach(([cs, ce], ci) => {
+      while (cs < ce && /\s/.test(source[cs])) cs++;
+      while (ce > cs && /\s/.test(source[ce - 1])) ce--;
+      if (ci === 0) el.open = [line.start, cs];
+      if (ci === cells.length - 1) el.close = [ce, line.start + line.text.length];
+      const parts: Txt[] = [];
+      for (let i = cs; i < ce; i++) {
+        if (source[i] === '\\' && source[i + 1] === '|') { parts.push(lit('|', i, i + 2)); i++; }
+        else parts.push(txtOf(source, i, i + 1));
+      }
+      scan(concat(parts), b);
     });
-    b.elements[rowOpen] = { open: [lineStart, rowFrom], close: [rowTo, lineStart + body.length] };
-  }
+    b.elements.push(el);
+  });
   return b.finish();
 }
-const first_nonspace = (s: string) => s.search(/\S/);
 
-class Inline {
-  constructor(readonly s: string, readonly b: Builder) {}
+// ---- Port of Plannotator InlineMarkdown's scanner (text-affecting branches only) ----
 
-  scan(from: number, to: number) {
-    const { s, b } = this;
-    let i = from;
-    while (i < to) {
-      const c = s[i];
-      if (c === SKIP || (c === '\r' && s[i + 1] === '\n')) { i++; continue; }
-      if (c === '\n') { b.add('\n', i, i + 1); i++; continue; }
-      if (c === '\\') {
-        const n = s[i + 1];
-        if (n === '\n' || (n === '\r' && s[i + 2] === '\n')) {
-          const e = i + (n === '\n' ? 2 : 3);
-          b.add('\n', i, e); i = e; continue;
+const EMOJI: Record<string, string> = {
+  smile: '😄', heart: '❤️', thumbsup: '👍', thumbsdown: '👎',
+  fire: '🔥', star: '⭐', tada: '🎉', rocket: '🚀',
+  bug: '🐛', sparkles: '✨', warning: '⚠️', white_check_mark: '✅',
+  x: '❌', eyes: '👀', wave: '👋', thinking: '🤔',
+  ok: '🆗', construction: '🚧', boom: '💥', gear: '⚙️',
+  hourglass: '⏳', zap: '⚡', lock: '🔒', unlock: '🔓',
+  memo: '📝', book: '📖', package: '📦', hammer: '🔨',
+  checkered_flag: '🏁', question: '❓', exclamation: '❗', bulb: '💡',
+};
+// utils/inlineTransforms.ts, in order. Lookbehinds replace the original's `(^|[\s([{])` prefix group.
+const TRANSFORMS: [RegExp, (m: RegExpExecArray) => string][] = [
+  [/:([a-z_]+):/g, (m) => EMOJI[m[1]] ?? m[0]],
+  [/\.{3}/g, () => '…'],
+  [/---/g, () => '—'],
+  [/(?<=\d)--(?=\d)/g, () => '–'],
+  [/(?<![^\s([{])"/g, () => '“'],
+  [/"/g, () => '”'],
+  [/(?<![^\s([{])'/g, () => '‘'],
+  [/'/g, () => '’'],
+];
+
+type Token = { t: string; a: number; b: number };
+
+// transformPlainText with each output char keeping the source span of the chars it came from.
+function emitTransformed(t: Txt, from: number, to: number, out: Builder) {
+  let tokens: Token[] = [];
+  for (let i = from; i < to; i++) tokens.push({ t: t.s[i], a: t.from[i], b: t.to[i] });
+  for (const [re, repl] of TRANSFORMS) {
+    const str = tokens.map((k) => k.t).join('');
+    const next: Token[] = [];
+    let ti = 0; // token index
+    let tpos = 0; // string offset of tokens[ti]
+    for (const m of str.matchAll(re)) {
+      const r = repl(m);
+      if (r === m[0]) continue;
+      while (tpos + tokens[ti].t.length <= m.index) { next.push(tokens[ti]); tpos += tokens[ti++].t.length; }
+      const first = ti;
+      let covered = tpos;
+      while (covered < m.index + m[0].length) covered += tokens[ti++].t.length;
+      const overhang = str.slice(m.index + m[0].length, covered);
+      next.push({ t: str.slice(tpos, m.index) + r + overhang, a: tokens[first].a, b: tokens[ti - 1].b });
+      tpos = covered;
+    }
+    while (ti < tokens.length) next.push(tokens[ti++]);
+    tokens = next;
+  }
+  for (const k of tokens) for (let i = 0; i < k.t.length; i++) out.add(k.t[i], k.a, k.b);
+}
+
+// Copy of InlineMarkdown's trimUrlTail.
+function trimUrlTail(url: string): string {
+  const balanced = (u: string, close: string, open: string) => {
+    let opens = 0;
+    let closes = 0;
+    for (const c of u) {
+      if (c === open) opens++;
+      else if (c === close) closes++;
+    }
+    return opens >= closes;
+  };
+  while (url.length > 0) {
+    const last = url[url.length - 1];
+    if (!/[.,;:!?)\]}>"']/.test(last)) break;
+    if (last === ')' && balanced(url, ')', '(')) break;
+    if (last === ']' && balanced(url, ']', '[')) break;
+    if (last === '}' && balanced(url, '}', '{')) break;
+    url = url.slice(0, -1);
+  }
+  return url;
+}
+
+const HEX = /^(#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{4}|(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{3}))(?![0-9a-fA-F\w])/;
+const EMPHASIS: { re: RegExp; d: number; needsBoundary?: boolean }[] = [
+  { re: /^~~([\s\S]+?)~~/, d: 2 },
+  { re: /^\*\*\*([\s\S]+?)\*\*\*/, d: 3 },
+  { re: /^\*\*([\s\S]+?)\*\*/, d: 2 },
+  { re: /^\*([\s\S]+?)\*/, d: 1 },
+  { re: /^_([^_\s](?:[\s\S]*?[^_\s])?)_(?!\w)/, d: 1, needsBoundary: true },
+];
+
+function scan(t: Txt, out: Builder) {
+  const s = t.s;
+  let pos = 0;
+  let prev = '';
+  const raw = (a: number, b: number) => { for (let k = a; k < b; k++) out.add(s[k], t.from[k], t.to[k]); };
+  while (pos < s.length) {
+    const rem = s.slice(pos);
+    let m: RegExpMatchArray | null = rem.match(/^<!--[\s\S]*?-->/);
+    if (m) { pos += m[0].length; prev = '>'; continue; }
+
+    if (rem.startsWith('\\(')) {
+      for (let i = 2; i < rem.length - 1; i++) {
+        if (rem[i] === '\\' && rem[i + 1] === ')') {
+          if (rem[i - 1] === '\\') continue;
+          if (rem.slice(2, i).trim()) throw new Unmappable(); // inline math
+          break;
         }
-        if (n !== undefined && i + 1 < to && /[!-/:-@[-`{-~]/.test(n)) { b.add(n, i, i + 2); i += 2; continue; }
       }
-      if (c === ' ') {
-        const m = /^ {2,}\r?\n/.exec(s.slice(i, to + 1));
-        if (m) { b.add('\n', i, i + m[0].length); i += m[0].length; continue; }
+    }
+    m = rem.match(/^\\([\\*_`\[\]~!.()\-#>+|{}&$])/);
+    if (m) { out.add(m[1], ...rng(t, pos, pos + 2)); pos += 2; prev = m[1]; continue; }
+
+    if (rem.startsWith('$') && prev !== '$' && !rem.startsWith('$$')) {
+      let close = -1;
+      for (let i = 1; i < rem.length; i++) {
+        if (rem[i] === '\\') { i++; continue; }
+        if (rem[i] === '$') { close = i; break; }
       }
-      if (c === '&') {
-        const m = /^&(?:#(\d+)|#[xX]([0-9a-fA-F]+)|([A-Za-z][A-Za-z0-9]*));/.exec(s.slice(i, to));
-        if (m) {
-          const ch = m[3] !== undefined ? ENTITIES[m[3]] : String.fromCodePoint(parseInt(m[1] ?? m[2], m[1] ? 10 : 16));
-          if (ch === undefined) throw new Unmappable();
-          b.add(ch, i, i + m[0].length); i += m[0].length; continue;
+      if (close > 1) {
+        const tex = rem.slice(1, close);
+        const after = rem[close + 1];
+        const money = /^\s*\d/.test(tex) && after !== undefined && /\d/.test(after);
+        if (!money) throw new Unmappable(); // inline math (or math-like text): not mapped
+      }
+    }
+
+    if (!/\w/.test(prev)) {
+      m = rem.match(/^https?:\/\/[^\s<>"']+/);
+      if (m) {
+        const url = trimUrlTail(m[0]);
+        if (url.length > 0 && !/^\s*(javascript|data|vbscript|file)\s*:/i.test(url)) {
+          raw(pos, pos + url.length); pos += url.length; prev = url[url.length - 1]; continue;
         }
       }
-      if (c === '<') {
-        const auto = /^<(https?:\/\/[^>\s]+|[^@>\s]+@[^>\s]+)>/.exec(s.slice(i, to));
-        if (auto) {
-          const e = i + auto[0].length;
-          b.elements.push({ open: [i, i + 1], close: [e - 1, e] });
-          for (let k = i + 1; k < e - 1; k++) b.add(s[k], k, k + 1);
-          i = e; continue;
-        }
-        if (/^<[A-Za-z/!?]/.test(s.slice(i, to))) throw new Unmappable(); // inline HTML
-      }
-      if (c === '`') { i = this.code(i, to); continue; }
-      if (c === '!' && s[i + 1] === '[') {
-        const e = this.link(i + 1, to, true);
-        if (e >= 0) { i = e; continue; }
-      }
-      if (c === '[') {
-        if (s[i + 1] === '[') throw new Unmappable(); // wiki link
-        const e = this.link(i, to, false);
-        if (e >= 0) { i = e; continue; }
-      }
-      if (c === '*' || c === '_' || c === '~') {
-        const e = this.emphasis(i, to);
-        if (e >= 0) { i = e; continue; }
-      }
-      b.add(c, i, i + 1);
-      i++;
     }
-  }
 
-  code(i: number, to: number): number {
-    const { s, b } = this;
-    let n = 1;
-    while (s[i + n] === '`') n++;
-    for (let j = i + n; j < to; j++) {
-      if (s[j] !== '`') continue;
-      let m = 0;
-      while (s[j + m] === '`') m++;
-      if (m === n && j > i + n) {
-        b.elements.push({ open: [i, i + n], close: [j, j + n] });
-        for (let k = i + n; k < j; k++) if (s[k] !== SKIP) b.add(s[k], k, k + 1);
-        return j + n;
-      }
-      j += m - 1;
+    m = rem.match(/^<(https?:\/\/[^>]+)>/) ?? rem.match(/^<([^@>\s]+@[^>\s]+)>/);
+    if (m) {
+      out.elements.push({ open: rng(t, pos, pos + 1), close: rng(t, pos + m[0].length - 1, pos + m[0].length) });
+      raw(pos + 1, pos + m[0].length - 1); pos += m[0].length; prev = '>'; continue;
     }
-    for (let k = i; k < i + n; k++) b.add('`', k, k + 1);
-    return i + n;
-  }
+    m = rem.match(/^<([A-Za-z][A-Za-z0-9.+-]{0,31}:[^\s<>]*)>/);
+    if (m) { raw(pos, pos + m[0].length); pos += m[0].length; prev = '>'; continue; }
 
-  // Returns the index after the link/image, or -1 when it is not one.
-  link(i: number, to: number, image: boolean): number {
-    const { s, b } = this;
-    let depth = 0;
-    let j = i;
-    for (; j < to; j++) {
-      if (s[j] === '\\') j++;
-      else if (s[j] === '`') { const e = this.skipCode(j, to); j = e - 1; }
-      else if (s[j] === '[') depth++;
-      else if (s[j] === ']' && --depth === 0) break;
+    let done = false;
+    for (const { re, d, needsBoundary } of EMPHASIS) {
+      if (needsBoundary && /\w/.test(prev)) continue;
+      m = rem.match(re);
+      if (!m) continue;
+      const len = m[0].length;
+      out.elements.push({ open: rng(t, pos, pos + d), close: rng(t, pos + len - d, pos + len) });
+      scan(sub(t, pos + d, pos + len - d), out);
+      pos += len; prev = m[0][len - 1]; done = true;
+      break;
     }
-    if (j >= to || s[j + 1] !== '(') return -1;
-    let k = j + 2;
-    let parens = 1;
-    let quote = '';
-    for (; k < to; k++) {
-      const c = s[k];
-      if (c === '\\') k++;
-      else if (quote) { if (c === quote) quote = ''; }
-      else if (c === '"' && /\s/.test(s[k - 1] ?? '')) quote = c;
-      else if (c === '(') parens++;
-      else if (c === ')' && --parens === 0) break;
-    }
-    if (k >= to) return -1;
-    if (!image) {
-      b.elements.push({ open: [i, i + 1], close: [j, k + 1] });
-      this.scan(i + 1, j);
-    }
-    return k + 1;
-  }
+    if (done) continue;
 
-  skipCode(i: number, to: number): number {
-    let n = 0;
-    while (this.s[i + n] === '`') n++;
-    for (let j = i + n; j < to; j++) {
-      if (this.s[j] !== '`') continue;
-      let m = 0;
-      while (this.s[j + m] === '`') m++;
-      if (m === n) return j + m;
-      j += m - 1;
+    m = rem.match(/^`([^`]+)`/);
+    if (m) {
+      out.elements.push({ open: rng(t, pos, pos + 1), close: rng(t, pos + m[0].length - 1, pos + m[0].length) });
+      raw(pos + 1, pos + m[0].length - 1); pos += m[0].length; prev = '`'; continue;
     }
-    return i + n;
-  }
 
-  emphasis(i: number, to: number): number {
-    const { s, b } = this;
-    const ch = s[i];
-    for (const d of ch === '*' ? ['***', '**', '*'] : ch === '_' ? ['__', '_'] : ['~~']) {
-      if (!s.startsWith(d, i) || i + d.length >= to || isSpace(s[i + d.length])) continue;
-      if (ch === '_' && isWord(s[i - 1])) continue;
-      const close = this.closer(i + d.length, to, d);
-      if (close < 0) continue;
-      b.elements.push({ open: [i, i + d.length], close: [close, close + d.length] });
-      this.scan(i + d.length, close);
-      return close + d.length;
-    }
-    return -1;
-  }
+    // Swatch, issue ref and @mention render their own text unchanged.
+    m = rem.match(HEX);
+    if (!m && !/\w/.test(prev)) m = rem.match(/^#(\d+)(?!\w)/) ?? rem.match(/^@([a-zA-Z][a-zA-Z0-9_-]{0,38})(?!\w)/);
+    if (m) { raw(pos, pos + m[0].length); pos += m[0].length; prev = m[0][m[0].length - 1]; continue; }
 
-  closer(from: number, to: number, d: string): number {
-    const { s } = this;
-    for (let j = from; j < to; j++) {
-      if (s[j] === '\\') { j++; continue; }
-      if (s[j] === '`') { j = this.skipCode(j, to) - 1; continue; }
-      if (s[j] !== d[0]) continue;
-      let run = 0;
-      while (s[j + run] === d[0]) run++;
-      const ok = d.length === 1 ? run === 1 : run >= d.length;
-      if (ok && j > from && !isSpace(s[j - 1]) && !(d[0] === '_' && isWord(s[j + d.length]))) return j;
-      j += run - 1;
+    if (/^\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/.test(rem)) throw new Unmappable(); // wiki link: label is host-resolved
+
+    m = rem.match(/^!\[([^\]]*)\]\(([^)]+)\)/);
+    if (m) { pos += m[0].length; prev = ')'; continue; } // image: no text
+
+    const link = parseLink(rem);
+    if (link) {
+      out.elements.push({ open: rng(t, pos, pos + 1), close: rng(t, pos + link.textEnd, pos + link.consumed) });
+      raw(pos + 1, pos + link.textEnd); // link text is NOT re-scanned for Markdown
+      pos += link.consumed; prev = ')'; continue;
     }
-    return -1;
+
+    const hb = / {2,}\n|\\\n/.exec(rem);
+    if (hb) {
+      if (hb.index > 0) scan(sub(t, pos, pos + hb.index), out);
+      pos += hb.index + hb[0].length; prev = '\n'; continue; // <br> has no text node
+    }
+
+    const next = rem.slice(1).search(/[\*_`\[!~\\<#@$]/);
+    const chunk = next === -1 ? rem.length : next + 1;
+    emitPlain(t, pos, pos + chunk, prev, out);
+    prev = rem[chunk - 1] || prev;
+    pos += chunk;
   }
+}
+
+function parseLink(rem: string): { textEnd: number; consumed: number } | null {
+  if (rem[0] !== '[') return null;
+  let i = 1;
+  let depth = 1;
+  while (i < rem.length && depth > 0) {
+    const ch = rem[i];
+    if (ch === '\\' && i + 1 < rem.length) { i += 2; continue; }
+    if (ch === '[') depth++;
+    else if (ch === ']') depth--;
+    if (depth === 0) break;
+    i++;
+  }
+  if (depth !== 0 || rem[i + 1] !== '(') return null;
+  let j = i + 2;
+  let parens = 1;
+  while (j < rem.length && parens > 0) {
+    const ch = rem[j];
+    if (ch === '\\' && j + 1 < rem.length) { j += 2; continue; }
+    if (ch === '(') parens++;
+    else if (ch === ')') { parens--; if (parens === 0) break; }
+    else if (ch === '\n') return null;
+    j++;
+  }
+  if (parens !== 0 || i === 1 || j === i + 2) return null;
+  return { textEnd: i, consumed: j + 1 };
+}
+
+// emitPlainTextWithBareUrls: bare URLs stay raw, the rest goes through transformPlainText.
+function emitPlain(t: Txt, from: number, to: number, prev: string, out: Builder) {
+  const text = t.s.slice(from, to);
+  const urlRe = /https?:\/\/[^\s<>"']+/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = urlRe.exec(text)) !== null) {
+    const before = m.index === 0 ? prev : text[m.index - 1];
+    if (/\w/.test(before)) continue;
+    const url = trimUrlTail(m[0]);
+    if (!url.length) continue;
+    if (m.index > last) emitTransformed(t, from + last, from + m.index, out);
+    for (let k = 0; k < url.length; k++) out.add(url[k], t.from[from + m.index + k], t.to[from + m.index + k]);
+    last = m.index + url.length;
+    urlRe.lastIndex = last;
+  }
+  if (last < text.length) emitTransformed(t, from + last, to, out);
 }
 
 // Visible range of an element: the chars strictly between its open and close syntax.
