@@ -5119,9 +5119,9 @@ async function openSplit(page: Page, name: string, markdown: string) {
   await expect(page.locator('.edit-preview').getByRole('heading', { name: 'Section 1', exact: true })).toBeVisible();
 }
 // Where the leader's anchor sits in a paragraph, and how far (px) the other pane's anchor is from the same point of that paragraph.
-const syncGap = (page: Page, leader: 'source' | 'preview') => page.evaluate(side => {
+const syncGap = (page: Page, leader: 'source' | 'preview', at = 0.25) => page.evaluate(([side, at]) => {
   const pane = (name: string) => document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!;
-  const anchor = (name: string) => { const el = pane(name), r = el.getBoundingClientRect(); return r.top + el.clientHeight * el.scrollTop / Math.max(1, el.scrollHeight - el.clientHeight); };
+  const anchor = (name: string) => { const el = pane(name), r = el.getBoundingClientRect(); return r.top + el.clientHeight * at; };
   const blocks = (name: string) => [...pane(name).querySelectorAll<HTMLElement>(name === 'source' ? '.cm-line' : 'p')].filter(e => /^Para \d+ /.test(e.textContent ?? ''));
   const other = side === 'source' ? 'preview' : 'source', y = anchor(side);
   const hit = blocks(side).find(e => e.getBoundingClientRect().top <= y && y < e.getBoundingClientRect().bottom);
@@ -5130,18 +5130,18 @@ const syncGap = (page: Page, leader: 'source' | 'preview') => page.evaluate(side
   if (!twin) return { key: hit.textContent!.slice(0, 9), gap: Infinity };
   const b = twin.getBoundingClientRect();
   return { key: hit.textContent!.slice(0, 9), gap: Math.abs(anchor(other) - (b.top + (y - a.top) / a.height * b.height)) };
-}, leader);
+}, [leader, at] as const);
 // Scrolls the leader to a fraction of its range, nudging until its anchor is inside a paragraph, then waits for the other pane.
-async function scrollLeader(page: Page, leader: 'source' | 'preview', fraction: number) {
+async function scrollLeader(page: Page, leader: 'source' | 'preview', fraction: number, at = 0.25) {
   let attempt = 0;
   await expect.poll(async () => {
     await page.evaluate(([side, f, extra]) => {
       const el = document.querySelector<HTMLElement>(side === 'source' ? '.cm-scroller' : '.edit-preview')!;
       el.scrollTop = f * (el.scrollHeight - el.clientHeight) + extra;
     }, [leader, fraction, 25 * attempt++] as const);
-    return (await syncGap(page, leader)) !== null;
+    return (await syncGap(page, leader, at)) !== null;
   }).toBe(true);
-  await expect.poll(async () => (await syncGap(page, leader))?.gap ?? Infinity).toBeLessThan(24);
+  await expect.poll(async () => (await syncGap(page, leader, at))?.gap ?? Infinity).toBeLessThan(24);
 }
 const nudge = (page: Page, leader: 'source' | 'preview', by: number) => page.evaluate(([side, d]) => { document.querySelector<HTMLElement>(side === 'source' ? '.cm-scroller' : '.edit-preview')!.scrollTop += d; }, [leader, by] as const);
 
@@ -5170,6 +5170,25 @@ test('Ends align: scrolling either pane to its bottom (and top) puts the other t
     await page.evaluate(name => { document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!.scrollTop = 0; }, leader);
     await expect.poll(() => atTop(follower)).toBeLessThan(3);
   }
+});
+
+test('Scroll sync aligns at 25% by default: the same block sits a quarter down both panes, and the slider moves it live and persists', async ({ page }) => {
+  await openSplit(page, 'sync-fixed.md', syncDoc());
+  await scrollLeader(page, 'source', 0.5, 0.25);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const slider = page.getByRole('slider', { name: 'Align at', exact: true });
+  await expect(slider).toHaveValue('25'); await expect(slider).toHaveAttribute('step', '5');
+  await slider.fill('50');
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await page.waitForTimeout(QUIET_MS + 50);
+  await scrollLeader(page, 'preview', 0.3, 0.5); // no reload, no remount
+  await page.reload();
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('slider', { name: 'Align at', exact: true })).toHaveValue('50');
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await expect(page.locator('.edit-preview').getByRole('heading', { name: 'Section 1', exact: true })).toBeVisible();
+  await scrollLeader(page, 'source', 0.6, 0.5);
 });
 
 test('No feedback loop: one programmatic scroll settles with no further scroll events', async ({ page }) => {

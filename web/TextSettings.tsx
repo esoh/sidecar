@@ -7,7 +7,7 @@ import type { CopyFormat } from './message-copy.ts';
 import { api, errorText } from './api.ts';
 import type { TunnelConfig } from '../src/tunnel-config.ts';
 
-const MessageSettings = createContext({ copyFormat: 'markdown' as CopyFormat, windowMode: 'multiple', showIgnoredFiles: false, setShowIgnoredFiles: (_value: boolean) => {}, setCopyFormat: (_value: CopyFormat) => {}, setWindowMode: (_value: string) => {} });
+const MessageSettings = createContext({ copyFormat: 'markdown' as CopyFormat, windowMode: 'multiple', showIgnoredFiles: false, setShowIgnoredFiles: (_value: boolean) => {}, setCopyFormat: (_value: CopyFormat) => {}, setWindowMode: (_value: string) => {}, scrollSyncPosition: 25, setScrollSyncPosition: (_percent: number) => {} });
 export const useMessageSettings = () => useContext(MessageSettings);
 export function SettingsProvider({ children }: { children: ReactNode }) {
   const [copyFormat, setCopy] = useState<CopyFormat>(() => {
@@ -15,11 +15,16 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     return saved === 'rich' || saved === 'plain' ? saved : 'markdown';
   });
   const [windowMode, setMode] = useState(() => storage.getItem('sidecar-window-mode') === 'single' ? 'single' : 'multiple');
+  const [syncPercent, setPercent] = useState(() => {
+    const value = Number(storage.getItem('sidecar-scroll-sync-position'));
+    return storage.getItem('sidecar-scroll-sync-position') && Number.isFinite(value) ? Math.min(100, Math.max(0, Math.round(value / 5) * 5)) : 25;
+  });
   const [showIgnoredFiles, setIgnored] = useState(() => storage.getItem('sidecar-show-ignored-files') === 'true');
-  return <MessageSettings.Provider value={{ copyFormat, windowMode, showIgnoredFiles,
+  return <MessageSettings.Provider value={{ copyFormat, windowMode, showIgnoredFiles, scrollSyncPosition: syncPercent,
     setShowIgnoredFiles: value => { storage.setItem('sidecar-show-ignored-files', String(value)); setIgnored(value); },
     setCopyFormat: value => { storage.setItem('sidecar-copy-format', value); setCopy(value); },
     setWindowMode: value => { storage.setItem('sidecar-window-mode', value); setMode(value); },
+    setScrollSyncPosition: percent => { storage.setItem('sidecar-scroll-sync-position', String(percent)); setPercent(percent); },
   }}>{children}</MessageSettings.Provider>;
 }
 
@@ -64,7 +69,7 @@ export function TextSettings({ version, children }: { version?: string; children
   }
   const tunnelCommand = tunnelConfig?.provider === 'ngrok' && network?.tunnelTarget
     ? `ngrok http ${network.tunnelTarget} --inspect=false${tunnelConfig.publicUrl ? ` --url '${tunnelConfig.publicUrl.replaceAll("'", "'\\''")}'` : ''}` : '';
-  const { copyFormat, windowMode, showIgnoredFiles, setShowIgnoredFiles, setCopyFormat, setWindowMode } = useMessageSettings();
+  const { copyFormat, windowMode, showIgnoredFiles, setShowIgnoredFiles, setCopyFormat, setWindowMode, scrollSyncPosition, setScrollSyncPosition } = useMessageSettings();
   const [highlightIntensity, setHighlightIntensity] = useState(readHighlightIntensity);
   useLayoutEffect(() => {
     document.documentElement.style.setProperty('--sidecar-highlight-intensity', `${highlightIntensity}%`);
@@ -178,6 +183,13 @@ export function TextSettings({ version, children }: { version?: string; children
         <fieldset className="message-settings"><legend>Windows</legend>
           <label><input type="radio" name="window-mode" checked={windowMode === 'single'} onChange={() => setWindowMode('single')} />One at a time</label>
           <label><input type="radio" name="window-mode" checked={windowMode === 'multiple'} onChange={() => setWindowMode('multiple')} />Multiple</label>
+        </fieldset>
+        <fieldset className="message-settings"><legend>Scroll sync</legend>
+          <label className="text-size-control">
+            <span>Align at</span>
+            <output>{scrollSyncPosition}%</output>
+            <input type="range" aria-label="Align at" aria-valuetext={`${scrollSyncPosition}%`} min={0} max={100} step={5} value={scrollSyncPosition} onChange={event => setScrollSyncPosition(event.target.valueAsNumber)} />
+          </label>
         </fieldset>
         <fieldset className="message-settings"><legend>File explorer</legend>
           <label><input type="checkbox" checked={showIgnoredFiles} onChange={event => setShowIgnoredFiles(event.target.checked)} />Show gitignored files and folders</label>

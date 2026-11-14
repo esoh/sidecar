@@ -6,6 +6,7 @@ import type { Quote } from '../src/store.ts';
 import { EditPreview, previewTopLine, scrollPreviewToLine } from './EditPreview.tsx';
 import { SourceEditor } from './SourceEditor.tsx';
 import { syncScroll } from './scroll-sync.ts';
+import { useMessageSettings } from './TextSettings.tsx';
 import { applyExternalText, minimalChange, quoteMarks, revealRange, selectionQuote, setQuoteMarks, setTracked, trackedQuote, trackedRange } from './editor-view.ts';
 import { freshQuote, locateQuote, sourceQuote } from './selection.ts';
 import { rangeToSource } from './source-dom.ts';
@@ -48,6 +49,8 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
 }) {
   const [mountKey, setMountKey] = useState(0), [seed, setSeed] = useState(markdown), [preview, setPreview] = useState(markdown);
   const [banner, setBanner] = useState(false), [canOverride, setCanOverride] = useState(false);
+  const { scrollSyncPosition } = useMessageSettings(), scrollSyncRef = useRef(scrollSyncPosition);
+  scrollSyncRef.current = scrollSyncPosition;
   const dismissed = useRef(''), disk = useRef({ markdown: diskMarkdown, version: diskVersion });
   disk.current = { markdown: diskMarkdown, version: diskVersion };
   // The disk version a Save anyway overrides, and the app's disk version when the conflict was reported.
@@ -235,7 +238,7 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
   const quoteKey = JSON.stringify(quotes);
   useEffect(() => { paint(); }, [mountId, quoteKey]);
   // The panes scroll together; the one not shown (narrow) stays laid out and keeps following.
-  useEffect(() => view.current && previewScroller.current ? syncScroll(view.current, previewScroller.current) : undefined, [mountId]);
+  useEffect(() => view.current && previewScroller.current ? syncScroll(view.current, previewScroller.current, () => scrollSyncRef.current / 100) : undefined, [mountId]);
   // Open at the reading position: the preview takes it and the source follows.
   useEffect(() => {
     if (anchor <= 0) return;

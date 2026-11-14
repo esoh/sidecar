@@ -7,9 +7,22 @@ type Side = 'source' | 'preview';
 /** How long a pane the sync just scrolled ignores scroll events (its echo and CodeMirror's height corrections). */
 export const QUIET_MS = 100;
 
-/** The viewport's anchor: its top at the start, its middle halfway, its bottom at the end. */
-export function anchorY(scrollTop: number, scrollHeight: number, clientHeight: number): number {
-  return scrollTop + clientHeight * (scrollTop / Math.max(1, scrollHeight - clientHeight));
+/**
+ * Where in the viewport (0 = top, 1 = bottom) the panes are aligned: `f`, except that within the first and last screen it
+ * eases to the top and bottom edge so both panes reach their ends together. A document under two screens shrinks both zones to half of it.
+ */
+export function anchorFraction(scrollTop: number, scrollHeight: number, clientHeight: number, f: number): number {
+  const max = scrollHeight - clientHeight;
+  if (max <= 0) return f;
+  const zone = Math.min(clientHeight, max / 2), top = scrollTop / zone, bottom = (max - scrollTop) / zone;
+  if (top < 1) return f * Math.max(top, 0);
+  if (bottom < 1) return 1 - (1 - f) * Math.max(bottom, 0);
+  return f;
+}
+
+/** The viewport's anchor point, in scroll-content coordinates. */
+export function anchorY(scrollTop: number, scrollHeight: number, clientHeight: number, f: number): number {
+  return scrollTop + clientHeight * anchorFraction(scrollTop, scrollHeight, clientHeight, f);
 }
 
 /** Maps a pixel position to the same fraction of the paired segment on the other side. */
@@ -22,11 +35,18 @@ export function mapY(segments: Segment[], from: Side, y: number): number {
 }
 
 /** The scrollTop that puts the target's anchor on the point matching the leader's anchor. */
-export function targetScrollTop(segments: Segment[], from: Side, scrollTop: number, fromHeights: Heights, toHeights: Heights): number {
-  const y = mapY(segments, from, anchorY(scrollTop, fromHeights.scrollHeight, fromHeights.clientHeight));
-  const { scrollHeight, clientHeight } = toHeights, range = Math.max(1, scrollHeight - clientHeight);
-  // Inverse of anchorY: y = s + c * s / range.
-  return Math.min(Math.max(y * range / (range + clientHeight), 0), Math.max(0, scrollHeight - clientHeight));
+export function targetScrollTop(segments: Segment[], from: Side, scrollTop: number, fromHeights: Heights, toHeights: Heights, f: number): number {
+  const y = mapY(segments, from, anchorY(scrollTop, fromHeights.scrollHeight, fromHeights.clientHeight, f));
+  const { scrollHeight, clientHeight } = toHeights;
+  // Inverse of anchorY, which increases with scrollTop: bisect.
+  let lo = 0, hi = Math.max(0, scrollHeight - clientHeight);
+  if (y <= 0) return 0;
+  if (y >= anchorY(hi, scrollHeight, clientHeight, f)) return hi;
+  for (let i = 0; i < 40; i++) {
+    const mid = (lo + hi) / 2;
+    if (anchorY(mid, scrollHeight, clientHeight, f) < y) lo = mid; else hi = mid;
+  }
+  return (lo + hi) / 2;
 }
 
 function buildSegments(view: EditorView, preview: HTMLElement): Segment[] {
@@ -62,7 +82,7 @@ function buildSegments(view: EditorView, preview: HTMLElement): Segment[] {
  * Keeps the source and preview scrolled to the same passage: whichever pane the user scrolls (or the source while
  * typing) leads. The panes' blocks are measured in pixels, so wrapped paragraphs and images line up. Returns the cleanup.
  */
-export function syncScroll(source: EditorView, preview: HTMLElement): () => void {
+export function syncScroll(source: EditorView, preview: HTMLElement, fraction: () => number): () => void {
   const scroller = source.scrollDOM;
   const el = { source: scroller, preview } as Record<Side, HTMLElement>;
   let segments: Segment[] = [], leader: Side = 'source', frame = 0;
@@ -73,7 +93,7 @@ export function syncScroll(source: EditorView, preview: HTMLElement): () => void
   const follow = (from: Side) => {
     const to: Side = from === 'source' ? 'preview' : 'source';
     if (!el[from].clientHeight || !el[to].clientHeight) return; // a hidden pane catches up when it is shown
-    const target = targetScrollTop(segments, from, el[from].scrollTop, heights(from), heights(to));
+    const target = targetScrollTop(segments, from, el[from].scrollTop, heights(from), heights(to), fraction());
     if (Math.abs(target - el[to].scrollTop) < 0.5) return;
     el[to].scrollTop = target;
     quiet[to] = performance.now() + QUIET_MS;
