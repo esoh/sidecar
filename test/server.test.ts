@@ -446,3 +446,34 @@ test('closing the last document leaves its server available for browsing with no
   assert.deepEqual(state.requests, {});
   assert.match(await readFile(doc.path, 'utf8'), /Hello/);
 });
+
+test('request payload carries 1-based source lines for a source quote', async t => {
+  const f = await fixture(t), markdown = '# Title\n\nSome **world** here\nand more\n', doc = await f.register('lines.md', markdown);
+  const version = (await import('node:crypto')).createHash('sha256').update(markdown).digest('hex');
+  const at = (exact: string) => { const start = markdown.indexOf(exact); return { exact, prefix: '', suffix: '', start, end: start + exact.length, version }; };
+  const ask = async (exact: string, clientMessageId: string) => {
+    const request = await (await f.view('/api/questions', { documentId: doc.id, text: 'Why?', quote: at(exact), clientMessageId })).json();
+    return (await (await f.agent(`/agent/requests/${request.id}/prepare`, {})).json()).quote;
+  };
+  assert.deepEqual(await ask('**world**', 'one'), { exact: '**world**', startLine: 3, endLine: 3 });
+  assert.deepEqual(await ask('here\nand more', 'two'), { exact: 'here\nand more', startLine: 3, endLine: 4 });
+});
+
+test('a traversal-style quote version never reads outside the versions directory', async t => {
+  const f = await fixture(t), doc = await f.register('trav.md', 'nothing relevant here\n');
+  await writeFile(join(f.directory, 'x.md'), 'one\nSECRET\n'); // versions/<doc>/../../x.md
+  const quote = { exact: 'SECRET', prefix: '', suffix: '', start: 4, end: 10, version: '../../x' };
+  const response = await f.view('/api/questions', { documentId: doc.id, text: 'Why?', quote, clientMessageId: 'trav' });
+  const request = await response.json();
+  const prepared = await (await f.agent(`/agent/requests/${request.id}/prepare`, {})).json();
+  assert.deepEqual(prepared.quote, { exact: 'SECRET' });
+});
+
+test('a question quoting unsaved text (empty version) is rejected', async t => {
+  const f = await fixture(t);
+  const doc = await f.register('unsaved-quote.md', 'Some marker text.\n');
+  const quote = { exact: 'marker', prefix: 'Some ', suffix: ' text.', start: 5, end: 11, version: '', isPositionVerified: true };
+  const response = await f.view('/api/questions', { documentId: doc.id, text: 'Q', clientMessageId: 'unsaved', quote });
+  assert.equal(response.status, 400);
+  assert.match(await response.text(), /Passage changed/);
+});

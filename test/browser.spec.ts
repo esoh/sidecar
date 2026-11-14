@@ -1,3 +1,4 @@
+import { QUIET_MS } from '../web/scroll-sync.ts';
 import { test, expect, type Page } from '@playwright/test';
 import { readFile, writeFile, rename, unlink, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -29,6 +30,18 @@ test.beforeEach(async ({ page, context }, info) => {
   }
 });
 test.afterEach(async () => { try { expect(pageErrors).toEqual([]); } finally { for (const fn of cleanup) await fn(); } });
+// Settings now lives in the app-bar menu; a category opens its page (the dialog remembers the last one).
+async function openSettings(page: Page, category?: 'Reading' | 'Editor' | 'Files' | 'Access' | 'About') {
+  await page.getByRole('button', { name: 'Menu', exact: true }).click();
+  await page.getByRole('menuitem', { name: /^Settings/ }).click();
+  const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+  await expect(dialog).toBeVisible();
+  if (category) await dialog.getByRole('button', { name: category, exact: true }).click();
+}
+async function formatViaMenu(page: Page) {
+  await page.getByRole('button', { name: 'Menu', exact: true }).click();
+  await page.getByRole('menuitem', { name: /^Format/ }).click();
+}
 async function state() { return (await f.view('/api/state')).json(); }
 async function lastRequest() { return Object.values<any>((await state()).requests).at(-1)!; }
 async function answer(text: string) {
@@ -43,7 +56,7 @@ test('settings configures and clears the public tunnel URL without exposing it t
   cleanup.push(async () => { if (previous === undefined) delete process.env.SIDECAR_CONFIG; else process.env.SIDECAR_CONFIG = previous; });
   const doc = await f.register();
   await page.goto(`${f.url}/?document=${doc.id}`);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Access');
   await page.getByRole('checkbox', { name: 'Allow access on local network' }).click();
   await expect(page.getByRole('checkbox', { name: 'Allow access on local network' })).toBeChecked();
   const field = page.getByLabel('Public HTTPS URL', { exact: true });
@@ -56,7 +69,7 @@ test('settings configures and clears the public tunnel URL without exposing it t
   await expect(field).toHaveValue('https://sidecar.example');
   await expect(page.getByRole('link', { name: /^https:\/\/sidecar\.example/ })).toHaveAttribute('href', `https://sidecar.example/?document=${doc.id}`);
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Access');
   await expect(field).toHaveValue('https://sidecar.example');
   await field.fill(''); await page.getByRole('button', { name: 'Save URL', exact: true }).click();
   await expect(page.getByRole('link', { name: /^https:\/\/sidecar\.example/ })).toHaveCount(0);
@@ -66,7 +79,7 @@ test('phone access enables from settings and sends conversations over plain LAN 
   test.setTimeout(30000);
   const doc = await f.register('phone.md', '# Phone review\n\nHello from the same document.\n');
   await page.goto(`${f.url}/?document=${doc.id}`);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Access');
   const setting = page.getByRole('checkbox', { name: 'Allow access on local network' });
   await expect(setting).not.toBeChecked(); await setting.click();
   await expect(setting).toBeChecked();
@@ -100,7 +113,7 @@ test('phone access enables from settings and sends conversations over plain LAN 
   await phone.getByRole('button', { name: 'Hide conversations', exact: true }).click();
   await phone.getByRole('button', { name: 'Copy file', exact: true }).click();
   await expect(phone.getByRole('button', { name: 'Copied!', exact: true })).toBeVisible();
-  await phone.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(phone, 'Access');
   await expect(phone.getByRole('checkbox', { name: 'Allow access on local network' })).toBeDisabled();
   await page.getByLabel('Network passphrase', { exact: true }).fill('my new home phrase');
   await page.getByRole('button', { name: 'Save passphrase', exact: true }).click();
@@ -121,7 +134,7 @@ async function proposalReply(page: Page, markdown = '# Retry policy\n\nThe clien
   await page.goto(`${f.url}/?document=${doc.id}`);
   const input = page.getByLabel('Message', { exact: true }); await input.fill('Propose an edit'); await input.press('Enter');
   await expect(input).toHaveValue('');
-  await answer('[[sidecar-meta {"highlights":[{"exact":"The client retries failed requests three times.","label":"Retry policy","proposal":{"before":"The client retries **failed requests** three times.","after":"The client retries **temporary failures** up to three times."}}]}]]\nReview [the retry policy](#selection-1).');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"The client retries **failed requests** three times.","label":"Retry policy","proposal":{"before":"The client retries **failed requests** three times.","after":"The client retries **temporary failures** up to three times."}}]}]]\nReview [the retry policy](#selection-1).');
   await expect(page.locator('.sidebar .proposal-card')).toBeVisible();
   return doc;
 }
@@ -291,7 +304,7 @@ test('annotation and heading links reveal only the required folded ancestors', a
 test('fold animations finish before annotation and heading navigation scrolls', async ({ page }) => {
   const doc = await f.register('animated-folds.md', '[Jump to inner](#inner)\n\n## Outer\n\n' + 'Outer context.\n\n'.repeat(15) + '### Inner\n\n' + 'Inner context.\n\n'.repeat(15) + 'Animated target passage.\n\n## End\n\nEnd body.\n');
   await page.goto(`${f.url}/?document=${doc.id}`);
-  const input = page.getByLabel('Message', { exact: true }); await input.fill('Where?'); await input.press('Enter'); await expect(input).toHaveValue('');
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Where?'); await input.press('Enter'); await expect(input).toHaveValue(''); await expect(input).toHaveValue('');
   await answer('[[sidecar-meta {"highlights":[{"exact":"Animated target passage."}]}]]\nSee [animated target](#selection-1).');
   await expect(page.locator('#document mark')).toHaveCount(1);
   const fold = (name: string) => page.locator('#document details.document-section').filter({ has: page.locator(`:scope > summary #${name}`) });
@@ -453,7 +466,7 @@ test('proposal window keeps controls reachable while long content scrolls and th
 test('proposal text size affects both previews and source diff and persists independently of reading settings', async ({ page, context }) => {
   await proposalReply(page);
   await context.addCookies([{ name: 'sidecar-proposal-text-size', value: '140', url: f.url }]);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   await page.getByRole('slider', { name: 'Document text size', exact: true }).fill('120');
   await page.getByRole('slider', { name: 'Conversation text size', exact: true }).fill('90');
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
@@ -477,7 +490,7 @@ test('proposal text size affects both previews and source diff and persists inde
   await review.click(); await expect(size).toHaveValue('25');
   await page.reload(); await review.click(); await expect(size).toHaveValue('25');
   await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   await expect(page.getByRole('slider', { name: 'Document text size', exact: true })).toHaveValue('120');
   await expect(page.getByRole('slider', { name: 'Conversation text size', exact: true })).toHaveValue('90');
   await page.getByRole('slider', { name: 'Document text size', exact: true }).fill('150');
@@ -691,7 +704,7 @@ test('queued previews wait for batch delivery and keep selections, order and dra
   await f.agent(`/agent/requests/${first.id}/accepted`, {});
   await expect(queue.getByRole('listitem')).toHaveText(['Arrived after the batch']);
   await expect(log.locator('.message.user .message-bubble')).toHaveText(['Explain this passage', 'And this follow-up']);
-  await expect(log.locator('.message-selection')).toContainText('Hello world.');
+  await expect(log.locator('.message-selection')).toContainText('Hello **world**.');
   await expect(log.locator('.message-status')).toHaveText('Working…');
   await f.agent('/agent/stream-events', { ownerKey: ownerKey(f.owner), turnId: 'queue-test', messageId: 'final', index: 0, delta: prepared.stream.prefix + 'First answer' + prepared.stream.suffix, final: true });
   await f.agent(`/agent/requests/${later.id}/prepare`, {});
@@ -854,7 +867,7 @@ test('quotes from sent messages, floating windows and the dock keep their source
   await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', request.threadId);
   await expect(page.locator('.draft-selection')).toContainText('Alpha bold and code omega.');
   await select(page, 'Hello world.');
-  await expect(page.locator('.draft-selection')).toContainText('Hello world.');
+  await expect(page.locator('.draft-selection')).toContainText('Hello **world**.');
   await expect(page.locator('.draft-selection')).not.toContainText('Alpha bold');
   // A hidden conversation must retain its own draft when a different pinned source opens.
   await answer('Follow-up answer.');
@@ -968,12 +981,12 @@ test('message copy formats exclude selection controls and preserve Markdown code
   const copy = reply.getByRole('button', { name: 'Copy message', exact: true });
   await copy.click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('Read **this** passage and [guide](https://example.com).\n\n`[example](#selection-2)`\n\n    [code example](#selection-3)\n\nSee reference.\n\n');
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Files');
   await page.getByRole('radio', { name: 'Plain text', exact: true }).check();
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
   await reply.hover(); await copy.click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('Read this passage and guide.\n\n[example](#selection-2)\n\n[code example](#selection-3)\n\nSee reference.');
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Files');
   await page.getByRole('radio', { name: 'Rich text', exact: true }).check();
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
   await reply.hover(); await copy.click();
@@ -984,7 +997,7 @@ test('message copy formats exclude selection controls and preserve Markdown code
   expect(html).not.toContain('href="#selection');
   expect(html).not.toContain('The passage.');
   await page.reload();
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Files');
   await expect(page.getByRole('radio', { name: 'Rich text', exact: true })).toBeChecked();
 });
 
@@ -1039,7 +1052,7 @@ test('pin list condenses, tabs reorder, and single-window mode keeps the latest 
   await expect(reordered).toBeFocused();
   await expect(dock.getByRole('tab')).toHaveText(['First question', 'Second question', 'First answer']);
   await dock.getByRole('tab', { name: 'First answer', exact: true }).click();
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Files');
   await page.getByRole('radio', { name: 'One at a time', exact: true }).check();
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
   await expect(dock.getByRole('tab')).toHaveText(['Second question']);
@@ -1134,7 +1147,7 @@ test('each agent selection has a persistent eye, stable reply link, and independ
   await page.getByLabel('Message', { exact: true }).fill('Please identify both passages.');
   await page.getByLabel('Message', { exact: true }).press('Enter');
   await expect(page.getByRole('log')).toContainText('Please identify both passages.');
-  await answer('[[sidecar-meta {"threadTitle":"Document landmarks","highlights":[{"exact":"First passage.","label":"First"},{"exact":"Second passage."}]}]]\nSee [first](#selection-1) and [second](#selection-2).');
+  await answer('[[sidecar-meta {"threadTitle":"Document landmarks","highlights":[{"exact":"First **passage**.","label":"First"},{"exact":"Second passage."}]}]]\nSee [first](#selection-1) and [second](#selection-2).');
   const badges = page.locator('.message-selection');
   await expect(badges).toHaveCount(2);
   await expect(badges.first()).toContainText('First');
@@ -1225,7 +1238,7 @@ test('agent prefix/suffix context disambiguates headings without a repair and mi
   const input = page.getByLabel('Message', { exact: true });
   await input.fill('Point to it'); await input.press('Enter');
   await expect(page.getByRole('log')).toContainText('Point to it');
-  await answer('[[sidecar-meta {"highlights":[{"exact":"Author Summary","suffix":"\\nNew introduction."},{"exact":"Never existed"}]}]]\nHere.');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"Author Summary","suffix":"\\n\\nNew introduction."},{"exact":"Never existed"}]}]]\nHere.');
   await expect(page.locator('#document h2 mark')).toHaveText('Author Summary');
   await expect(page.locator('.message-selection').first()).not.toContainText('Multiple matching passages');
   await page.locator('.message-selection').last().getByRole('button', { name: 'View original document' }).click();
@@ -1241,7 +1254,7 @@ test('agent source apostrophes locate rendered smart quotes and retain genuine p
   await page.getByLabel('Message', { exact: true }).fill('Highlight these');
   await page.getByLabel('Message', { exact: true }).press('Enter');
   await expect(page.getByRole('log')).toContainText('Highlight these');
-  await answer('[[sidecar-meta ' + JSON.stringify({ highlights: [first, second, third].map(exact => ({ exact })) }) + ']]\nHere are the three passages.');
+  await answer('[[sidecar-meta ' + JSON.stringify({ highlights: [first.replace('CallSessions', '`CallSession`s'), second, third].map(exact => ({ exact })) }) + ']]\nHere are the three passages.');
   await expect(page.locator('.message-selection')).toHaveCount(3);
   await expect(page.getByText('Passage changed', { exact: true })).toHaveCount(0);
   await expect(page.locator('#document mark')).toHaveCount(5); // The code span splits the first passage into three marks.
@@ -1374,13 +1387,13 @@ test('selection spans inline formatting, code and emoji; outside and empty selec
   await expect(page.locator('#document')).toContainText('bold 😀');
   await select(page, 'bold 😀 and code');
   await page.getByRole('button', { name: 'Comment', exact: true }).click();
-  await expect(page.getByTestId('selection-preview')).toHaveText('bold 😀 and code');
+  await expect(page.getByTestId('selection-preview')).toHaveText('**bold 😀** and `code`');
   await page.getByLabel('Comment', { exact: true }).fill('Explain the selection');
   await page.getByRole('dialog').getByRole('button', { name: 'Send comment', exact: true }).click();
   await expect(page.locator('#threads').getByText('Explain the selection', { exact: true })).toBeVisible();
   const quote = (await lastRequest()).quote;
-  expect(quote.exact).toBe('bold 😀 and code'); expect(quote.end - quote.start).toBe(quote.exact.length);
-  expect(quote.sentence).toBe('Alpha bold 😀 and code omega.');
+  expect(quote.exact).toBe('**bold 😀** and `code`'); expect(quote.end - quote.start).toBe(quote.exact.length);
+  expect(quote.sentence).toBeUndefined();
   expect(await page.locator('#document script').count()).toBe(0);
   await page.evaluate(() => {
     const range = document.createRange(); range.selectNodeContents(document.querySelector('.brand')!);
@@ -1578,7 +1591,7 @@ test('floating comments retain their highlight, retry safely, and reopen the sav
   await expect(composer).toHaveCount(0);
   await expect(page.locator('#threads').getByText('Explain this passage', { exact: true })).toBeVisible();
   const request = await lastRequest();
-  expect(request.quote.exact).toBe('bold 😀 and code');
+  expect(request.quote.exact).toBe('**bold 😀** and `code`');
   expect(Object.keys((await state()).requests)).toHaveLength(1);
   await answer('This stays in the original conversation.');
   await page.reload();
@@ -1646,7 +1659,7 @@ for (const kind of ['External', 'Padded code', 'Markdown line']) test(`${kind} l
   await page.locator('#document mark').click();
   await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', first.threadId);
   expect(page.url()).toContain(f.url);
-  const second = await (await f.view('/api/questions', { documentId: a.id, text: 'Second question', clientMessageId: 'second', quote: { ...first.quote, exact: 'docs', prefix: first.quote.prefix + 'the ', start: first.quote.start + 4 } })).json();
+  const second = await (await f.view('/api/questions', { documentId: a.id, text: 'Second question', clientMessageId: 'second', quote: { ...first.quote, exact: 'docs', prefix: first.quote.prefix + '[the ', start: first.quote.start + 5, end: first.quote.start + 9, suffix: (first.quote.exact.slice(first.quote.exact.indexOf('docs') + 4) + first.quote.suffix).slice(0, 32) } })).json();
   await expect(page.locator('#document mark').filter({ hasText: /^docs$/ })).toBeVisible();
   for (const [text, id] of [['First question', first.threadId], ['Second question', second.threadId]]) {
     await page.locator('#document mark').filter({ hasText: /^docs$/ }).click();
@@ -1873,7 +1886,7 @@ test('composers grow, preserve Shift+Enter and IME, and submit with Enter', asyn
   await comment.fill('Explain'); await comment.press('Shift+Enter'); await comment.pressSequentially('this');
   await expect(comment).toHaveValue('Explain\nthis'); await comment.press('Enter');
   await expect(page.getByRole('dialog')).toHaveCount(0);
-  expect((await lastRequest()).quote.exact).toBe('Hello world.');
+  expect((await lastRequest()).quote.exact).toBe('Hello **world**.');
 });
 
 
@@ -1970,7 +1983,7 @@ test('a delayed send preserves a newer draft after leaving and reopening its thr
     await page.getByRole('button', { name: 'Threads', exact: true }).click();
     await page.locator(`[data-thread-id="${request.threadId}"]`).click();
     await expect(message).toHaveValue('Keep this newer draft');
-    await expect(page.locator('.draft-selection')).toContainText('world.');
+    await expect(page.locator('.draft-selection')).toContainText('**world**.');
     expect((await state()).requests[request.id].quote.exact).toBe('Hello');
     expect(Object.keys((await state()).requests)).toHaveLength(1);
   } finally { release(); }
@@ -2441,7 +2454,7 @@ digraph G { Read -> Ask }
   expect(await page.evaluate(() => '__sidecarDocumentScriptRan' in window)).toBe(false);
   await select(page, 'important');
   await page.getByRole('button', { name: 'Comment', exact: true }).click();
-  await expect(page.getByTestId('selection-preview')).toHaveText('important');
+  await expect(page.getByTestId('selection-preview')).toHaveText('> [!NOTE]\n> Keep this **important** detail.'); // alerts are unmappable: whole source lines
 });
 
 test('renderer fonts, spacing, images and highlighted code survive reload and file edits', async ({ page }) => {
@@ -2667,8 +2680,9 @@ test('text sizes adjust each pane independently and persist across sessions', as
   const headingHeight = (await page.locator('#document h1').boundingBox())!.height;
   const replyHeight = (await page.locator('.message.agent strong').boundingBox())!.height;
   const toolbarHeight = (await page.locator('.topbar').boundingBox())!.height;
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'About');
   await expect(page.locator('.settings-version')).toHaveText((await state()).appVersion);
+  await page.getByRole('dialog', { name: 'Settings', exact: true }).getByRole('button', { name: 'Reading', exact: true }).click();
   const documentSize = page.getByRole('slider', { name: 'Document text size' });
   const conversationSize = page.getByRole('slider', { name: 'Conversation text size' });
   await expect(documentSize).toHaveValue('100');
@@ -2681,17 +2695,17 @@ test('text sizes adjust each pane independently and persist across sessions', as
   expect((await page.locator('.topbar').boundingBox())!.height).toBe(toolbarHeight);
   await conversationSize.press('Escape');
   await expect(documentSize).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Settings', exact: true })).toBeFocused();
+  await expect(page.getByRole('button', { name: 'Menu', exact: true })).toBeFocused();
   await page.locator('#document mark').first().click();
   await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', (await lastRequest()).threadId);
   await page.reload();
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   await expect(documentSize).toHaveValue('150');
   await expect(conversationSize).toHaveValue('125');
   const second = await fixture({ after: fn => cleanup.push(fn) });
   const secondDoc = await second.register();
   await page.goto(`${second.url}/?document=${secondDoc.id}`);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   await expect(documentSize).toHaveValue('150');
   await expect(conversationSize).toHaveValue('125');
   await page.getByRole('button', { name: 'Reset text sizes' }).click();
@@ -2702,7 +2716,7 @@ test('text sizes adjust each pane independently and persist across sessions', as
     { name: 'sidecar-conversation-text-size', value: 'not-a-number', url: second.url },
   ]);
   await page.reload();
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   await expect(documentSize).toHaveValue('100');
   await expect(conversationSize).toHaveValue('100');
 });
@@ -2874,7 +2888,7 @@ test('saved drafts retain retry IDs after a lost response and clear only after s
   const original = await lastRequest();
   await page.reload();
   await expect(message).toHaveValue('Send this exactly once');
-  await expect(page.locator('.draft-selection')).toContainText('Hello world.');
+  await expect(page.locator('.draft-selection')).toContainText('Hello **world**.');
   await message.press('Enter');
   await expect(message).toHaveValue('');
   expect(Object.keys((await state()).requests)).toEqual([original.id]);
@@ -2932,8 +2946,8 @@ test('Settings opens the all-agent library and session popovers copy original ID
   await page.getByRole('button', { name: 'Copy', exact: true }).click();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(f.owner.sessionId);
   await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  const [library] = await Promise.all([context.waitForEvent('page'), page.getByRole('link', { name: 'View all documents', exact: true }).click()]);
+  await page.getByRole('button', { name: 'Menu', exact: true }).click();
+  const [library] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'View all documents', exact: true }).click()]);
   await expect(library.getByRole('heading', { name: 'Documents', exact: true })).toBeVisible();
   await expect(library.getByRole('link', { name: /Current document/ })).toHaveAttribute('href', `${f.url}/?document=${doc.id}`);
   const opened = library.getByRole('link', { name: /Current document/ }).locator('time');
@@ -3176,7 +3190,7 @@ test('document badges, copy and brightness preserve text anchors and controls', 
   const glyphColor = () => page.locator('#document h2').evaluate(el => getComputedStyle(el).webkitTextFillColor);
   const original = await glyphColor();
   const background = await page.locator('#document').evaluate(el => getComputedStyle(el).backgroundColor);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   const brightness = page.getByRole('slider', { name: 'Text brightness', exact: true });
   await expect(brightness).toHaveValue('100');
   await expect(brightness).toHaveAttribute('max', '100');
@@ -3187,7 +3201,7 @@ test('document badges, copy and brightness preserve text anchors and controls', 
   expect(await page.locator('#document').evaluate(el => getComputedStyle(el).backgroundColor)).toBe(background);
   expect(await page.locator('.document-copy').evaluate(el => getComputedStyle(el).webkitTextFillColor)).not.toContain('/ 0.6');
   await page.reload();
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   await expect(brightness).toHaveValue('60');
   await page.getByRole('button', { name: 'Reset text brightness' }).click();
   await expect(brightness).toHaveValue('100');
@@ -3229,7 +3243,7 @@ test('highlight intensity dims selections without dimming text and persists acro
   await expect(page.locator('#document')).toContainText('Select this passage.');
   await select(page, 'Select this passage.');
   const original = await page.locator('mark[data-pending]').evaluate(e => getComputedStyle(e).backgroundColor);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   const slider = page.getByRole('slider', { name: 'Highlight intensity', exact: true });
   await slider.fill('30');
   await slider.press('Escape');
@@ -3239,7 +3253,7 @@ test('highlight intensity dims selections without dimming text and persists acro
   expect(await dimmed.evaluate(e => getComputedStyle(e).backgroundColor)).not.toBe(original);
   expect(await dimmed.evaluate(e => getComputedStyle(e).color)).toBe('rgb(255, 255, 255)');
   await page.reload();
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   await expect(slider).toHaveValue('30');
   await page.getByRole('button', { name: 'Reset highlight intensity' }).click();
   await expect(slider).toHaveValue('100');
@@ -3602,7 +3616,7 @@ test('file windows share the dock with pinned replies and reopen without duplica
   expect(Object.keys((await state()).documents)).toEqual([doc.id]);
   expect(await readFile(join(root, 'a.md'), 'utf8')).toBe('# First file\n');
   // The existing one-window setting applies across files and pinned replies.
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Files');
   await page.getByRole('radio', { name: 'One at a time', exact: true }).check();
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
   await expect(dock.getByRole('tab')).toHaveText(['b.yml']);
@@ -3802,6 +3816,48 @@ test('file previews attach a file quote after the conversation pane toggles', as
   await expect(page.getByLabel('Comment', { exact: true })).toHaveCount(0);
   await expect(page.locator('.draft-selection')).toContainText('other.md');
   await expect(page.locator('.draft-selection')).toContainText('Other text.');
+});
+
+test('File window line quote: a Markdown file selection is a source slice with lines and goes stale when the text is removed', async ({ page }) => {
+  const root = await filesWorkspace({ 'note.md': '# Note\n\nHello **world** again.\n' });
+  const doc = await f.register('main.md', '# Main\n\nBody.\n');
+  await f.agent('/agent/documents', { path: doc.path, workspace: root });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Show files' }).click();
+  await page.getByRole('complementary', { name: 'Files' }).getByTitle('note.md', { exact: true }).click();
+  const preview = page.getByRole('region', { name: 'File preview' });
+  await expect(preview.getByRole('heading', { name: 'Note' })).toBeVisible();
+  // No hidden rendered-text probe is mounted for docked files.
+  await expect(page.locator('[inert]')).toHaveCount(0);
+  await page.evaluate(() => {
+    const p = document.querySelector('.file-preview p')!;
+    const range = document.createRange(); range.setStart(p.firstChild!, 0); range.setEnd(p.querySelector('strong')!.firstChild!, 3);
+    getSelection()!.removeAllRanges(); getSelection()!.addRange(range);
+    document.querySelector('.file-preview article')!.dispatchEvent(new Event('mouseup', { bubbles: true }));
+  });
+  const input = page.getByLabel('Message', { exact: true });
+  await expect(page.locator('.draft-selection')).toContainText('note.md:3');
+  await input.fill('About this'); await input.press('Enter'); await expect(input).toHaveValue('');
+  expect((await lastRequest()).fileQuote).toEqual({ path: `${root}/note.md`, kind: 'doc', exact: 'Hello **wor', startLine: 3, endLine: 3 });
+  await answer('Noted.');
+  await expect(page.locator('.sidebar .passage-context .changed')).toHaveCount(0);
+  await writeFile(join(root, 'note.md'), '# Note\n\nEntirely different.\n');
+  await expect(page.locator('.sidebar .passage-context .changed')).toHaveText('Selection changed', { timeout: 10000 });
+});
+
+test('Original view source: a quote saved before a file change still shows and paints on Show original', async ({ page }) => {
+  const markdown = '# Review\n\nKeep **this bold** passage.\n';
+  const doc = await f.register('orig-source.md', markdown);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true });
+  await input.fill('Where?'); await input.press('Enter'); await expect(input).toHaveValue('');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"**this bold** passage"}]}]]\nSee [it](#selection-1).');
+  await page.locator('.sidebar').getByRole('link', { name: 'it', exact: true }).click();
+  await expect(page.locator('#document mark')).toHaveText(['this bold', ' passage']);
+  await writeFile(doc.path, '# Review\n\nKeep something else.\n');
+  await expect(page.getByText('Passage changed', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'View original document', exact: true }).click();
+  await expect(page.locator('.original-document mark')).toHaveText(['this bold', ' passage']);
 });
 
 test('opened files retain their own roots when the document workspace changes', async ({ page }) => {
@@ -4044,7 +4100,7 @@ test('Cloudflare settings show configured provider without publishing it, and ma
   await writeFile(path, JSON.stringify({ tunnel: { provider: 'cloudflare', publicUrl: 'https://sidecar.example.com', configPath: '/private/example/tunnel.yml' } }));
   const doc = await f.register();
   await page.goto(`${f.url}/?document=${doc.id}`);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Access');
   await expect(page.getByRole('heading', { name: 'Internet (Cloudflare)' })).toBeVisible();
   await expect(page.getByText('Configured address: https://sidecar.example.com', { exact: true })).toBeVisible();
   await expect(page.getByRole('checkbox', { name: 'Allow access on local network' })).not.toBeChecked();
@@ -4054,7 +4110,7 @@ test('Cloudflare settings show configured provider without publishing it, and ma
   await expect(page.getByLabel('ngrok command')).toHaveCount(0);
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
   await writeFile(path, '{broken');
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Access');
   await expect(page.getByRole('alert')).toContainText('Sidecar config');
   await page.getByRole('checkbox', { name: 'Allow access on local network' }).click();
   await expect(page.getByRole('checkbox', { name: 'Allow access on local network' })).not.toBeChecked();
@@ -4426,7 +4482,141 @@ test('opening a hidden sidebar carries the new passage into the existing draft',
   await expect(page.locator('#document mark[data-pending]')).toHaveText('world');
   await page.getByLabel('Message', { exact: true }).press('Enter');
   await expect(page.getByRole('log')).toContainText('Keep my follow-up');
-  expect((await lastRequest()).quote.exact).toBe('world');
+  expect((await lastRequest()).quote.exact).toBe('**world**');
+});
+
+test('View selection quotes source and paints only the visible text', async ({ page }) => {
+  const source = '# Heading\n\nHello **world**.\n';
+  const doc = await f.register('source-quote.md', source);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document')).toContainText('Hello world.');
+  await page.getByLabel('Message', { exact: true }).fill('Why?');
+  await select(page, 'Hello wor');
+  await expect.poll(() => page.locator('#document mark[data-pending]').allTextContents().then(t => t.join(''))).toBe('Hello wor');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByRole('log')).toContainText('Why?');
+  const quote = (await lastRequest()).quote;
+  expect(quote.exact).toBe('Hello **wor');
+  expect(source.slice(quote.start, quote.end)).toBe('Hello **wor');
+  expect(quote.sentence).toBeUndefined();
+});
+
+test('triple-clicking a heading quotes its source line', async ({ page }) => {
+  const doc = await f.register('whole-heading.md', '## Heading\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document h2')).toHaveText('Heading');
+  await page.getByLabel('Message', { exact: true }).fill('Why?');
+  await page.locator('#document h2').click({ clickCount: 3 });
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByRole('log')).toContainText('Why?');
+  expect((await lastRequest()).quote.exact).toBe('## Heading');
+});
+
+test('selecting the second of two identical passages paints the second after reload', async ({ page }) => {
+  const doc = await f.register('duplicate.md', 'Same **line**.\n\nMiddle.\n\nSame **line**.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document p')).toHaveCount(3);
+  await page.getByLabel('Message', { exact: true }).fill('Which?');
+  await page.evaluate(() => {
+    const p = document.querySelectorAll('#document p')[2]!;
+    const range = document.createRange(); range.selectNodeContents(p);
+    const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+    document.getElementById('document')!.dispatchEvent(new Event('mouseup', { bubbles: true }));
+  });
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  const marked = () => page.evaluate(() => [...document.querySelectorAll('#document p')].map(p => !!p.querySelector('mark.annotation-highlight')));
+  await expect.poll(marked).toEqual([false, false, true]);
+  await page.reload();
+  await expect.poll(marked).toEqual([false, false, true]);
+});
+
+test('agent highlights match source text; ambiguous ones say so', async ({ page }) => {
+  const doc = await f.register('agent-source.md', 'A **world** here.\n\nTwice. Twice.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Highlight'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"**world**"},{"exact":"Twice."}]}]]\nSee [one](#selection-1) and [two](#selection-2).');
+  await expect(page.locator('#document mark.annotation-highlight').first()).toHaveText('world');
+  await expect(page.getByText('Multiple matching passages', { exact: true })).toBeVisible();
+});
+
+test('a passage under a folded heading opens and scrolls into view from its thread quote', async ({ page }) => {
+  const doc = await f.register('folded-source.md', '# Top\n\n## Hidden\n\n' + 'Filler.\n\n'.repeat(40) + 'Deep **target** passage.\n\n## Other\n\nEnd.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Find'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"Deep **target** passage."}]}]]\nSee [it](#selection-1).');
+  const mark = page.locator('#document mark.annotation-highlight').first();
+  await expect(mark).toBeVisible();
+  await page.locator('#document summary').filter({ hasText: 'Hidden' }).click();
+  await expect(mark).toBeHidden();
+  await page.getByRole('button', { name: /Show passage/ }).click();
+  await expect(mark).toBeVisible();
+  await expect(mark).toBeInViewport();
+});
+
+test('selecting across smart quotes quotes the straight-quote source', async ({ page }) => {
+  const doc = await f.register('smart.md', 'He said "quoted" text and left.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document')).toContainText('quoted');
+  await page.getByLabel('Message', { exact: true }).fill('Why?');
+  await select(page, (await page.locator('#document p').textContent())!.match(/said .quoted. text/)![0]);
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByRole('log')).toContainText('Why?');
+  expect((await lastRequest()).quote.exact).toBe('said "quoted" text');
+});
+
+test('selecting in a CRLF document gives offsets into the CRLF source', async ({ page }) => {
+  const source = '# Title\r\n\r\nSome wor words.\r\n';
+  const doc = await f.register('crlf.md', source);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document')).toContainText('Some wor words.');
+  await page.getByLabel('Message', { exact: true }).fill('Why?');
+  await select(page, 'wor words');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByRole('log')).toContainText('Why?');
+  const quote = (await lastRequest()).quote;
+  expect(source.slice(quote.start, quote.end)).toBe(quote.exact);
+  expect(quote.exact).toBe('wor words');
+});
+
+test('a word inside an untagged fence in a CRLF document quotes exactly that word', async ({ page }) => {
+  const source = '# Title\r\n\r\n```\r\nplain word\r\nsecond\r\n```\r\n';
+  const doc = await f.register('crlf-fence.md', source);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await expect(page.locator('#document')).toContainText('plain word');
+  await page.getByLabel('Message', { exact: true }).fill('Why?');
+  await select(page, 'word');
+  await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect(page.getByRole('log')).toContainText('Why?');
+  const quote = (await lastRequest()).quote;
+  expect(quote.exact).toBe('word');
+  expect(source.slice(quote.start, quote.end)).toBe('word');
+});
+
+test('a proposal popover opens beside its passage, not at the document edge', async ({ page }) => {
+  await proposalReply(page, '# Retry policy\n\n' + 'Filler paragraph.\n\n'.repeat(30) + 'The client retries **failed requests** three times.\n\nEnd.\n');
+  const mark = page.locator('#document mark').first();
+  await mark.scrollIntoViewIfNeeded();
+  await mark.click();
+  const dialog = page.getByRole('dialog', { name: 'Proposed change', exact: true });
+  await expect(dialog).toBeVisible();
+  await expect.poll(async () => {
+    const d = (await dialog.boundingBox())!, m = (await mark.boundingBox())!;
+    const dx = Math.max(0, m.x - (d.x + d.width), d.x - (m.x + m.width));
+    const dy = Math.max(0, m.y - (d.y + d.height), d.y - (m.y + m.height));
+    return Math.max(dx, dy);
+  }).toBeLessThan(80);
+});
+
+test('a quote inside a highlighted code block stays painted over the right text', async ({ page }) => {
+  const doc = await f.register('code-quote.md', '# Code\n\n```js\nconst answer = 42;\nconsole.log(answer);\n```\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Look'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"answer = 42"}]}]]\nSee [it](#selection-1).');
+  await expect(page.locator('#document pre code span').first()).toBeVisible();
+  await expect.poll(() => page.locator('#document mark.annotation-highlight').allTextContents().then(t => t.join(''))).toBe('answer = 42');
 });
 
 test.describe('mobile document and chat', () => {
@@ -4590,7 +4780,7 @@ test.describe('mobile document and chat', () => {
     await page.getByRole('button', { name: 'Send comment', exact: true }).tap();
     await expect(page.getByRole('log')).toContainText('New passage thread');
     expect((await lastRequest()).threadId).not.toBe(draftThread);
-    expect((await lastRequest()).quote.exact).toBe('world');
+    expect((await lastRequest()).quote.exact).toBe('**world**');
     await expect(toggle).toHaveAttribute('aria-expanded', 'true');
   });
   test('overlapping annotations keep their thread chooser in the document view', async ({ page }) => {
@@ -4684,7 +4874,7 @@ test('file reference ranges reveal source lines from documents and replies with 
   await expect.poll(() => isRevealed(40)).toBe(true);
   await expect(file.locator('[data-file-reference]')).toHaveText(['export const value40 = 40;\n', 'export const value41 = 41;\n', 'export const value42 = 42;\n']);
   await file.getByRole('button', { name: 'Close file window' }).click();
-  await input.fill('Where?'); await input.press('Enter');
+  await input.fill('Where?'); await input.press('Enter'); await expect(input).toHaveValue('');
   await expect(input).toHaveValue('');
   await answer(`See [these lines](${root}/src/a.ts:170-172).`);
   await input.fill('Keep my follow-up');
@@ -4756,7 +4946,7 @@ test('Settings hides gitignored entries by default, reveals them on demand, and 
   await expect(panel.getByTitle('ignored.log', { exact: true })).toHaveCount(0);
   await expect(panel.getByTitle('node_modules', { exact: true })).toHaveCount(0);
   expect(listed).not.toContain(join(root, 'node_modules'));
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Files');
   const setting = page.getByRole('checkbox', { name: 'Show gitignored files and folders', exact: true });
   await expect(setting).not.toBeChecked(); await setting.check();
   await page.screenshot({ path: testInfo.outputPath('gitignored-settings.png') });
@@ -4772,7 +4962,7 @@ test('Settings hides gitignored entries by default, reveals them on demand, and 
   await page.reload();
   await expect(panel.getByTitle('ignored.log', { exact: true })).toBeVisible();
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep my draft');
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Files');
   await expect(setting).toBeChecked(); await setting.uncheck();
   await page.getByRole('button', { name: 'Close settings' }).click();
   await expect(panel.getByTitle('ignored.log', { exact: true })).toHaveCount(0);
@@ -4818,4 +5008,1794 @@ test('large folders show sorted batches, filter beyond the first batch, and reve
   await expect.poll(paths).toHaveLength(201);
   await page.getByRole('button', { name: 'Close file window' }).click();
   await page.screenshot({ path: testInfo.outputPath('large-directory-batches.png') });
+});
+
+// The text the preview paints for thread quotes (CSS custom highlight, so the document DOM is untouched).
+const paintedInPreview = (page: Page) => page.evaluate(() => [...(CSS.highlights.get('sidecar-quote') ?? [])].map(range => range.toString()).join(''));
+
+async function typeAtEndOfFirstLine(page: Page, text: string) {
+  const editor = page.locator('.cm-content');
+  await editor.click();
+  await page.keyboard.press('ControlOrMeta+Home');
+  await page.keyboard.press('End');
+  await page.keyboard.type(text);
+}
+
+test('edit mode saves typed text, keeps undo across save, and Done returns to the reading view', async ({ page }) => {
+  const doc = await f.register('edit-me.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  await expect(page.getByText('● Unsaved')).toBeVisible();
+  await page.keyboard.press('ControlOrMeta+s');
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  expect(await readFile(join(f.directory, 'edit-me.md'), 'utf8')).toBe('# Title typed\n\nBody text.\n');
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect(page.locator('.cm-content')).not.toContainText('typed');
+  await expect(page.getByText('● Unsaved')).toBeVisible();
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Discard', exact: true }).click();
+  await expect(page.locator('#document').getByRole('heading', { name: 'Title typed' })).toBeVisible();
+  expect(await readFile(join(f.directory, 'edit-me.md'), 'utf8')).toBe('# Title typed\n\nBody text.\n');
+});
+
+test('edit is unavailable for HTML documents and documents with carriage returns', async ({ page }) => {
+  const crlf = await f.register('crlf.md', '# Title\r\n\r\nBody.\r\n');
+  await page.goto(`${f.url}/?document=${crlf.id}`);
+  await expect(page.locator('#document').getByRole('heading', { name: 'Title' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Edit', exact: true })).toBeDisabled();
+  const html = await f.register('page.html', '<p>Static</p>');
+  await page.goto(`${f.url}/?document=${html.id}`);
+  await expect(page.locator('.topbar')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Edit', exact: true })).toHaveCount(0);
+});
+
+test('unsaved edits prompt before switching documents and on unload', async ({ page }) => {
+  const doc = await f.register('first.md', '# First\n\nBody.\n');
+  const other = await f.register('second.md', '# Second\n\nBody.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' draft');
+  await page.getByLabel('Documents').selectOption(other.id);
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.locator('.cm-content')).toContainText('First draft');
+  expect(new URL(page.url()).searchParams.get('document')).toBe(doc.id);
+  const kinds: string[] = [];
+  page.on('dialog', async d => { kinds.push(d.type()); await d.accept(); });
+  await page.reload();
+  expect(kinds).toContain('beforeunload');
+});
+
+test('Enter and leave: edit mode opens at the reading passage in both panes and Done returns the preview\'s passage', async ({ page }) => {
+  const markdown = Array.from({ length: 40 }, (_, i) => `## Heading ${i + 1}\n\n${'Filler paragraph text.\n\n'.repeat(6)}`).join('');
+  const doc = await f.register('long-edit.md', markdown);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const heading = (n: number) => page.locator('#document').getByRole('heading', { name: `Heading ${n}`, exact: true });
+  await expect(heading(30)).toBeAttached();
+  await page.locator('.canvas').evaluate((canvas, n) => {
+    const target = [...document.querySelectorAll('#document h2')].find(e => e.textContent?.trim() === `Heading ${n}`)!;
+    canvas.scrollTo({ top: canvas.scrollTop + target.getBoundingClientRect().top - canvas.getBoundingClientRect().top, behavior: 'instant' });
+  }, 30);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  const inView = () => page.locator('.cm-scroller').evaluate(scroller => {
+    const box = scroller.getBoundingClientRect();
+    return [...scroller.querySelectorAll('.cm-line')].some(line => line.textContent === '## Heading 30' && line.getBoundingClientRect().top >= box.top && line.getBoundingClientRect().bottom <= box.bottom);
+  });
+  await expect.poll(inView).toBe(true);
+  await expect(page.locator('.edit-preview').getByRole('heading', { name: 'Heading 30', exact: true })).toBeInViewport({ ratio: 1 });
+  // Scroll the editor up until Heading 10 is rendered, then put it at the top.
+  await expect.poll(() => page.locator('.cm-scroller').evaluate(scroller => {
+    const line = [...scroller.querySelectorAll('.cm-line')].find(l => l.textContent === '## Heading 10');
+    if (line) { line.scrollIntoView({ block: 'start' }); return true; }
+    scroller.scrollTop -= 1500; return false;
+  })).toBe(true);
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await expect(heading(10)).toBeInViewport();
+});
+
+test('Phone toggle: one pane with Source | Preview, and switching keeps the passage in view', async ({ page }) => {
+  const markdown = Array.from({ length: 30 }, (_, i) => `## Heading ${i + 1}\n\n${'Filler paragraph text.\n\n'.repeat(4)}`).join('');
+  const doc = await f.register('phone-edit.md', markdown);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  const toggle = page.getByRole('group', { name: 'Editor pane' });
+  await expect(toggle.getByRole('button')).toHaveText(['Source', 'Preview']);
+  await expect(page.locator('.cm-editor')).toBeVisible();
+  await expect(page.locator('.edit-preview')).toBeHidden();
+  await expect(page.locator('#document')).toHaveCount(0);
+  for (const name of ['Save', 'Done']) await expect(page.getByRole('button', { name, exact: true })).toBeInViewport({ ratio: 1 });
+  await expect.poll(() => page.locator('.cm-scroller').evaluate(scroller => {
+    const line = [...scroller.querySelectorAll('.cm-line')].find(l => l.textContent === '## Heading 12');
+    if (line) { scroller.scrollTop += line.getBoundingClientRect().top - scroller.getBoundingClientRect().top; return true; }
+    scroller.scrollTop += 800; return false;
+  })).toBe(true);
+  await toggle.getByRole('button', { name: 'Preview' }).click();
+  await expect(page.locator('.cm-editor')).toBeHidden();
+  await expect(page.locator('.edit-preview').getByRole('heading', { name: 'Heading 12', exact: true })).toBeInViewport();
+  await toggle.getByRole('button', { name: 'Source' }).click();
+  await expect(page.locator('.cm-editor')).toBeVisible();
+  await expect.poll(() => page.locator('.cm-scroller').evaluate(scroller => {
+    const top = scroller.getBoundingClientRect().top;
+    return /^## Heading (11|12|13)$/.test([...scroller.querySelectorAll('.cm-line')].find(line => line.getBoundingClientRect().bottom > top + 1)?.textContent ?? '');
+  })).toBe(true);
+});
+
+const syncDoc = (image = '') => Array.from({ length: 24 }, (_, i) => `## Section ${i + 1}\n\n${i === 2 ? image : ''}Para ${i + 1} ${'lorem ipsum dolor sit amet '.repeat(24)}\n\nShort ${i + 1}.\n\n`).join('');
+async function openSplit(page: Page, name: string, markdown: string) {
+  const doc = await f.register(name, markdown);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.cm-content')).toBeVisible();
+  await expect(page.locator('.edit-preview').getByRole('heading', { name: 'Section 1', exact: true })).toBeVisible();
+}
+// Where the leader's anchor sits in a paragraph, and how far (px) the other pane's anchor is from the same point of that paragraph.
+const syncGap = (page: Page, leader: 'source' | 'preview', at = 0.25) => page.evaluate(([side, at]) => {
+  const pane = (name: string) => document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!;
+  const anchor = (name: string) => { const el = pane(name), r = el.getBoundingClientRect(); return r.top + el.clientHeight * at; };
+  const blocks = (name: string) => [...pane(name).querySelectorAll<HTMLElement>(name === 'source' ? '.cm-line' : 'p')].filter(e => /^Para \d+ /.test(e.textContent ?? ''));
+  const other = side === 'source' ? 'preview' : 'source', y = anchor(side);
+  const hit = blocks(side).find(e => e.getBoundingClientRect().top <= y && y < e.getBoundingClientRect().bottom);
+  if (!hit) return null;
+  const a = hit.getBoundingClientRect(), twin = blocks(other).find(e => e.textContent!.slice(0, 9) === hit.textContent!.slice(0, 9));
+  if (!twin) return { key: hit.textContent!.slice(0, 9), gap: Infinity };
+  const b = twin.getBoundingClientRect();
+  return { key: hit.textContent!.slice(0, 9), gap: Math.abs(anchor(other) - (b.top + (y - a.top) / a.height * b.height)) };
+}, [leader, at] as const);
+// Scrolls the leader to a fraction of its range, nudging until its anchor is inside a paragraph, then waits for the other pane.
+async function scrollLeader(page: Page, leader: 'source' | 'preview', fraction: number, at = 0.25) {
+  let attempt = 0;
+  await expect.poll(async () => {
+    await page.evaluate(([side, f, extra]) => {
+      const el = document.querySelector<HTMLElement>(side === 'source' ? '.cm-scroller' : '.edit-preview')!;
+      el.scrollTop = f * (el.scrollHeight - el.clientHeight) + extra;
+    }, [leader, fraction, 25 * attempt++] as const);
+    return (await syncGap(page, leader, at)) !== null;
+  }).toBe(true);
+  await expect.poll(async () => (await syncGap(page, leader, at))?.gap ?? Infinity, { timeout: 15000 }).toBeLessThan(24); // generous: the full suite loads the machine
+}
+const nudge = (page: Page, leader: 'source' | 'preview', by: number) => page.evaluate(([side, d]) => { document.querySelector<HTMLElement>(side === 'source' ? '.cm-scroller' : '.edit-preview')!.scrollTop += d; }, [leader, by] as const);
+
+for (const [name, leader] of [['Sync source to preview', 'source'], ['Sync preview to source', 'preview']] as const) {
+  test(`${name}: a wrapped paragraph's middle sits at the anchor in both panes`, async ({ page }) => {
+    await openSplit(page, `sync-${leader}.md`, syncDoc());
+    for (const fraction of [0.3, 0.5, 0.7]) {
+      await scrollLeader(page, leader, fraction);
+      expect((await syncGap(page, leader))!.gap).toBeLessThan(24);
+      // Nudging keeps it aligned: the pane just scrolled leads.
+      await nudge(page, leader, 40);
+      await expect.poll(async () => (await syncGap(page, leader))?.gap ?? 0).toBeLessThan(24);
+    }
+  });
+}
+
+test('Ends align: scrolling either pane to its bottom (and top) puts the other there too', async ({ page }) => {
+  await openSplit(page, 'sync-ends.md', syncDoc());
+  const atEnd = (side: 'source' | 'preview') => page.evaluate(name => { const el = document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!; return el.scrollHeight - el.clientHeight - el.scrollTop; }, side);
+  const atTop = (side: 'source' | 'preview') => page.evaluate(name => document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!.scrollTop, side);
+  for (const [leader, follower] of [['source', 'preview'], ['preview', 'source']] as const) {
+    // A pane the sync just scrolled ignores scroll events for QUIET_MS; a person takes longer than that to switch panes.
+    await page.waitForTimeout(QUIET_MS + 50);
+    await page.evaluate(name => { const el = document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!; el.scrollTop = el.scrollHeight; }, leader);
+    await expect.poll(() => atEnd(follower)).toBeLessThan(3);
+    await page.evaluate(name => { document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!.scrollTop = 0; }, leader);
+    await expect.poll(() => atTop(follower)).toBeLessThan(3);
+  }
+});
+
+test('Scroll sync aligns at 25% by default: the same block sits a quarter down both panes, and the slider moves it live and persists', async ({ page }) => {
+  await openSplit(page, 'sync-fixed.md', syncDoc());
+  await scrollLeader(page, 'source', 0.5, 0.25);
+  await openSettings(page, 'Editor');
+  const slider = page.getByRole('slider', { name: 'Align at', exact: true });
+  await expect(slider).toHaveValue('25'); await expect(slider).toHaveAttribute('step', '5');
+  await slider.fill('50');
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await page.waitForTimeout(QUIET_MS + 50);
+  await scrollLeader(page, 'preview', 0.3, 0.5); // no reload, no remount
+  await page.reload();
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await openSettings(page, 'Editor');
+  await expect(page.getByRole('slider', { name: 'Align at', exact: true })).toHaveValue('50');
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await expect(page.locator('.edit-preview').getByRole('heading', { name: 'Section 1', exact: true })).toBeVisible();
+  await scrollLeader(page, 'source', 0.6, 0.5);
+});
+
+const targetDoc = () => `${Array.from({ length: 2 }, (_, i) => `## Section ${i + 1}\n\nPara ${i + 1} ${'lorem ipsum dolor sit amet '.repeat(24)}\n\n`).join('')}<details>\n<summary>Hidden</summary>\n\n${Array.from({ length: 6 }, (_, i) => `hidden line ${i + 1}`).join('\n\n')}\n\n</details>\n\n## Target\n\nTarget body.\n\n${Array.from({ length: 14 }, (_, i) => `## After ${i + 1}\n\nPara ${i + 1} ${'lorem ipsum dolor sit amet '.repeat(24)}\n\n`).join('')}`;
+// Offset (px) of the Target heading below the point a quarter down each pane, then scrolls `side` by that much and repeats.
+const targetOffset = (page: Page, side: 'source' | 'preview') => page.evaluate(name => {
+  const pane = document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!;
+  const heading = name === 'source' ? [...pane.querySelectorAll('.cm-line')].find(line => line.textContent === '## Target')! : [...pane.querySelectorAll('h2')].find(h => h.textContent?.trim() === 'Target')!;
+  if (!heading) return NaN;
+  return heading.getBoundingClientRect().top - (pane.getBoundingClientRect().top + 0.25 * pane.clientHeight);
+}, side);
+
+for (const [leader, follower] of [['preview', 'source'], ['source', 'preview']] as const) {
+  test(`Scroll sync stays aligned across a collapsed block: heading at 25% in the ${leader} sits at 25% in the ${follower}`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openSplit(page, `sync-target-${leader}.md`, targetDoc());
+    await expect.poll(async () => {
+      await page.evaluate(name => { const el = document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!; el.scrollTop = 0.45 * (el.scrollHeight - el.clientHeight); }, leader);
+      return await targetOffset(page, leader);
+    }).not.toBeNaN();
+    for (let i = 0; i < 3; i++) {
+      const offset = await targetOffset(page, leader);
+      await page.evaluate(([name, d]) => { document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!.scrollTop += d; }, [leader, offset] as const);
+    }
+    expect(Math.abs(await targetOffset(page, leader))).toBeLessThan(2);
+    await expect.poll(async () => Math.abs(await targetOffset(page, follower))).toBeLessThan(6);
+  });
+}
+
+test('Alignment markers sit on each pane\'s left edge at the alignment line, light up while scrolling and fade after', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSplit(page, 'sync-marker.md', targetDoc());
+  const markers = page.locator('.sync-marker');
+  await expect(markers).toHaveCount(2);
+  for (const marker of await markers.all()) { await expect(marker).toHaveAttribute('aria-hidden', 'true'); await expect(marker).toHaveCSS('pointer-events', 'none'); }
+  // The tip (right edge, vertical middle) relative to each pane's top, and whether the marker overlaps the source text.
+  const tips = () => page.evaluate(() => [['.cm-scroller', '.edit-pane:has(.cm-scroller) .sync-marker'], ['.edit-preview', '.edit-pane:has(.edit-preview) .sync-marker']].map(([pane, marker]) => {
+    const p = document.querySelector(pane)!.getBoundingClientRect(), m = document.querySelector(marker)!.getBoundingClientRect(), c = document.querySelector('.cm-content')!.getBoundingClientRect();
+    return { inside: m.top >= p.top - 0.01 && m.bottom <= p.bottom + 0.01, tip: (m.top + m.height / 2 - p.top) / p.height, overlapsText: pane === '.cm-scroller' && m.right > c.left && m.left < c.right };
+  }));
+  // At the top the marker sits fully inside the pane (its tip is half its height down), not half clipped.
+  await expect.poll(async () => (await tips()).every(t => t.inside && t.tip < 4 / 800)).toBe(true);
+  await page.evaluate(() => { const el = document.querySelector<HTMLElement>('.edit-preview')!; el.scrollTop = 0.4 * (el.scrollHeight - el.clientHeight); });
+  await expect(markers.first()).toHaveAttribute('data-active', '');
+  await expect.poll(async () => (await tips()).every(t => Math.abs(t.tip - 0.25) < 2 / 800)).toBe(true);
+  expect((await tips()).some(t => t.overlapsText)).toBe(false);
+  await expect(markers.first()).not.toHaveAttribute('data-active', '', { timeout: 2500 });
+  await expect(markers.first()).toHaveCSS('opacity', '0.2');
+});
+
+// How far (px) the other pane's alignment line is from the leader's: the leader's anchor sits in a heading or paragraph, and its twin in the
+// other pane is found by text. Null when the anchor falls between blocks.
+const alignGap = (page: Page, leader: 'source' | 'preview', at = 0.25) => page.evaluate(([side, at]) => {
+  const pane = (name: string) => document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!;
+  const key = (e: Element) => (e.textContent ?? '').replace(/^## /, '').trim().slice(0, 9);
+  const blocks = (name: string) => [...pane(name).querySelectorAll<HTMLElement>(name === 'source' ? '.cm-line' : 'h2, p')]
+    .filter(e => /^(Section|Para|Short) \d+/.test(key(e)) && e.getBoundingClientRect().height > 0 && (name === 'source' || e.checkVisibility()));
+  const anchor = (name: string) => { const el = pane(name); return el.getBoundingClientRect().top + el.clientHeight * at; };
+  const other = side === 'source' ? 'preview' : 'source', y = anchor(side);
+  const hit = blocks(side).find(e => e.getBoundingClientRect().top <= y && y < e.getBoundingClientRect().bottom);
+  if (!hit) return null;
+  const a = hit.getBoundingClientRect(), twin = blocks(other).find(e => key(e) === key(hit));
+  if (!twin) return Infinity;
+  const b = twin.getBoundingClientRect();
+  return Math.abs(anchor(other) - (b.top + (y - a.top) / a.height * b.height));
+}, [leader, at] as const);
+// Waits for the other pane to line up with the leader. The leader is never scrolled here: its anchor must already sit in a block.
+async function expectAligned(page: Page, leader: 'source' | 'preview', within = 6) {
+  await expect.poll(async () => {
+    const gap = await alignGap(page, leader);
+    if (gap === null) throw new Error('the leader\'s anchor sits between blocks; place it on a block');
+    return gap;
+  }, { timeout: 8000 }).toBeLessThan(within);
+}
+const scrollTops = (page: Page) => page.evaluate(() => [document.querySelector<HTMLElement>('.cm-scroller')!.scrollTop, document.querySelector<HTMLElement>('.edit-preview')!.scrollTop]);
+// Scrolls the leader so the given section's heading sits `above` px above its alignment line.
+async function placeHeading(page: Page, leader: 'source' | 'preview', title: string, above: number) {
+  for (let i = 0; i < 6; i++) { await page.waitForTimeout(100); await page.evaluate(([side, title, above]) => {
+    const pane = document.querySelector<HTMLElement>(side === 'source' ? '.cm-scroller' : '.edit-preview')!;
+    const heading = [...pane.querySelectorAll(side === 'source' ? '.cm-line' : 'h2')].find(e => (e.textContent ?? '').replace(/^## /, '') === title);
+    if (heading) pane.scrollTop += heading.getBoundingClientRect().top - (pane.getBoundingClientRect().top + 0.25 * pane.clientHeight - above);
+    else pane.scrollTop = pane.scrollHeight * 0.3;
+  }, [leader, title, above] as const); }
+}
+
+// Scrolls the leader so the alignment line `at` sits `into` px below the top of the paragraph starting with `prefix`.
+async function placeBlock(page: Page, leader: 'source' | 'preview', prefix: string, into: number, at = 0.25) {
+  for (let i = 0; i < 6; i++) { await page.waitForTimeout(100); await page.evaluate(([side, prefix, into, at]) => {
+    const pane = document.querySelector<HTMLElement>(side === 'source' ? '.cm-scroller' : '.edit-preview')!;
+    const block = [...pane.querySelectorAll(side === 'source' ? '.cm-line' : 'p')].find(e => (e.textContent ?? '').startsWith(prefix));
+    if (block) pane.scrollTop += block.getBoundingClientRect().top + into - (pane.getBoundingClientRect().top + at * pane.clientHeight);
+    else pane.scrollTop = pane.scrollHeight * 0.45;
+  }, [leader, prefix, into, at] as const); }
+}
+
+for (const leader of ['preview', 'source'] as const) {
+  test(`Folding a heading section in the preview keeps the panes aligned with the ${leader} leading`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openSplit(page, `sync-fold-${leader}.md`, syncDoc());
+    await placeHeading(page, leader, 'Section 8', 6);
+    await expectAligned(page, leader);
+    const summary = page.locator('.edit-preview summary', { hasText: 'Section 8' }).first();
+    for (let i = 0; i < 2; i++) { // collapse, then expand
+      const before = await scrollTops(page);
+      const leaderIndex = leader === 'source' ? 0 : 1;
+      await summary.click();
+      await page.waitForTimeout(400);
+      expect((await scrollTops(page))[leaderIndex]).toBeCloseTo(before[leaderIndex], -1); // the leader is not disturbed
+      await expectAligned(page, leader);
+    }
+  });
+}
+
+test('Resizing the window keeps the panes aligned', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSplit(page, 'sync-resize.md', syncDoc());
+  await scrollLeader(page, 'preview', 0.5);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.waitForTimeout(400);
+  await expectAligned(page, 'preview');
+});
+
+const detailsDoc = () => syncDoc().replace('## Section 9\n', `<details>\n<summary>Fold me</summary>\n\n${Array.from({ length: 12 }, (_, i) => `Para ${101 + i} ${'lorem ipsum dolor sit amet '.repeat(24)}\n\n`).join('')}</details>\n\n## Section 9\n`);
+test('Toggling a raw <details> in the preview keeps its summary in place while the source leads, and the source follows', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSplit(page, 'sync-details.md', detailsDoc());
+  const summary = page.locator('.edit-preview summary', { hasText: 'Fold me' });
+  const top = () => summary.evaluate(el => el.getBoundingClientRect().top - document.querySelector('.edit-preview')!.getBoundingClientRect().top);
+  // Put the summary at about 10% of the preview, then scroll the source a little so that it leads.
+  await expect.poll(async () => {
+    const delta = (await top()) - 90;
+    if (Math.abs(delta) < 15) return true;
+    await page.evaluate(d => { document.querySelector<HTMLElement>('.edit-preview')!.scrollTop += d; }, delta);
+    await page.waitForTimeout(150);
+    return false;
+  }, { timeout: 10000 }).toBe(true);
+  await page.evaluate(() => { document.querySelector<HTMLElement>('.cm-scroller')!.scrollTop += 3; });
+  await page.waitForTimeout(300);
+  for (let i = 0; i < 2; i++) { // open, then close
+    const before = await top();
+    await summary.click();
+    await page.waitForTimeout(500);
+    expect(Math.abs((await top()) - before)).toBeLessThan(2);
+    await expectAligned(page, 'preview', 40); // a raw HTML block is one source block, so lines inside it map proportionally
+  }
+});
+
+test('Switching between narrow and wide keeps the panes aligned', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSplit(page, 'sync-narrow.md', syncDoc());
+  await placeBlock(page, 'source', 'Para 3 ', 80);
+  await expectAligned(page, 'source', 24);
+  // The source rewraps, so its anchor may leave a block: compare how far the nearest Short line sits from each pane's alignment line instead.
+  const offsetGap = () => page.evaluate(() => {
+    const pane = (name: string) => document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!;
+    const anchor = (name: string) => pane(name).getBoundingClientRect().top + pane(name).clientHeight * 0.25;
+    const shorts = (name: string) => [...pane(name).querySelectorAll<HTMLElement>(name === 'source' ? '.cm-line' : 'p')].filter(e => /^Short \d+\./.test(e.textContent ?? ''));
+    const near = shorts('source').sort((a, b) => Math.abs(a.getBoundingClientRect().top - anchor('source')) - Math.abs(b.getBoundingClientRect().top - anchor('source')))[0];
+    const twin = shorts('preview').find(e => e.textContent === near.textContent)!;
+    return Math.abs((near.getBoundingClientRect().top - anchor('source')) - (twin.getBoundingClientRect().top - anchor('preview')));
+  });
+  for (const width of [800, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expect.poll(offsetGap, { timeout: 8000 }).toBeLessThan(50);
+  }
+});
+
+test('The preview follows the Document text size and the panes stay aligned', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSplit(page, 'sync-doc-size.md', syncDoc());
+  await scrollLeader(page, 'source', 0.5);
+  const previewHeight = () => page.locator('.edit-preview').evaluate(el => el.scrollHeight);
+  const before = await previewHeight();
+  await openSettings(page, 'Reading');
+  await page.getByRole('slider', { name: 'Document text size', exact: true }).fill('150');
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await page.waitForTimeout(400);
+  await expect(page.locator('.edit-preview .plannotator-content')).toHaveCSS('zoom', '1.5');
+  expect(await previewHeight()).toBeGreaterThan(before * 1.3);
+  await expectAligned(page, 'source', 24);
+});
+
+test('Changing Align at keeps the leader and re-aligns the panes at once; the markers fade after', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  // A collapsed <details> (many source lines, one preview line) sits between the old and new alignment lines, so the source must move a long way.
+  await openSplit(page, 'sync-alignat.md', detailsDoc());
+  await placeBlock(page, 'preview', 'Para 9 ', 20, 0.5);
+  const [sourceTop, previewTop] = await scrollTops(page);
+  await openSettings(page, 'Editor');
+  await page.getByRole('slider', { name: /Align at/ }).fill('50');
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  // The source re-aligns without any scroll: the preview, which leads, has not moved.
+  await expect.poll(async () => (await alignGap(page, 'preview', 0.5)) ?? Infinity, { timeout: 4000 }).toBeLessThan(24);
+  expect((await scrollTops(page))[1]).toBeCloseTo(previewTop, -1);
+  expect(Math.abs((await scrollTops(page))[0] - sourceTop)).toBeGreaterThan(50);
+  await expect(page.locator('.sync-marker').first()).not.toHaveAttribute('data-active', '', { timeout: 2500 });
+});
+
+test('Changing the editor text size keeps the panes aligned', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSplit(page, 'sync-size.md', syncDoc());
+  await scrollLeader(page, 'preview', 0.5);
+  await openSettings(page, 'Editor');
+  await page.getByRole('slider', { name: 'Editor text size', exact: true }).fill('150');
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await page.waitForTimeout(400);
+  await expectAligned(page, 'preview');
+});
+
+test('No feedback loop: one programmatic scroll settles with no further scroll events', async ({ page }) => {
+  await openSplit(page, 'sync-loop.md', syncDoc());
+  await page.evaluate(() => { const el = document.querySelector<HTMLElement>('.cm-scroller')!; el.scrollTop = 0.5 * (el.scrollHeight - el.clientHeight); });
+  const tops = () => page.evaluate(() => [document.querySelector<HTMLElement>('.cm-scroller')!.scrollTop, document.querySelector<HTMLElement>('.edit-preview')!.scrollTop]);
+  await expect.poll(async () => { const a = await tops(); await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))); return JSON.stringify(a) === JSON.stringify(await tops()) && a[1] > 0; }, { timeout: 15000 }).toBe(true);
+  const events = await page.evaluate(() => new Promise<number>(resolve => {
+    let count = 0;
+    for (const pane of [document.querySelector('.cm-scroller')!, document.querySelector('.edit-preview')!]) pane.addEventListener('scroll', () => { count++; });
+    setTimeout(() => resolve(count), 300);
+  }));
+  expect(events).toBe(0);
+});
+
+test('Late image: an image that arrives after the scroll realigns the panes', async ({ page }) => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  await page.route('https://images.test/late.svg', async route => {
+    await gate;
+    await route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="300" height="500"><rect width="300" height="500" fill="gray"/></svg>' });
+  });
+  await openSplit(page, 'sync-late.md', syncDoc('![late](https://images.test/late.svg)\n\n'));
+  await scrollLeader(page, 'source', 0.5);
+  release();
+  await expect.poll(() => page.locator('.edit-preview img').evaluate(img => (img as HTMLImageElement).complete && (img as HTMLImageElement).naturalHeight > 0)).toBe(true);
+  await expect.poll(async () => (await syncGap(page, 'source'))?.gap ?? Infinity).toBeLessThan(24);
+});
+
+test('Typing leads: Enter and Backspace in the source do not move it, even after the preview was the leader', async ({ page }) => {
+  await openSplit(page, 'sync-keys.md', syncDoc());
+  await scrollLeader(page, 'preview', 0.5);
+  await page.waitForTimeout(QUIET_MS + 50);
+  const top = () => page.locator('.cm-scroller').evaluate(el => el.scrollTop);
+  const box = (await page.locator('.cm-scroller').boundingBox())!;
+  await page.mouse.click(box.x + 40, box.y + box.height / 2);
+  await page.keyboard.press('Home');
+  const before = await top();
+  // Blank lines above the caret grow the source only; a preview-led sync would pull the source back up under the caret.
+  for (let i = 0; i < 8; i++) await page.keyboard.press('Enter');
+  await page.waitForTimeout(400); // past the preview debounce and the rebuild
+  expect(Math.abs(await top() - before)).toBeLessThan(30);
+  for (let i = 0; i < 4; i++) await page.keyboard.press('Backspace');
+  await page.waitForTimeout(400); // past the preview debounce and the rebuild
+  expect(Math.abs(await top() - before)).toBeLessThan(30);
+});
+
+test('Typing leads: the preview keeps showing the block being typed at the end', async ({ page }) => {
+  await openSplit(page, 'sync-typing.md', syncDoc());
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+End');
+  await page.keyboard.type('\n\nTyped marker paragraph');
+  await expect(page.locator('.edit-preview').getByText('Typed marker paragraph')).toBeInViewport();
+  await page.keyboard.type(' and more words so the document keeps growing');
+  await expect(page.locator('.edit-preview').getByText('Typed marker paragraph and more')).toBeInViewport();
+});
+
+test('rendered H1 and last-paragraph spacing match the pre-editor layout in the document and chat', async ({ page }) => {
+  const doc = await f.register('spacing.md', 'Intro.\n\n# One\n\nBody.\n\n# Two\n\n# Three\n');
+  const first = await f.register('spacing-first.md', '# Only\n\nBody.\n');
+  const margin = (name: string, property: 'margin-top' | 'margin-bottom') =>
+    page.locator('#document').getByRole('heading', { name, exact: true }).evaluate((node, p) => getComputedStyle(node).getPropertyValue(p), property);
+  await page.goto(`${f.url}/?document=${first.id}`);
+  await expect.poll(() => margin('Only', 'margin-top')).toBe('0px');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  // Non-first H1s keep 1.5rem whether they own a section (One), follow another H1 (Two) or trail it (Three).
+  for (const name of ['One', 'Two', 'Three']) await expect.poll(() => margin(name, 'margin-top')).toBe('24px');
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Explain'); await input.press('Enter');
+  await expect(input).toHaveValue('');
+  await answer('# Reply\n\nFirst.\n\n# Second\n\nLast paragraph.');
+  const content = page.locator('.message .plannotator-content').last();
+  await expect(content.getByRole('heading', { name: 'Second', exact: true })).toBeVisible();
+  expect(await content.getByRole('heading', { name: 'Second', exact: true }).evaluate(n => getComputedStyle(n).marginTop)).toBe('24px');
+  expect(await content.getByRole('heading', { name: 'Reply', exact: true }).evaluate(n => getComputedStyle(n).marginTop)).toBe('0px');
+  expect(await content.getByText('Last paragraph.', { exact: true }).evaluate(n => getComputedStyle(n).marginBottom)).toBe('0px');
+  expect(await content.locator('[data-source-line]').count()).toBe(0);
+});
+
+test('agent edit flows into a clean editor and undo cannot revert it', async ({ page }) => {
+  const doc = await f.register('flow.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' mine');
+  await page.keyboard.press('ControlOrMeta+s');
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  await writeFile(doc.path, '# Title mine\n\nBody text.\n\nAgent paragraph.\n');
+  await expect(page.locator('.cm-content')).toContainText('Agent paragraph.');
+  await expect(page.getByText('This file changed on disk.')).toHaveCount(0);
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  for (let i = 0; i < 4; i++) await page.keyboard.press('ControlOrMeta+z');
+  await expect(page.locator('.cm-content')).toContainText('Agent paragraph.');
+});
+
+test('agent edit while dirty shows the banner; Reload loads it and clears undo', async ({ page }) => {
+  const doc = await f.register('banner.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' draft');
+  await writeFile(doc.path, '# Agent title\n\nBody text.\n');
+  await expect(page.getByText('This file changed on disk.')).toBeVisible();
+  await expect(page.locator('.cm-content')).toContainText('Title draft');
+  await page.getByRole('button', { name: 'Reload', exact: true }).click();
+  await expect(page.getByText('This file changed on disk.')).toHaveCount(0);
+  await expect(page.locator('.cm-content')).toContainText('Agent title');
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  await page.locator('.cm-content').click();
+  for (let i = 0; i < 3; i++) await page.keyboard.press('ControlOrMeta+z');
+  await expect(page.locator('.cm-content')).toContainText('Agent title');
+  await expect(page.locator('.cm-content')).not.toContainText('draft');
+});
+
+test('Keep mine then save conflicts; Save anyway overwrites', async ({ page }) => {
+  const doc = await f.register('keep.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' mine');
+  await writeFile(doc.path, '# Agent title\n\nBody text.\n');
+  await expect(page.getByText('This file changed on disk.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Save anyway', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Keep mine', exact: true }).click();
+  await expect(page.getByText('This file changed on disk.')).toHaveCount(0);
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+s');
+  await expect(page.getByText('This file changed on disk.')).toBeVisible();
+  expect(await readFile(doc.path, 'utf8')).toBe('# Agent title\n\nBody text.\n');
+  await page.getByRole('button', { name: 'Save anyway', exact: true }).click();
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  expect(await readFile(doc.path, 'utf8')).toBe('# Title mine\n\nBody text.\n');
+});
+
+test('a disk change in flight during a save still reaches the editor', async ({ page }) => {
+  const doc = await f.register('flight.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' mine');
+  await page.route('**/api/documents/*/source', async route => {
+    const response = await route.fetch();
+    await writeFile(doc.path, '# Title mine\n\nBody text.\n\nAgent in flight.\n');
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    await route.fulfill({ response });
+  });
+  await page.keyboard.press('ControlOrMeta+s');
+  await expect(page.locator('.cm-content')).toContainText('Agent in flight.');
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+});
+
+test('Save anyway does not override a newer change than the one reviewed', async ({ page }) => {
+  const doc = await f.register('newer.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' mine');
+  await writeFile(doc.path, '# First agent\n\nBody text.\n');
+  await page.getByRole('button', { name: 'Keep mine', exact: true }).click();
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+s');
+  await expect(page.getByRole('button', { name: 'Save anyway', exact: true })).toBeVisible();
+  const refetched = page.waitForResponse(async response => response.request().method() === 'GET'
+    && new URL(response.url()).pathname === `/api/documents/${doc.id}` && (await response.text()).includes('Newest agent'));
+  await writeFile(doc.path, '# Newest agent\n\nBody text.\n');
+  await refetched;
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  const saves: Promise<unknown>[] = [];
+  page.on('request', request => { if (request.url().endsWith('/source')) saves.push(request.response()); });
+  await page.getByRole('button', { name: 'Save anyway', exact: true }).click();
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
+  await Promise.all(saves);
+  await expect(page.getByText('This file changed on disk.')).toBeVisible();
+  expect(await readFile(doc.path, 'utf8')).toBe('# Newest agent\n\nBody text.\n');
+});
+
+test('Save anyway works on the first click even before the editor refetched the agent version', async ({ page }) => {
+  const doc = await f.register('first-click.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' mine');
+  // Hold the document refetch so the 409 arrives first.
+  await page.route(new RegExp(`/api/documents/${doc.id}$`), async route => { await new Promise(resolve => setTimeout(resolve, 3000)); await route.continue(); });
+  await writeFile(doc.path, '# Agent title\n\nBody text.\n');
+  await page.keyboard.press('ControlOrMeta+s');
+  await expect(page.getByRole('button', { name: 'Save anyway', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Save anyway', exact: true }).click();
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  expect(await readFile(doc.path, 'utf8')).toBe('# Title mine\n\nBody text.\n');
+});
+
+test('the conflict banner and leave dialog buttons are styled as buttons', async ({ page }) => {
+  const doc = await f.register('styled.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' mine');
+  await writeFile(doc.path, '# Agent title\n\nBody text.\n');
+  await expect(page.getByText('This file changed on disk.')).toBeVisible();
+  await expect(page.locator('.markdown-edit-banner button').first()).toHaveCSS('border-top-width', '1px');
+});
+
+test('an external close keeps unsaved edits on the closed screen', async ({ page }) => {
+  const doc = await f.register('closing.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' unsaved words');
+  await expect(page.getByText('● Unsaved')).toBeVisible();
+  expect((await f.view(`/api/documents/${doc.id}`, undefined, 'DELETE')).status).toBe(200);
+  await expect(page.getByRole('heading', { name: 'Document closed' })).toBeVisible();
+  await expect(page.getByText('closed while you had unsaved edits')).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Unsaved edits' })).toHaveValue('# Title unsaved words\n\nBody text.\n');
+});
+
+test('an agent edit in a clean editor leaves the sidebar draft attachment alone', async ({ page }) => {
+  const doc = await f.register('remote.md', '# Title\n\nQuoted marker text.\n\nTail.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await page.getByRole('button', { name: 'Hide conversations' }).click();
+  await selectEditorText(page, 3, 'Quoted '.length, 'marker'.length);
+  await page.getByRole('button', { name: 'Show conversations' }).click();
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await selectEditorText(page, 3, 'Quoted '.length, 'marker'.length);
+  await expect(page.getByRole('button', { name: 'Comment', exact: true })).toBeVisible();
+  await writeFile(doc.path, '# Title\n\nTail.\n');
+  await expect(page.locator('.cm-content')).not.toContainText('marker');
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+});
+
+// Real keystrokes: select `length` characters starting at `offset` on 1-based `line`.
+async function selectEditorText(page: Page, line: number, offset: number, length: number) {
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+Home');
+  for (let i = 1; i < line; i++) await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Home');
+  for (let i = 0; i < offset; i++) await page.keyboard.press('ArrowRight');
+  await page.keyboard.down('Shift');
+  for (let i = 0; i < length; i++) await page.keyboard.press('ArrowRight');
+  await page.keyboard.up('Shift');
+}
+
+test('selecting in the source pane starts a thread with a source quote', async ({ page }) => {
+  const source = '# Title\n\nThird line has a **marker** word.\n';
+  const doc = await f.register('a.md', source);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  const sent: any[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  await selectEditorText(page, 3, 'Third line has a '.length, '**marker**'.length);
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('What is this?');
+  await page.getByRole('button', { name: 'Send comment' }).click();
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent[0].fileQuote).toBeUndefined();
+  expect(sent[0].quote).toMatchObject({ exact: '**marker**', start: source.indexOf('**marker**'), end: source.indexOf('**marker**') + '**marker**'.length });
+  await expect(page.locator('.cm-content .edit-quote')).toContainText('**marker**');
+  await expect.poll(() => paintedInPreview(page)).toBe('marker');
+});
+
+test('Two panes: raw source on the left, rendered preview on the right, preview follows typing', async ({ page }) => {
+  const doc = await f.register('two.md', '# Title\n\nHello **world** now.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.cm-content')).toContainText('Hello **world** now.');
+  await expect(page.locator('.edit-preview strong')).toHaveText('world');
+  const [source, preview] = await Promise.all([page.locator('.cm-editor').boundingBox(), page.locator('.edit-preview').boundingBox()]);
+  expect(source!.x).toBeLessThan(preview!.x);
+  expect(Math.abs(source!.width - preview!.width)).toBeLessThan(4);
+  await selectEditorText(page, 3, 'Hello **world**'.length, 0);
+  await page.keyboard.type('!');
+  await expect(page.locator('.edit-preview')).toContainText('Hello world! now.');
+});
+
+test('No Plannotator editor: a plain CodeMirror source pane', async ({ page }) => {
+  const doc = await f.register('plain.md', '# Title\n\nBody.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.cm-content')).toContainText('# Title');
+  await expect(page.locator('.cm-gutters')).toHaveCount(0);
+  await expect(page.locator('[class*="atomic"], [class*="live-preview"]')).toHaveCount(0);
+  expect(await (await page.request.get(`${f.url}/app.js`)).text()).not.toContain('atomic-editor');
+});
+
+test('Preview selection: selecting rendered text quotes the source around it', async ({ page }) => {
+  const source = '# Title\n\nHello **world** now.\n';
+  const doc = await f.register('preview-select.md', source);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.edit-preview strong')).toHaveText('world');
+  const sent: any[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  await page.locator('.edit-preview-article').evaluate(article => {
+    const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+    const nodes: Text[] = [];
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) nodes.push(node as Text);
+    const start = nodes.find(node => node.data.includes('Hello'))!, end = nodes.find(node => node.data === 'world')!;
+    const range = document.createRange(); range.setStart(start, start.data.indexOf('Hello')); range.setEnd(end, 3);
+    getSelection()!.removeAllRanges(); getSelection()!.addRange(range);
+    article.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  });
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('Why?');
+  await page.getByRole('button', { name: 'Send comment' }).click();
+  await expect.poll(() => sent.length).toBe(1);
+  await expect(page.getByRole('dialog', { name: 'Comment on selection' })).toHaveCount(0);
+  expect(sent[0].quote.exact).toBe('Hello **wor');
+  expect(source.slice(sent[0].quote.start, sent[0].quote.end)).toBe('Hello **wor');
+});
+
+async function commentWithDraft(page: Page) {
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await selectEditorText(page, 3, 'Body with a '.length, 'marker'.length);
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('Check this');
+  await expect(page.getByRole('dialog', { name: 'Comment on selection' })).toBeVisible();
+}
+
+test('Save & send after typing elsewhere restamps the quote with the saved version', async ({ page }) => {
+  const doc = await f.register('typing-elsewhere.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const sent: any[] = [], saved: string[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  page.on('response', async response => { if (response.url().endsWith('/source') && response.request().method() !== 'GET') saved.push((await response.json()).version); });
+  await commentWithDraft(page);
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+Home');
+  await page.keyboard.type('Intro line.\n\n');
+  await page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('button', { name: 'Save & send' }).click();
+  await expect.poll(() => sent.length).toBe(1);
+  const text = await readFile(doc.path, 'utf8');
+  expect(text).toBe('Intro line.\n\n# Title\n\nBody with a marker inside.\n');
+  expect(sent[0].quote).toMatchObject({ exact: 'marker', start: text.indexOf('marker'), end: text.indexOf('marker') + 6, version: saved[0] });
+  await expect(page.getByRole('dialog', { name: 'Comment on selection' })).toHaveCount(0);
+});
+
+test('select while dirty, save, then send: the quote is of the saved text and version', async ({ page }) => {
+  const doc = await f.register('dirty-save-send.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const sent: any[] = [], saved: string[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  page.on('response', async response => { if (response.url().endsWith('/source') && response.request().method() !== 'GET') saved.push((await response.json()).version); });
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  await selectEditorText(page, 3, 'Body with a '.length, 'marker'.length);
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('Check this');
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+s');
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  await page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('button', { name: 'Send comment' }).click();
+  await expect.poll(() => sent.length).toBe(1);
+  const text = await readFile(doc.path, 'utf8');
+  expect(sent[0].quote.version).toBe(saved.at(-1));
+  expect(text.slice(sent[0].quote.start, sent[0].quote.end)).toBe(sent[0].quote.exact);
+  expect(sent[0].quote.exact).toBe('marker');
+  await expect(page.getByRole('dialog', { name: 'Comment on selection' })).toHaveCount(0);
+});
+
+test('a send that fails after the save is retried with the same correct quote and id', async ({ page }) => {
+  const doc = await f.register('retry-send.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const attempts: any[] = [];
+  await page.route('**/api/questions', async route => {
+    attempts.push(route.request().postDataJSON());
+    if (attempts.length === 1) return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'Temporary failure' }) });
+    await route.continue();
+  });
+  await commentWithDraft(page);
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+Home');
+  await page.keyboard.type('Intro line.\n\n');
+  const send = page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('button', { name: /send/i });
+  await send.click();
+  await expect.poll(() => attempts.length).toBe(1);
+  await expect(page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('alert')).toBeVisible();
+  await send.click();
+  await expect.poll(() => attempts.length).toBe(2);
+  const text = await readFile(doc.path, 'utf8');
+  for (const attempt of attempts) expect(text.slice(attempt.quote.start, attempt.quote.end)).toBe('marker');
+  expect(attempts[1].quote).toEqual(attempts[0].quote);
+  expect(attempts[1].clientMessageId).toBe(attempts[0].clientMessageId);
+  await expect(page.getByRole('dialog', { name: 'Comment on selection' })).toHaveCount(0);
+});
+
+test('typing in the source pane patches the preview in place: same article, quote still painted, scroll following the source', async ({ page }) => {
+  await longDocWithQuote(page);
+  await expect.poll(() => paintedInPreview(page)).toBe('marker');
+  await page.locator('.cm-scroller').evaluate(el => { el.scrollTop = 0.5 * (el.scrollHeight - el.clientHeight); });
+  const previewTop = () => page.locator('.edit-preview').evaluate(el => el.scrollTop);
+  await expect.poll(previewTop).toBeGreaterThan(300);
+  await page.waitForTimeout(QUIET_MS + 50);
+  const before = await previewTop();
+  await page.locator('.edit-preview').evaluate(() => { (window as any).__article = document.querySelector('.edit-preview-article'); });
+  const box = (await page.locator('.cm-scroller').boundingBox())!;
+  await page.mouse.click(box.x + 40, box.y + box.height / 2);
+  await page.keyboard.press('End');
+  await page.keyboard.type(' extra');
+  await expect(page.locator('.edit-preview')).toContainText(' extra');
+  expect(await page.evaluate(() => (window as any).__article === document.querySelector('.edit-preview-article'))).toBe(true);
+  // The patch does not reset the preview: it stays at the position synced to the source.
+  await page.waitForTimeout(400);
+  expect(Math.abs(await previewTop() - before)).toBeLessThan(60);
+  await expect.poll(() => paintedInPreview(page)).toBe('marker');
+});
+
+test('a pending editor quote made while dirty is restamped when Done saves, then sent from the reading view', async ({ page }) => {
+  const doc = await f.register('done-restamp.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const sent: any[] = [], saved: string[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  page.on('response', async response => { if (response.url().endsWith('/source') && response.request().method() !== 'GET') saved.push((await response.json()).version); });
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  await selectEditorText(page, 3, 'Body with a '.length, 'marker'.length);
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('Check this');
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('button', { name: /send/i }).click();
+  await expect.poll(() => sent.length).toBe(1);
+  const text = await readFile(doc.path, 'utf8');
+  expect(sent[0].quote.version).toBe(saved.at(-1));
+  expect(text.slice(sent[0].quote.start, sent[0].quote.end)).toBe('marker');
+  await expect(page.getByRole('dialog', { name: 'Comment on selection' })).toHaveCount(0);
+});
+
+test('a thread draft holding a dirty editor quote is restamped on Done, and dropped on Discard', async ({ page }) => {
+  const doc = await f.register('done-draft.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Start'); await input.press('Enter'); await expect(input).toHaveValue('');
+  await answer('Ok.');
+  const sent: any[] = [], saved: string[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  page.on('response', async response => { if (response.url().endsWith('/source') && response.request().method() !== 'GET') saved.push((await response.json()).version); });
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  await selectEditorText(page, 3, 'Body with a '.length, 'marker'.length);
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await input.fill('About it'); await input.press('Enter');
+  await expect.poll(() => sent.length).toBe(1);
+  const text = await readFile(doc.path, 'utf8');
+  expect(sent[0].quote.version).toBe(saved.at(-1));
+  expect(text.slice(sent[0].quote.start, sent[0].quote.end)).toBe('marker');
+  await answer('Ok again.');
+  // Discard: the quote's text is still in the saved source, so the draft keeps it, restamped for the saved version.
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' more');
+  await selectEditorText(page, 3, 'Body with a '.length, 'marker'.length);
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Unsaved changes' }).getByRole('button', { name: 'Discard', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await input.fill('After discard'); await input.press('Enter');
+  await expect.poll(() => sent.length).toBe(2);
+  expect(text.slice(sent[1].quote.start, sent[1].quote.end)).toBe('marker');
+  expect(sent[1].quote.version).toBe(saved.at(-1));
+  await answer('Ok third.');
+  // Discard when the quoted text only existed in the unsaved edit: the quote is dropped from the draft.
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' freshword');
+  await selectEditorText(page, 1, '# Title typed '.length, 'freshword'.length);
+  await expect(page.locator('.draft-selection')).toContainText('freshword');
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Unsaved changes' }).getByRole('button', { name: 'Discard', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await expect(page.locator('.draft-selection')).toHaveCount(0);
+});
+
+test('Done then Discard keeps the floating composer text as a draft when its quote only existed in the unsaved edit', async ({ page }) => {
+  const doc = await f.register('discard-composer.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' freshword');
+  await selectEditorText(page, 1, '# Title '.length, 'freshword'.length);
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('Keep these words');
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Unsaved changes' }).getByRole('button', { name: 'Discard', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await expect(page.getByRole('dialog', { name: 'Comment on selection' })).toHaveCount(0);
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep these words');
+  expect(await readFile(doc.path, 'utf8')).toBe('# Title\n\nBody with a marker inside.\n');
+});
+
+test('Done then Discard keeps a floating composer open on a quote that is still in the saved text', async ({ page }) => {
+  const doc = await f.register('discard-composer-kept.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const sent: any[] = [], saved: string[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  await selectEditorText(page, 3, 'Body with a '.length, 'marker'.length);
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('Still valid');
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Unsaved changes' }).getByRole('button', { name: 'Discard', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await expect(page.getByLabel('Comment', { exact: true })).toHaveValue('Still valid');
+  await page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('button', { name: /send/i }).click();
+  await expect.poll(() => sent.length).toBe(1);
+  const text = await readFile(doc.path, 'utf8');
+  expect(text).toBe('# Title\n\nBody with a marker inside.\n');
+  expect(text.slice(sent[0].quote.start, sent[0].quote.end)).toBe('marker');
+  expect(sent[0].quote.version).toBe((await state()).documents[doc.id].version);
+  await expect(page.getByRole('dialog', { name: 'Comment on selection' })).toHaveCount(0);
+});
+
+test('without the Custom Highlight API, edit mode still renders both panes', async ({ page }) => {
+  await page.addInitScript(() => { delete (CSS as any).highlights; delete (window as any).Highlight; });
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await longDocWithQuote(page);
+  await expect(page.locator('.cm-editor')).toBeVisible();
+  await expect(page.locator('.edit-preview')).toContainText('Filler line 1.');
+  await expect(page.locator('.cm-content .edit-quote')).toContainText('marker');
+  await typeAtEndOfFirstLine(page, ' x');
+  await expect(page.locator('.edit-preview')).toContainText('Filler line 1. x');
+  await page.locator('.edit-preview').getByText('Filler line 2.').click();
+  expect(errors).toEqual([]);
+});
+
+test('an older thread draft with a dirty editor quote is restamped at send, after Done saves', async ({ page }) => {
+  const doc = await f.register('older-draft.md', '# Title\n\nBody with a marker and a second word.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Start'); await input.press('Enter'); await expect(input).toHaveValue('');
+  await answer('Ok.');
+  const sent: any[] = [], saved: string[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  page.on('response', async response => { if (response.url().endsWith('/source') && response.request().method() !== 'GET') saved.push((await response.json()).version); });
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  await selectEditorText(page, 3, 'Body with a '.length, 'marker'.length);
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  // Another thread takes the next selection; the first draft keeps its quote of the unsaved text.
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await page.getByRole('button', { name: 'New conversation' }).click();
+  await selectEditorText(page, 3, 'Body with a marker and a '.length, 'second'.length);
+  await expect(page.locator('.draft-selection')).toContainText('second');
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await page.locator('.thread-row').filter({ hasText: 'Ok.' }).first().click();
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await page.getByLabel('Message', { exact: true }).fill('About marker'); await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect.poll(() => sent.length).toBe(1);
+  const text = await readFile(doc.path, 'utf8');
+  expect(sent[0].quote.version).toBe(saved.at(-1));
+  expect(text.slice(sent[0].quote.start, sent[0].quote.end)).toBe(sent[0].quote.exact);
+  expect(sent[0].quote.exact).toBe('marker');
+  await expect(page.locator('.message.user').filter({ hasText: 'About marker' })).toBeVisible();
+  await expect(page.locator('.draft-selection')).toHaveCount(0);
+});
+
+test('a thread draft quoting unsaved text survives save and reload, and is restamped when sent', async ({ page }) => {
+  const doc = await f.register('reload-draft.md', '# Title\n\nBody with a marker and a second word.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Start'); await input.press('Enter'); await expect(input).toHaveValue('');
+  await answer('Ok.');
+  const sent: any[] = [], saved: string[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  page.on('response', async response => { if (response.url().endsWith('/source') && response.request().method() !== 'GET') saved.push((await response.json()).version); });
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  await selectEditorText(page, 3, 'Body with a '.length, 'marker'.length);
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await page.keyboard.press('ControlOrMeta+s');
+  await expect.poll(() => saved.length).toBe(1);
+  await page.reload();
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await page.getByLabel('Message', { exact: true }).fill('About marker'); await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect.poll(() => sent.length).toBe(1);
+  const text = await readFile(doc.path, 'utf8');
+  expect(sent[0].quote.version).toBe(saved.at(-1));
+  expect(sent[0].quote.exact).toBe('marker');
+  expect(text.slice(sent[0].quote.start, sent[0].quote.end)).toBe('marker');
+  await expect(page.locator('.draft-selection')).toHaveCount(0);
+});
+
+test('a quote made while dirty, with the sidebar closed and another selection taken, is restamped when Done saves and sent later', async ({ page }) => {
+  const doc = await f.register('flow-b.md', '# Title\n\nBody with a marker and a second word.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Start'); await input.press('Enter'); await expect(input).toHaveValue('');
+  await answer('Ok.');
+  const sent: any[] = [], saved: string[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  page.on('response', async response => { if (response.url().endsWith('/source') && response.request().method() !== 'GET') saved.push((await response.json()).version); });
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  await selectEditorText(page, 3, 'Body with a '.length, 'marker'.length);
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await expect(page.locator('.draft-selection')).toHaveCount(0);
+  await selectEditorText(page, 3, 'Body with a marker and a '.length, 'second'.length);
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await page.locator('.thread-row').filter({ hasText: 'Ok.' }).first().click();
+  await page.getByLabel('Message', { exact: true }).fill('About marker'); await page.getByLabel('Message', { exact: true }).press('Enter');
+  await expect.poll(() => sent.length).toBe(1);
+  const text = await readFile(doc.path, 'utf8');
+  expect(sent[0].quote.version).toBe(saved.at(-1));
+  expect(sent[0].quote.exact).toBe('marker');
+  expect(text.slice(sent[0].quote.start, sent[0].quote.end)).toBe('marker');
+  await expect(page.locator('.message.user').filter({ hasText: 'About marker' })).toBeVisible();
+  await expect(page.locator('.draft-selection')).toHaveCount(0);
+});
+
+test('re-entering edit mode and pressing Done untouched keeps the restamped quote and the composer text', async ({ page }) => {
+  const doc = await f.register('reenter.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await commentWithDraft(page);
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toBeVisible();
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+  const composer = page.getByRole('dialog', { name: 'Comment on selection' });
+  await expect(composer).toBeVisible();
+  await expect(composer.getByLabel('Comment', { exact: true })).toHaveValue('Check this');
+});
+
+
+test('Save & send is blocked with Passage changed once the quoted text was edited away', async ({ page }) => {
+  const doc = await f.register('deleted-passage.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  let asked = 0;
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') asked++; });
+  await commentWithDraft(page);
+  await selectEditorText(page, 3, 'Body with a '.length, 'marker'.length);
+  await page.keyboard.type('thing');
+  await page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('button', { name: 'Save & send' }).click();
+  await expect(page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('alert')).toContainText('Passage changed');
+  expect(asked).toBe(0);
+});
+
+test('sending while dirty saves first', async ({ page }) => {
+  const doc = await f.register('save-send.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  await selectEditorText(page, 3, 0, 4);
+  const order: string[] = [];
+  await page.route('**/api/questions', async route => {
+    order.push(await readFile(doc.path, 'utf8'));
+    await route.continue();
+  });
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('Check');
+  await expect(page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('button', { name: 'Save & send' })).toBeVisible();
+  await page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('button', { name: 'Save & send' }).click();
+  await expect.poll(() => order.length).toBe(1);
+  expect(order[0]).toBe('# Title typed\n\nBody text.\n');
+});
+
+test('Save & send aborts on conflict', async ({ page }) => {
+  const doc = await f.register('conflict-send.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' mine');
+  await writeFile(doc.path, '# Agent title\n\nBody text.\n');
+  await expect(page.getByText('This file changed on disk.')).toBeVisible();
+  await page.getByRole('button', { name: 'Keep mine', exact: true }).click();
+  let asked = 0;
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') asked++; });
+  await selectEditorText(page, 3, 0, 4);
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  const input = page.getByLabel('Comment', { exact: true });
+  await input.fill('Keep this draft');
+  await page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('button', { name: 'Save & send' }).click();
+  await expect(page.getByText('This file changed on disk.')).toBeVisible();
+  expect(asked).toBe(0);
+  await expect(input).toHaveValue('Keep this draft');
+});
+
+test('edit-mode quote shows Passage changed after its text is deleted and saved', async ({ page }) => {
+  const doc = await f.register('gone.md', '# Title\n\nDelete this phrase soon.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await selectEditorText(page, 3, 'Delete this '.length, 'phrase'.length);
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('About this');
+  await page.getByRole('button', { name: 'Send comment' }).click();
+  await expect(page.locator('.cm-content .edit-quote')).toContainText('phrase');
+  await selectEditorText(page, 3, 'Delete this '.length, 'phrase '.length);
+  await page.keyboard.press('Backspace');
+  await page.keyboard.press('ControlOrMeta+s');
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  await expect(page.getByText('Passage changed').first()).toBeVisible();
+});
+
+test('view-mode selection still works unchanged in view mode', async ({ page }) => {
+  const doc = await f.register('view.md', '# Title\n\nSelect these words please.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.locator('#document p').evaluate(p => {
+    const range = document.createRange(); range.selectNodeContents(p);
+    getSelection()!.removeAllRanges(); getSelection()!.addRange(range);
+    document.getElementById('document')!.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  });
+  await expect(page.getByRole('button', { name: 'Comment', exact: true })).toBeVisible();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+});
+
+async function quoteInEditor(page: Page, line: number, offset: number, word: string) {
+  await selectEditorText(page, line, offset, word.length);
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.getByLabel('Comment', { exact: true }).fill('About this');
+  await page.getByRole('button', { name: 'Send comment' }).click();
+  await expect(page.locator('.cm-content .edit-quote')).toContainText(word);
+}
+
+test('clicking a painted mark keeps typing in the editor and opens its thread', async ({ page }) => {
+  const doc = await f.register('mark-click.md', '# Title\n\nDelete this phrase soon.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await quoteInEditor(page, 3, 'Delete this '.length, 'phrase');
+  await page.getByRole('button', { name: 'Threads', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Thread conversation' })).toHaveCount(0);
+  await page.locator('.cm-content .edit-quote').click();
+  await expect(page.getByRole('region', { name: 'Thread conversation' })).toBeVisible();
+  await page.keyboard.type('ZZ');
+  await expect(page.locator('.cm-content')).toContainText('ZZ');
+});
+
+test('typing over a selection removes the stale selection toolbar', async ({ page }) => {
+  const doc = await f.register('stale.md', '# Title\n\nReplace this word now.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await selectEditorText(page, 3, 'Replace this '.length, 'word'.length);
+  await expect(page.getByRole('button', { name: 'Comment', exact: true })).toBeVisible();
+  await page.keyboard.type('thing');
+  await expect(page.getByRole('button', { name: 'Comment', exact: true })).toHaveCount(0);
+});
+
+test('edit-mode marks are painted again after Reload remounts the editor', async ({ page }) => {
+  const body = 'Intro paragraph that keeps the heading away.\n\nDelete this phrase soon.\n';
+  const doc = await f.register('reload-marks.md', `# Title\n\n${body}`);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await quoteInEditor(page, 5, 'Delete this '.length, 'phrase');
+  await typeAtEndOfFirstLine(page, ' draft');
+  await writeFile(doc.path, `# Agent title\n\n${body}`);
+  await expect(page.getByText('This file changed on disk.')).toBeVisible();
+  await page.getByRole('button', { name: 'Reload', exact: true }).click();
+  await expect(page.locator('.cm-content')).toContainText('Agent title');
+  await expect(page.locator('.cm-content .edit-quote')).toContainText('phrase');
+});
+
+test('edit-mode quotes are not called changed while the document loads', async ({ page }) => {
+  const doc = await f.register('early.md', '# Title\n\nDelete this phrase soon.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await quoteInEditor(page, 3, 'Delete this '.length, 'phrase');
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  await page.route(`**/api/documents/${doc.id}`, async route => { await held; await route.continue(); });
+  await page.reload();
+  await expect(page.locator('.sidebar').getByText('phrase').first()).toBeVisible();
+  await expect(page.getByText(/Passage changed|Selection changed/)).toHaveCount(0);
+  release();
+  await expect(page.locator('#document')).toContainText('Delete this phrase soon.');
+  await expect(page.getByText(/Passage changed|Selection changed/)).toHaveCount(0);
+});
+
+const markInView = (page: Page) => page.evaluate(() => {
+  const mark = document.querySelector('.cm-content .edit-quote')?.getBoundingClientRect(), box = document.querySelector('.cm-scroller')!.getBoundingClientRect();
+  return !!mark && mark.top >= box.top && mark.bottom <= box.bottom;
+});
+async function longDocWithQuote(page: Page) {
+  const lines = Array.from({ length: 60 }, (_, i) => i === 19 ? 'Line twenty has a marker word.' : `Filler line ${i + 1}.`);
+  const doc = await f.register('reveal-edit.md', lines.join('\n\n') + '\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  const line = (await readFile(doc.path, 'utf8')).split('\n').findIndex(text => text.includes('marker word')) + 1;
+  await quoteInEditor(page, line, 'Line twenty has a '.length, 'marker');
+  return line;
+}
+
+const showQuote = (page: Page, word: string) => page.locator('.sidebar').getByRole('button', { name: new RegExp(`Show passage: .*${word}`) }).first();
+
+test('clicking an edit-made quote in view mode reveals it in view mode without entering edit mode', async ({ page }) => {
+  await longDocWithQuote(page);
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await page.locator('main.canvas').evaluate(node => node.scrollTo(0, 0));
+  await showQuote(page, 'marker').click();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await expect(page.locator('#document mark').first()).toContainText('marker');
+  await expect(page.locator('#document mark').first()).toBeInViewport();
+});
+
+test('clicking an edit-mode quote while editing scrolls the source pane to it and marks it', async ({ page }) => {
+  await longDocWithQuote(page);
+  await page.evaluate(() => document.querySelector('.cm-scroller')!.scrollTo(0, 0));
+  await expect.poll(() => markInView(page)).toBe(false);
+  await showQuote(page, 'marker').click();
+  await expect.poll(() => markInView(page)).toBe(true);
+  await expect(page.locator('.cm-content .edit-quote-active')).toContainText('marker');
+  await expect(page.locator('.cm-editor')).toBeVisible();
+});
+
+async function passageThread(page: Page) {
+  const doc = await f.register('passage-guard.md', '# Title\n\nHighlighted passage here.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Where?'); await input.press('Enter'); await expect(input).toHaveValue('');
+  await expect(input).toHaveValue('');
+  await answer('[[sidecar-meta {"highlights":[{"exact":"Highlighted passage here."}]}]]\nSee [the passage](#selection-1).');
+  await expect(page.locator('.sidebar').getByRole('button', { name: /Show passage/ }).first()).toBeVisible();
+  return doc;
+}
+
+test('clicking a view-made quote while editing stays in edit mode and marks it in the source pane', async ({ page }) => {
+  await passageThread(page);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toBeVisible();
+  await page.locator('.sidebar').getByRole('button', { name: /Show passage/ }).first().click();
+  await expect(page.locator('.cm-editor')).toBeVisible();
+  await expect(page.locator('.cm-content .edit-quote-active')).toContainText('Highlighted passage here.');
+  await expect.poll(() => paintedInPreview(page)).toBe('Highlighted passage here.');
+});
+
+test('while dirty, revealing a view-made quote neither asks nor leaves edit mode', async ({ page }) => {
+  await passageThread(page);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  await page.locator('.sidebar').getByRole('button', { name: /Show passage/ }).first().click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('.cm-content')).toContainText('Title typed');
+  await expect(page.locator('.cm-content .edit-quote-active')).toContainText('Highlighted passage here.');
+});
+
+test('accepting a proposal while dirty is blocked; once clean it flows into the editor', async ({ page }) => {
+  const doc = await proposalReply(page);
+  const original = await readFile(doc.path, 'utf8');
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  // Reviewing never switches modes or asks to leave: the window opens over the editor, and only accepting is blocked.
+  await page.locator('.sidebar .proposal-card').getByRole('button', { name: 'Review change', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'Unsaved changes' })).toHaveCount(0);
+  const window = page.getByRole('dialog', { name: 'Proposed change' });
+  await expect(window).toBeVisible();
+  await window.getByRole('button', { name: 'Accept', exact: true }).click();
+  await expect(window.getByRole('alert')).toContainText('Save or discard your edits first');
+  await page.keyboard.press('Escape');
+  await expect(window).toHaveCount(0);
+  await expect(page.locator('.cm-content')).toContainText('Retry policy typed');
+  const acceptAll = page.locator('.sidebar').getByRole('button', { name: /^Accept all/ });
+  await acceptAll.click();
+  await expect(page.locator('.sidebar').getByRole('alert').filter({ hasText: 'Save or discard your edits first' })).toBeVisible();
+  expect(await readFile(doc.path, 'utf8')).toBe(original);
+  // Undoing the typing makes the editor clean again, which allows the accept.
+  await page.locator('.cm-content').focus();
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  await acceptAll.click();
+  await expect(page.locator('.cm-content')).toContainText('temporary failures');
+  expect(await readFile(doc.path, 'utf8')).toContain('temporary failures');
+});
+
+test('a proposal click in a clean editor stays in edit mode, reveals the passage and opens the window', async ({ page }) => {
+  const doc = await proposalReply(page);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.cm-editor')).toBeVisible();
+  await page.locator('.cm-scroller').evaluate(el => { el.scrollTop = 0; });
+  await page.locator('.sidebar .proposal-card').getByRole('button', { name: 'Review change', exact: true }).click();
+  const window = page.getByRole('dialog', { name: 'Proposed change' });
+  await expect(window).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Unsaved changes' })).toHaveCount(0);
+  await expect(page.locator('.cm-editor')).toBeVisible();
+  await expect(page.locator('.cm-content .edit-quote-active')).toBeVisible();
+  const box = (await window.boundingBox())!;
+  expect(box.width).toBeGreaterThan(0);
+  expect(await readFile(doc.path, 'utf8')).not.toContain('temporary failures');
+});
+
+test('phone edit mode fits the viewport: no page scroll, all header controls visible, follows a shorter viewport', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  cleanup.unshift(() => context.close());
+  const page = await context.newPage();
+  page.on('pageerror', error => pageErrors.push(error.message));
+  const doc = await f.register('phone-edit.md', Array.from({ length: 80 }, (_, i) => `Line ${i + 1} of the phone document.`).join('\n\n') + '\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.cm-content')).toBeVisible();
+  await typeAtEndOfFirstLine(page, ' x');
+  await expect(page.getByText('● Unsaved')).toBeVisible();
+  const editorBottom = () => page.locator('.markdown-edit-mode').evaluate(el => el.getBoundingClientRect().bottom);
+  expect(await editorBottom()).toBeLessThanOrEqual(844);
+  expect(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight && document.body.scrollHeight <= innerHeight)).toBe(true);
+  const header = [page.locator('.topbar .agent-status'), page.getByText('● Unsaved'), ...['Save', 'Done', 'Menu'].map(name => page.getByRole('button', { name, exact: true }))];
+  const boxes = [];
+  for (const control of header) { await expect(control).toBeVisible(); boxes.push((await control.boundingBox())!); }
+  for (const box of boxes) { expect(box.x).toBeGreaterThanOrEqual(0); expect(box.x + box.width).toBeLessThanOrEqual(390); }
+  for (let a = 0; a < boxes.length; a++) for (let b = a + 1; b < boxes.length; b++) {
+    const x = boxes[a], y = boxes[b];
+    expect(x.x + x.width <= y.x + 0.5 || y.x + y.width <= x.x + 0.5 || x.y + x.height <= y.y || y.y + y.height <= x.y).toBe(true);
+  }
+  // The keyboard shrinks the viewport: the app sets --mobile-height; the editor shrinks with it.
+  await page.locator('.viewer').evaluate(el => (el as HTMLElement).style.setProperty('--mobile-height', '500px'));
+  await expect.poll(editorBottom).toBeLessThanOrEqual(500);
+  expect(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight)).toBe(true);
+  expect(await page.locator('.markdown-edit-mode').evaluate(el => el.getBoundingClientRect().height)).toBeGreaterThan(200);
+});
+
+test('Save & send quotes the saved text even when more is typed while the save is in flight', async ({ page }) => {
+  const doc = await f.register('typing-during-save.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const sent: any[] = [], saved: string[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  page.on('response', async response => { if (response.url().endsWith('/source') && response.request().method() !== 'GET') saved.push((await response.json()).version); });
+  let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
+  let isHeld = false;
+  await page.route('**/source', async route => {
+    if (route.request().method() === 'GET' || isHeld) return route.continue();
+    isHeld = true; await held; await route.continue();
+  });
+  await commentWithDraft(page);
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+Home');
+  await page.keyboard.type('Intro line.\n\n');
+  await page.getByRole('dialog', { name: 'Comment on selection' }).getByRole('button', { name: 'Save & send' }).click();
+  await expect.poll(() => isHeld).toBe(true);
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+Home');
+  await page.keyboard.type('Typed during the save.\n\n');
+  release();
+  await expect.poll(() => sent.length).toBe(1);
+  const text = await readFile(doc.path, 'utf8');
+  expect(text).toBe('Intro line.\n\n# Title\n\nBody with a marker inside.\n');
+  expect(sent[0].quote).toMatchObject({ exact: 'marker', start: text.indexOf('marker'), end: text.indexOf('marker') + 6, version: saved[0] });
+  expect(text.slice(sent[0].quote.start, sent[0].quote.end)).toBe(sent[0].quote.exact);
+  await expect(page.locator('.cm-content')).toContainText('Typed during the save.');
+});
+
+test('a draft from before the source quotes, whose offsets no longer fit its own version, is restamped at send', async ({ page }) => {
+  const doc = await f.register('v5-draft.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Start'); await input.press('Enter'); await expect(input).toHaveValue('');
+  await answer('Ok.');
+  const snapshot = await state(), threadId = Object.keys(snapshot.threads)[0], version = snapshot.documents[doc.id].version;
+  const source = await readFile(doc.path, 'utf8'), at = source.indexOf('marker');
+  const draft = { text: 'About it', retry: null, quote: { exact: 'marker', prefix: source.slice(Math.max(0, at - 32), at), suffix: source.slice(at + 6, at + 38), start: 3, end: 9, version, isPositionVerified: true } };
+  await page.evaluate(({ key, draft }) => localStorage.setItem(key, JSON.stringify(draft)), { key: `sidecar-draft:${doc.id}:${threadId}`, draft });
+  const sent: any[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/questions') && request.method() === 'POST') sent.push(request.postDataJSON()); });
+  await page.reload();
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await input.press('Enter');
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent[0].quote).toMatchObject({ exact: 'marker', start: at, end: at + 6, version });
+  await expect(page.locator('.draft-selection')).toHaveCount(0);
+});
+
+test('while editing, a thread quote whose passage was edited away is flagged against the editor text', async ({ page }) => {
+  await passageThread(page);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  const quote = page.locator('.sidebar .message-selection').first();
+  await expect(quote.locator('.passage-context .changed')).toHaveCount(0);
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+Home');
+  await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowDown'); await page.keyboard.press('End');
+  await page.keyboard.press('Backspace');
+  await expect(page.getByText('● Unsaved')).toBeVisible();
+  await expect(quote.locator('.passage-context .changed')).toBeVisible();
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  await expect(quote.locator('.passage-context .changed')).toHaveCount(0);
+});
+
+test('a draft changed while Save & send was saving is kept, not overwritten', async ({ page }) => {
+  const doc = await f.register('draft-race.md', '# Title\n\nBody with a marker inside.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const input = page.getByLabel('Message', { exact: true }); await input.fill('Start'); await input.press('Enter'); await expect(input).toHaveValue('');
+  await answer('Ok.');
+  let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
+  let isHeld = false;
+  await page.route('**/source', async route => {
+    if (route.request().method() === 'GET' || isHeld) return route.continue();
+    isHeld = true; await held; await route.continue();
+  });
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' typed');
+  await selectEditorText(page, 3, 'Body with a '.length, 'marker'.length);
+  await expect(page.locator('.draft-selection')).toContainText('marker');
+  await input.fill('About it');
+  await input.press('Enter');
+  await expect.poll(() => isHeld).toBe(true);
+  await selectEditorText(page, 3, 0, 'Body'.length);
+  await expect(page.locator('.draft-selection')).toContainText('Body');
+  release();
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  await expect.poll(async () => (await state()).requests && Object.keys((await state()).requests).length).toBe(2);
+  await expect(page.locator('.draft-selection')).toContainText('Body');
+});
+
+test('the editor text size setting scales the source pane, persists across reload and is covered by Reset', async ({ page }) => {
+  const doc = await f.register('editor-size.md', '# Title\n\nBody text.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  const size = () => page.locator('.cm-content').evaluate(el => getComputedStyle(el).fontSize);
+  const previewSize = () => page.locator('.edit-preview').evaluate(el => getComputedStyle(el).fontSize);
+  expect(await size()).toBe('13px');
+  const preview = await previewSize();
+  await openSettings(page, 'Editor');
+  const slider = page.getByRole('slider', { name: 'Editor text size', exact: true });
+  await expect(slider).toHaveAttribute('min', '80'); await expect(slider).toHaveAttribute('max', '150'); await expect(slider).toHaveAttribute('step', '5');
+  await slider.fill('150');
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await expect.poll(size).toBe('19.5px');
+  expect(await previewSize()).toBe(preview);
+  expect(await page.evaluate(() => document.cookie)).toContain('sidecar-editor-text-size=150');
+  await page.reload();
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect.poll(size).toBe('19.5px');
+  await openSettings(page, 'Editor');
+  await expect(page.getByRole('slider', { name: 'Editor text size', exact: true })).toHaveValue('150');
+  await page.getByRole('button', { name: 'Reset text sizes', exact: true }).click();
+  await expect(page.getByRole('slider', { name: 'Editor text size', exact: true })).toHaveValue('100');
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await expect.poll(size).toBe('13px');
+});
+
+test('the source pane colours Markdown tokens and the code inside fences', async ({ page }) => {
+  const doc = await f.register('highlight.md', '# Heading\n\nSome *emphasis* and **strong** here.\n\n```ts\nconst answer: number = 42; // note\nfunction go(name: string) { return `hi ${name}`; }\n```\n\n```py\ndef go(): return "x"\n```\n\n```sh\necho "$HOME" # list\n```\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  const style = (text: string) => page.locator('.cm-line', { hasText: text }).first().evaluate(line => [...line.querySelectorAll('span')].map(span => { const css = getComputedStyle(span); return { text: span.textContent, color: css.color, italic: css.fontStyle, weight: css.fontWeight }; }));
+  const heading = await style('Heading');
+  expect(heading.some(span => span.weight === '600' || span.weight === '700')).toBe(true);
+  expect((await style('emphasis')).some(span => span.italic === 'italic')).toBe(true);
+  for (const line of ['const answer', 'function go', 'def go', 'echo']) {
+    const spans = await style(line);
+    expect(new Set(spans.map(span => span.color)).size, line).toBeGreaterThan(1);
+  }
+  // Colours come from Sidecar's tokens, not the editor defaults.
+  const keyword = (await style('const answer')).find(span => span.text === 'const')!;
+  expect(keyword.color).toBe(await page.evaluate(() => { const probe = document.createElement('i'); probe.style.color = 'var(--code-keyword)'; document.body.append(probe); const color = getComputedStyle(probe).color; probe.remove(); return color; }));
+});
+
+test('Format applies Prettier to the source as one undoable edit, never saves, and loads Prettier only on first use', async ({ page }) => {
+  const source = '# Title\n\n*a*\n\n-   item\n-   other\n';
+  const prettier = await import('prettier');
+  const expected = await prettier.format(source, { parser: 'markdown' });
+  expect(expected).not.toBe(source);
+  const doc = await f.register('format-me.md', source);
+  // Prettier's own error text marks the script that carries it.
+  const marker = 'Couldn\'t resolve parser', carriers: string[] = [];
+  page.on('response', async response => { if (response.request().resourceType() === 'script' && (await response.text()).includes(marker)) carriers.push(new URL(response.url()).pathname); });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.cm-content')).toContainText('-   item');
+  await page.waitForLoadState('networkidle');
+  expect(carriers).toEqual([]);
+  const main = await (await page.request.get(`${f.url}/app.js`)).text();
+  expect(main).not.toContain(marker);
+  const text = () => page.locator('.cm-line').evaluateAll(lines => lines.map(line => line.textContent).join('\n'));
+  await formatViaMenu(page);
+  await expect.poll(text).toBe(expected);
+  expect(carriers).toHaveLength(1);
+  expect(carriers[0]).toMatch(/^\/chunks\/.+\.js$/);
+  await expect(page.getByText('● Unsaved')).toBeVisible();
+  expect(await readFile(doc.path, 'utf8')).toBe(source);
+  await page.locator('.cm-content').click();
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect.poll(text).toBe(source);
+  await expect(page.getByText('● Unsaved')).toHaveCount(0);
+  expect(await readFile(doc.path, 'utf8')).toBe(source);
+});
+
+test('Format failures are shown and leave the text alone', async ({ page }) => {
+  const doc = await f.register('format-fail.md', '# Title\n\n*a*\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.cm-content')).toBeVisible();
+  await page.waitForLoadState('networkidle');
+  // The chunks the page needs are loaded; only Prettier's is still to come.
+  await page.route('**/chunks/*.js', route => route.fulfill({ status: 500, body: 'no' }));
+  await formatViaMenu(page);
+  await expect(page.getByRole('alert').filter({ hasText: 'Could not format' })).toBeVisible();
+  await expect(page.locator('.cm-content')).toContainText('*a*');
+  await page.getByRole('button', { name: 'Menu', exact: true }).click();
+  await expect(page.getByRole('menuitem', { name: /^Format/ })).not.toHaveAttribute('aria-disabled', 'true');
+});
+
+const menuButton = (page: Page) => page.getByRole('button', { name: 'Menu', exact: true });
+
+test('finishing Format does not pull focus out of the editor, and the menu shows its busy and CRLF states', async ({ page }) => {
+  const doc = await f.register('format-focus.md', '# Title\n\n*a*\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.cm-content')).toBeVisible();
+  await page.waitForLoadState('networkidle');
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/chunks/*.js', async route => { await gate; await route.continue(); });
+  const menu = page.getByRole('menu', { name: 'Menu' }), format = menu.getByRole('menuitem', { name: /^Format/ });
+  await menuButton(page).click();
+  await format.click();
+  await expect(format).toHaveAttribute('aria-disabled', 'true');
+  await expect(format).toContainText('Loading Prettier…');
+  await page.keyboard.press('Escape');
+  await page.locator('.cm-content').click();
+  release();
+  await expect(page.locator('.cm-content')).toContainText('_a_');
+  await expect(page.locator('.cm-content')).toBeFocused();
+  // After a format run from the open menu, focus continues in the text rather than on the Menu button.
+  await page.keyboard.press('ControlOrMeta+z');
+  await menuButton(page).click();
+  await format.click();
+  await expect(page.locator('.cm-content')).toContainText('_a_');
+  await expect(page.locator('.cm-content')).toBeFocused();
+  // A document that gains CRLF line endings on disk disables Format with the reason.
+  await writeFile(doc.path, '# Title\r\n\r\n*a*\r\n');
+  await menuButton(page).click();
+  await expect(format).toHaveAttribute('aria-disabled', 'true');
+  await expect(format).toContainText('Windows (CRLF) line endings');
+});
+
+test('Ctrl/Cmd+comma does not open Settings over another modal, and the menu closes when the window loses focus', async ({ page }) => {
+  const doc = await f.register('menu-modal.md', '# Menu\n\nBody.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' x');
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  const unsaved = page.getByRole('dialog', { name: 'Unsaved changes' });
+  await expect(unsaved).toBeVisible();
+  await page.keyboard.press('Control+,');
+  await expect(page.getByRole('dialog', { name: 'Settings', exact: true })).toHaveCount(0);
+  await unsaved.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await menuButton(page).click();
+  await expect(page.getByRole('menu', { name: 'Menu' })).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+  await expect(page.getByRole('menu', { name: 'Menu' })).toHaveCount(0);
+});
+
+for (const closer of ['Escape', 'Close settings'] as const) {
+  test(`Settings opened by the shortcut from the editor returns focus to the editor after ${closer}, once`, async ({ page }) => {
+    const doc = await f.register(`menu-focus-${closer[0]}.md`, '# Focus\n\nBody.\n');
+    await page.goto(`${f.url}/?document=${doc.id}`);
+    await page.getByRole('button', { name: 'Edit', exact: true }).click();
+    await page.locator('.cm-content').focus();
+    await page.keyboard.press('Control+,');
+    const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+    await expect(dialog).toBeVisible();
+    if (closer === 'Escape') await page.keyboard.press('Escape'); else await dialog.getByRole('button', { name: closer, exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await page.waitForTimeout(200); // the dialog's own close event arrives a task later and must not move focus again
+    await expect(page.locator('.cm-content')).toBeFocused();
+  });
+}
+
+test('on the library page the menu omits View all documents, and elsewhere it is a real link', async ({ page }) => {
+  const doc = await f.register('menu-link.md', '# Link\n\nBody.\n');
+  await page.goto(`${f.url}/?library=1`);
+  await menuButton(page).click();
+  await expect(page.getByRole('menuitem', { name: /^View all documents/ })).toHaveCount(0);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await menuButton(page).click();
+  const link = page.getByRole('menuitem', { name: /^View all documents/ });
+  await expect(link).toHaveAttribute('href', /library=1|\/$/);
+  await expect(link).toHaveAttribute('target', '_blank');
+  await expect(page.getByRole('menuitem', { name: /^Settings/ })).toHaveAttribute('aria-keyshortcuts', 'Meta+, Control+,');
+});
+
+test('Settings ignores an invalid saved category, and on a phone reopening after closing a category page focuses the list', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  cleanup.unshift(() => context.close());
+  await context.addCookies([{ name: 'sidecar-settings-category', value: 'bogus', url: f.url }]);
+  const page = await context.newPage();
+  const doc = await f.register('phone-settings.md', '# Phone\n\nBody.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await openSettings(page);
+  const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+  const cats = dialog.getByRole('navigation', { name: 'Settings categories' });
+  await expect(cats.getByRole('button', { name: 'Reading', exact: true })).toHaveAttribute('aria-current', 'page');
+  await cats.getByRole('button', { name: 'Editor', exact: true }).click();
+  await expect(dialog.getByRole('heading', { name: 'Editor', exact: true })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Close settings' }).click();
+  await expect(dialog).toBeHidden();
+  await openSettings(page);
+  await expect(cats.getByRole('button', { name: 'Editor', exact: true })).toBeFocused();
+});
+
+test('the app-bar menu opens and closes with mouse and keyboard, and offers Format only while editing', async ({ page }) => {
+  const doc = await f.register('menu.md', '# Menu\n\nBody.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const menu = page.getByRole('menu', { name: 'Menu' });
+  await expect(menuButton(page)).toHaveAttribute('aria-haspopup', 'menu');
+  await expect(menuButton(page)).toHaveAttribute('aria-expanded', 'false');
+  await menuButton(page).click();
+  await expect(menuButton(page)).toHaveAttribute('aria-expanded', 'true');
+  await expect(menu.getByRole('menuitem')).toHaveText([/^View all documents/, /^Settings/]);
+  await expect(menu.getByRole('menuitem').first()).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(menu.getByRole('menuitem', { name: /^Settings/ })).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(menu.getByRole('menuitem', { name: /^View all/ })).toBeFocused();
+  await page.keyboard.press('End');
+  await expect(menu.getByRole('menuitem', { name: /^Settings/ })).toBeFocused();
+  await page.keyboard.press('Home');
+  await expect(menu.getByRole('menuitem', { name: /^View all/ })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+  await expect(menuButton(page)).toBeFocused();
+  await menuButton(page).press('ArrowDown');
+  await expect(menu).toBeVisible();
+  await page.keyboard.press('Tab');
+  await expect(menu).toHaveCount(0);
+  await expect(menuButton(page)).not.toBeFocused(); // Tab continues to the next control, as in the menu pattern
+  await menuButton(page).click();
+  await page.locator('.canvas').click({ position: { x: 5, y: 5 } });
+  await expect(menu).toHaveCount(0);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await menuButton(page).click();
+  await expect(menu.getByRole('menuitem')).toHaveText([/^Format\s*Tidy Markdown with Prettier/, /^View all documents/, /^Settings/]);
+  await expect(menu.getByRole('menuitem').first()).toBeFocused();
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await menuButton(page).click();
+  await expect(menu.getByRole('menuitem', { name: /^Format/ })).toHaveCount(0);
+});
+
+test('the menu opens the library and Settings, and Ctrl/Cmd+comma opens Settings', async ({ page, context }) => {
+  const doc = await f.register('menu-go.md', '# Menu\n\nBody.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await menuButton(page).click();
+  const [library] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'View all documents', exact: true }).click()]);
+  expect(new URL(library.url()).search).toBe('?library=1');
+  await library.close();
+  const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+  await menuButton(page).click();
+  await page.getByRole('menuitem', { name: /^Settings/ }).click();
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(menuButton(page)).toBeFocused();
+  await page.keyboard.press('Control+,');
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Close settings' }).click();
+  await expect(dialog).toBeHidden();
+  await page.keyboard.press('Control+,');
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(menuButton(page)).toBeFocused();
+  await page.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: ',', metaKey: true, bubbles: true })));
+  await expect(dialog).toBeVisible();
+  await page.mouse.click(2, 2);
+  await expect(dialog).toBeHidden();
+});
+
+test('Ctrl/Cmd+comma right after closing Settings in the same task still reopens it', async ({ page }) => {
+  const doc = await f.register('menu-race.md', '# Menu\n\nBody.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await openSettings(page);
+  const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+  // Close and reopen batch into one render, and the dialog's own close event arrives afterwards.
+  await page.evaluate(() => {
+    document.querySelector<HTMLElement>('dialog.settings-dialog [aria-label="Close settings"]')!.click();
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: ',', ctrlKey: true, bubbles: true }));
+  });
+  await page.waitForTimeout(200);
+  await expect(dialog).toBeVisible();
+});
+
+test('Settings categories switch content, remember the last category, and use a list-detail flow on a phone', async ({ page }) => {
+  const doc = await f.register('cats.md', '# Cats\n\nBody.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await openSettings(page);
+  const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+  const category = (name: string) => dialog.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name, exact: true });
+  await expect(category('Reading')).toHaveAttribute('aria-current', 'page');
+  await expect(dialog.getByRole('slider', { name: 'Document text size' })).toBeVisible();
+  await expect(dialog.getByRole('slider', { name: 'Editor text size' })).toHaveCount(0);
+  await expect(dialog.getByRole('button', { name: 'Zoom in' })).toHaveCount(0);
+  const box = (await dialog.boundingBox())!;
+  expect(box.width).toBeCloseTo(760, 0);
+  await category('Editor').click();
+  await expect(category('Editor')).toHaveAttribute('aria-current', 'page');
+  await expect(category('Reading')).not.toHaveAttribute('aria-current', 'page');
+  await expect(dialog.getByRole('slider', { name: 'Editor text size' })).toBeVisible();
+  await expect(dialog.getByRole('slider', { name: 'Align at' })).toBeVisible();
+  await expect(dialog.getByRole('slider', { name: 'Document text size' })).toHaveCount(0);
+  await category('Files').click();
+  await expect(dialog.getByRole('radio', { name: 'One at a time' })).toBeVisible();
+  await expect(dialog.getByRole('checkbox', { name: 'Show gitignored files and folders' })).toBeVisible();
+  await expect(dialog.getByRole('radio', { name: 'Rich text' })).toBeVisible();
+  await category('Access').click();
+  await expect(dialog.getByRole('checkbox', { name: 'Allow access on local network' })).toBeVisible();
+  await category('About').click();
+  await expect(dialog.locator('.settings-version')).toHaveText((await state()).appVersion);
+  await category('About').focus();
+  await page.keyboard.press('ArrowUp');
+  await expect(category('Access')).toBeFocused();
+  await expect(category('Access')).toHaveAttribute('aria-current', 'page');
+  await category('Files').click();
+  await page.reload();
+  await openSettings(page);
+  await expect(category('Files')).toHaveAttribute('aria-current', 'page');
+  await expect(dialog.getByRole('radio', { name: 'One at a time' })).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openSettings(page);
+  const full = (await dialog.boundingBox())!;
+  expect([full.width, full.height]).toEqual([390, 844]);
+  await expect(dialog.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
+  await expect(dialog.getByRole('radio', { name: 'One at a time' })).toBeHidden();
+  await category('Reading').click();
+  await expect(dialog.getByRole('heading', { name: 'Reading', exact: true })).toBeVisible();
+  await expect(dialog.getByRole('slider', { name: 'Document text size' })).toBeVisible();
+  await expect(category('Reading')).toBeHidden();
+  await dialog.getByRole('button', { name: 'Back to categories' }).click();
+  await expect(dialog.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
+  await expect(dialog.getByRole('slider', { name: 'Document text size' })).toBeHidden();
+  await expect(category('Reading')).toBeVisible();
+});
+
+test('the unsaved-changes dialog is centred on desktop and phone', async ({ page }) => {
+  const doc = await f.register('centred.md', '# Title\n\nBody.\n');
+  for (const size of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(size);
+    await page.goto(`${f.url}/?document=${doc.id}`);
+    await page.getByRole('button', { name: 'Edit', exact: true }).click();
+    await typeAtEndOfFirstLine(page, ' x');
+    await page.getByRole('button', { name: 'Done', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'You have unsaved changes' });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAccessibleDescription('Save them to the file, or discard them and return to the document.');
+    await expect(dialog.getByRole('button', { name: 'Save', exact: true })).toBeFocused();
+    const box = (await dialog.boundingBox())!;
+    expect(Math.abs(box.x + box.width / 2 - size.width / 2)).toBeLessThan(4);
+    expect(Math.abs(box.y + box.height / 2 - size.height / 2)).toBeLessThan(4);
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await page.getByRole('button', { name: 'Done', exact: true }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Discard', exact: true }).click();
+  }
+});
+
+test('edit mode fills the canvas and the source pane reads darker than the preview', async ({ page }) => {
+  const doc = await f.register('fill.md', '# Title\n\nBody.\n');
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.cm-content')).toBeVisible();
+  const edges = await page.evaluate(() => {
+    const canvas = document.querySelector('.canvas.editing')!.getBoundingClientRect(), mode = document.querySelector('.markdown-edit-mode')!, panes = mode.getBoundingClientRect(), style = getComputedStyle(mode);
+    return { left: panes.left - canvas.left, right: canvas.right - panes.right, top: panes.top - canvas.top, bottom: canvas.bottom - panes.bottom, border: style.borderTopWidth, radius: style.borderTopLeftRadius };
+  });
+  expect(edges).toEqual({ left: 0, right: 0, top: 0, bottom: 0, border: '0px', radius: '0px' });
+  const colour = (selector: string) => page.locator(selector).first().evaluate(el => getComputedStyle(el).backgroundColor);
+  const source = await colour('.source-editor .cm-editor'), preview = await colour('.edit-preview');
+  expect(source).not.toBe(preview);
+  expect(preview).toBe(await page.evaluate(() => { const probe = document.createElement('i'); probe.style.color = 'var(--background)'; document.body.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return c; }));
+  await page.locator('.cm-content').focus();
+  // CodeMirror's positioned scroller paints over an outline on .cm-editor, so the ring is an overlay above it. Check the pixels at the pane's edge.
+  const editor = page.locator('.source-editor');
+  const box = (await editor.boundingBox())!, strip = { x: box.x, y: box.y + 40, width: 3, height: 60 };
+  const focused = await page.screenshot({ clip: strip });
+  await page.locator('.cm-content').blur();
+  await expect(page.locator('.cm-focused')).toHaveCount(0);
+  const blurred = await page.screenshot({ clip: strip });
+  expect(focused.equals(blurred)).toBe(false);
+  await page.locator('.cm-content').focus();
+  const overlay = await editor.evaluate(el => { const ring = getComputedStyle(el, '::after'), scroller = getComputedStyle(el.querySelector('.cm-scroller')!), probe = document.createElement('i'); probe.style.color = 'color-mix(in oklch, var(--primary) 45%, transparent)'; document.body.append(probe); const primary = getComputedStyle(probe).color; probe.remove(); return { colour: ring.borderLeftColor, primary, width: ring.borderLeftWidth, z: Number(ring.zIndex), scrollerZ: Number(scroller.zIndex), pointer: ring.pointerEvents }; });
+  expect(overlay).toMatchObject({ width: '1px', pointer: 'none' });
+  expect(overlay.colour).toBe(overlay.primary);
+  expect(overlay.z).toBeGreaterThan(overlay.scrollerZ);
+});
+
+test('the phone header keeps the agent status, Menu, Save and Done visible without overlap', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  cleanup.unshift(() => context.close());
+  const page = await context.newPage();
+  const doc = await f.register('phone-header.md', '# Phone\n\nBody.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' x');
+  const status = page.locator('.topbar .agent-status');
+  await expect(status).toBeVisible();
+  await expect(status.locator('.agent-dot')).toBeVisible();
+  await expect(page.getByRole('status', { name: 'Agent status' })).toBeVisible();
+  await expect(status.locator('> span:last-child')).toBeHidden();
+  const boxes = [];
+  for (const control of [status, menuButton(page), page.getByRole('button', { name: 'Save', exact: true }), page.getByRole('button', { name: 'Done', exact: true })]) { await expect(control).toBeVisible(); boxes.push((await control.boundingBox())!); }
+  for (let a = 0; a < boxes.length; a++) { expect(boxes[a].x + boxes[a].width).toBeLessThanOrEqual(390); for (let b = a + 1; b < boxes.length; b++) {
+    const x = boxes[a], y = boxes[b];
+    expect(x.x + x.width <= y.x + 0.5 || y.x + y.width <= x.x + 0.5 || x.y + x.height <= y.y || y.y + y.height <= x.y).toBe(true);
+  } }
 });

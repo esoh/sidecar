@@ -2,6 +2,8 @@
 // HTML frames forward the same key through shortcutHelper in src/html-bridge.ts; keep the two in step.
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 export const conversationShortcut = { label: isMac ? '⌘\\' : 'Ctrl+\\', aria: isMac ? 'Meta+\\' : 'Control+\\' };
+// Ctrl/Cmd+comma opens Settings (AppMenu accepts either modifier).
+export const settingsShortcut = { label: isMac ? '⌘,' : 'Ctrl+,', aria: 'Meta+, Control+,' };
 export const isConversationShortcut = (event: KeyboardEvent) => event.code === 'Backslash' && !event.repeat && !event.isComposing && !event.shiftKey && !event.altKey
   && (isMac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey);
 // Only a Sidecar HTML frame currently in this page may forward the shortcut.

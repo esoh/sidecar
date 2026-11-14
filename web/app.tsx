@@ -19,13 +19,15 @@ import {
 } from './conversations.tsx';
 import { useQuestionDrafts, forgetDocument, type QuestionDraft, type QuestionDrafts } from './useQuestionDrafts.ts';
 import { useWatchedFiles } from './useWatchedFiles.ts';
-import { matchQuote, quoteIssue, quoteRange, selectionText, selectionSentence, excludedSelection } from './selection.ts';
+import { freshQuote, locateQuote, quoteIssue, selectionText, sourceQuote, excludedSelection } from './selection.ts';
+import { quoteSourceRange, rangeToSource, sourceToRanges } from './source-dom.ts';
 import { revealRange } from './reveal-target.ts';
 import { MarkdownDocument, WorkspaceLinks, type OpenWorkspaceLink } from './MarkdownDocument.tsx';
 import { resolveWorkspaceLink, splitLineSuffix, fileLineRange, pageLinkTarget, type FileLineRange } from './links.ts';
 import { setDocPreviewFetcher } from '@plannotator/ui/components/InlineMarkdown';
 import { DocumentLibrary } from './DocumentLibrary.tsx';
-import { SettingsProvider, TextSettings } from './TextSettings.tsx';
+import { SettingsProvider } from './TextSettings.tsx';
+import { AppMenu } from './AppMenu.tsx';
 import { PinnedWindows, ZoomControls, changesWindowId } from './PinnedWindows.tsx';
 import { conversationShortcut, isConversationShortcut, isFrameShortcut } from './shortcuts.ts';
 import { DocumentHeader } from './DocumentHeader.tsx';
@@ -33,20 +35,22 @@ import { OriginalDocument } from './OriginalDocument.tsx';
 import { FilesPanel } from './FilesPanel.tsx';
 import { useComparison, type WorkspaceFileChange } from './useComparison.ts';
 import { isAnnotatableDocPath } from '@plannotator/core/annotatable';
-import { RenderedTextProbe, type OpenFile } from './FilePreview.tsx';
+import type { OpenFile } from './FilePreview.tsx';
 import { pageTextSelector, type FileQuote } from '../src/quote.ts';
 import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
 import { ResizeHandle } from '@plannotator/ui/components/ResizeHandle';
 import { onCodeHighlightSwap } from '@plannotator/ui/utils/codeHighlight';
 import { usePosition } from './usePosition.ts';
 import { messagePreview } from './message-copy.ts';
+import { locateFileQuote } from './edit-quotes.ts';
+import { MarkdownEditMode, type EditModeHandle } from './MarkdownEditMode.tsx';
 import { ProposalReviewContext, useProposalReview } from './ProposalReview.tsx';
 
 type Content = { html: string; markdown: string; version: string };
 const insideRoot = (path: string, root: string) => path.startsWith(`${root.replace(/\/$/, '')}/`);
 
 function keepsAttachment(target: EventTarget | null) {
-  return target instanceof Element && !!target.closest('.sidebar .composer, .sidebar-header, .thread-row, .sidebar-toggle, .files-edge-toggle, .files-panel, .file-preview, .html-topbar, .html-canvas');
+  return target instanceof Element && !!target.closest('.markdown-edit-leave, .sidebar .composer, .sidebar-header, .thread-row, .sidebar-toggle, .files-edge-toggle, .files-panel, .file-preview, .html-topbar, .html-canvas');
 }
 
 function App() {
@@ -122,6 +126,7 @@ function App() {
     else if (current && !closedDocument) document.title = `${prefix}${current.title}`;
   }, [current?.title, unreadCount, closedDocument]);
   const drafts = useQuestionDrafts(documentId);
+  const [composerRevision, setComposerRevision] = useState(0);
   const floatingDrafts = useMemo<QuestionDrafts>(() => ({
     get: id => passageDrafts.current.get(id),
     set: (id, draft) => { passageDrafts.current.set(id, draft); },
@@ -206,7 +211,6 @@ function App() {
     ...(htmlView && htmlRoot ? [{ key: 'page', url: `/api/files/html?${fileQuery({ ...htmlView, root: htmlRoot })}`, method: 'HEAD' as const }] : []),
   ], [files, documentId, current?.workspace, htmlView?.path, htmlView?.root, htmlRoot]);
   const watched = useWatchedFiles(watchedSources);
-  const [renderedText, setRenderedText] = useState<Record<string, { version: string; text: string }>>({});
   const comparison = useComparison(documentId, current?.workspace, current?.baseBranch, !!current?.workspace && (isFilesShown || !!changesScope || files.length > 0));
   const fileThread = useRef<Promise<Thread> | null>(null);
   const fileSelectionVisit = useRef(0);
@@ -307,6 +311,7 @@ function App() {
     highlighter.current?.remove('selection');
     painted.current.delete('selection');
     setSelection(undefined);
+    editorQuote.current = null;
     setHtmlPending(null);
     // The HTML page's own selection goes too, as a captured Markdown passage leaves no native selection.
     frameRef.current?.contentWindow?.postMessage({ sidecar: 'html-bridge', type: 'unselect' }, '*');
@@ -354,6 +359,118 @@ function App() {
   }, [files, changesScope, restoredView, documentId, viewScope]);
   // The main document's reading position, applied once its content has laid out (a few frames at most), then saved on scroll.
   const canvas = useRef<HTMLElement>(null), scrollRestored = useRef('');
+  const [editAnchor, setEditAnchor] = useState<number | null>(null), editMode = useRef<EditModeHandle | null>(null), returnLine = useRef<number | null>(null);
+  const isEditing = editAnchor !== null, editorQuote = useRef<Quote | null>(null);
+  const [unsavedText, setUnsavedText] = useState('');
+  const [editStatus, setEditStatus] = useState({ dirty: false, saving: false, formatting: false });
+  const hasCarriageReturn = content.markdown.includes('\r');
+  const startEditing = () => {
+    const top = canvas.current?.getBoundingClientRect().top ?? 0;
+    const first = [...document.querySelectorAll<HTMLElement>('#document [data-source-line]')].find(node => {
+      const rect = node.firstElementChild?.getBoundingClientRect();
+      return rect && rect.height > 0 && rect.top >= top;
+    });
+    const line = Number(first?.dataset.sourceLine) || 1;
+    setEditAnchor(content.markdown.split('\n').slice(0, line - 1).reduce((offset, text) => offset + text.length + 1, 0));
+  };
+  // Both editor panes offer the same quick menu as the reading view, with a Markdown source quote.
+  const sameQuote = (a: Quote, b: Quote) => a.start === b.start && a.end === b.end && a.version === b.version && a.exact === b.exact;
+  const selectInEditor = (picked: { quote: Quote; rect: DOMRect } | null) => {
+    const hasText = composing && (sendingComment.current || !!passageDrafts.current.get(draftKey)?.text.trim());
+    if (hasText) return false;
+    if (!picked) { if (editorQuote.current) { if (composing) passageDrafts.current.delete(draftKey); clearSelection(); } return; }
+    if (composing) passageDrafts.current.delete(draftKey);
+    fileSelectionVisit.current++;
+    // Made against unsaved text: it carries no version (''), so it is found again in the saved text at send, even after a reload.
+    const quote = editMode.current?.isDirty() ? { ...picked.quote, version: '' } : picked.quote;
+    editorQuote.current = quote; lastRect.current = picked.rect;
+    setSelection(quote);
+    if (activeThreadId && isSidebarShown) {
+      const { messageQuote, fileQuote, ...rest } = drafts.get(activeThreadId) ?? { text: '', retry: null };
+      drafts.set(activeThreadId, { ...rest, quote });
+    }
+    setComposing(false);
+    setChoices(null);
+  };
+  // Painted in both panes; a click opens the thread they belong to.
+  const editQuotes = selectedMessages.filter(({ selection }) => selection.isVisible).map(({ selection }) => ({ id: selection.id, quote: selection.quote }));
+  // While editing, dirty text is saved first and the editor's own quote is rebuilt from its tracked range. Any other quote
+  // made against unsaved text (an older draft) is found again by its text in the saved source, or the send is blocked.
+  // A quote made against a saved version stays valid against that version, so it is sent as it is.
+  const saveFirst = { beforeSend: async (quote?: Quote) => {
+    const handle = isEditing ? editMode.current : null;
+    let checked = quote;
+    if (handle) {
+      if (!await handle.save()) return false;
+      if (quote && editorQuote.current && sameQuote(quote, editorQuote.current)) {
+        checked = handle.pendingQuote() ?? undefined;
+        if (!checked) throw new Error('Passage changed');
+      }
+    }
+    // The saved text, not what was typed while the save ran: the quote is restamped against what the server holds.
+    const source = handle ? handle.source() : { text: content.markdown, version: content.version };
+    // A quote of its own saved version stays valid for it; an unversioned one, or an older draft whose offsets no longer
+    // fit the current source (a v5-era draft), is found again by its text.
+    if (!checked) return true;
+    if (checked === quote && checked.version !== '' && (checked.version !== source.version || source.text.slice(checked.start, checked.end) === checked.exact)) return true;
+    if (!source.version) throw new Error('Passage changed');
+    const fresh = freshQuote(checked, source.text, source.version);
+    if (typeof fresh === 'string') throw new Error(fresh);
+    return fresh === quote ? true : { quote: fresh };
+  }, sendLabel: isEditing && editStatus.dirty ? 'Save & send' : undefined };
+  // Only while editing: asks to save or discard, and says whether the editor was left. View mode never waits.
+  const leaveEditingFirst = () => editAnchor === null || !editMode.current ? Promise.resolve(true) : editMode.current.requestExit();
+  // Leaving edit mode: a pending editor quote (in the toolbar, the floating composer or any thread's draft) was made against the
+  // editor's text. After Save it is restamped with the saved version; after Discard, or if its text is gone, it is dropped.
+  const afterLeaving = useRef<(line: number, stamped: Quote | null) => void>(() => {});
+  afterLeaving.current = (line, stamped) => {
+    returnLine.current = line; setEditAnchor(null);
+    const old = editorQuote.current;
+    editorQuote.current = null;
+    if (!old) return;
+    const same = (quote?: Quote) => !!quote && sameQuote(quote, old);
+    for (const id of new Set([...threads.map(thread => thread.id), ...(activeThreadId ? [activeThreadId] : [])])) {
+      const draft = drafts.get(id);
+      if (!draft || !same(draft.quote)) continue;
+      const { quote: _, ...rest } = draft;
+      drafts.set(id, stamped ? { ...rest, quote: stamped } : rest);
+    }
+    if (!same(selection)) return;
+    if (!stamped) {
+      // The quote is gone but the words typed for it are not: they move to the conversation's draft.
+      const typed = composing ? passageDrafts.current.get(draftKey)?.text : '';
+      clearSelection();
+      if (typed?.trim()) void keepTyped(typed);
+      return;
+    }
+    const floating = passageDrafts.current.get(draftKey);
+    passageDrafts.current.delete(draftKey);
+    if (floating) passageDrafts.current.set(JSON.stringify(stamped), { ...floating, quote: stamped });
+    setSelection(stamped);
+  };
+  async function keepTyped(typed: string) {
+    try {
+      let target = activeThreadId;
+      if (!target) {
+        fileThread.current ??= api<Thread>('/api/threads', { id: randomId(), documentId, ...(threadFile ? { file: threadFile } : {}) });
+        const thread = await fileThread.current;
+        setState(previous => previous ? { ...previous, threads: { ...previous.threads, [thread.id]: thread } } : previous);
+        target = thread.id;
+      }
+      const draft = drafts.get(target) ?? { text: '', retry: null };
+      drafts.set(target, { ...draft, text: draft.text ? `${draft.text}\n${typed}` : typed });
+      setComposerRevision(revision => revision + 1);
+      openThread(target);
+    } catch (reason) { setError(errorText(reason)); }
+  }
+  const leaveEditing = useCallback((line: number, stamped: Quote | null) => afterLeaving.current(line, stamped), []);
+  useEffect(() => {
+    if (editAnchor !== null || returnLine.current === null) return;
+    const line = returnLine.current; returnLine.current = null;
+    const wrappers = [...document.querySelectorAll<HTMLElement>('#document [data-source-line]')]
+      .filter(node => Number(node.dataset.sourceLine) <= line && (node.firstElementChild?.getClientRects().length ?? 0) > 0);
+    wrappers.at(-1)?.firstElementChild?.scrollIntoView({ block: 'start' });
+  }, [editAnchor]);
   const scrollKey = documentId ? viewKey(documentId, 'scroll') : '';
   const isReading = hasState && !htmlView && !closedDocument;
   useEffect(() => {
@@ -456,6 +573,8 @@ function App() {
   const documentClosed = useCallback((result: ClosedDocument) => {
     const storageError = forgetDocument(result.documentId, result.threadIds);
     if (result.documentId === documentId) {
+      // Unmounting the editor drops its unsaved text and its unload warning, so keep the text on screen.
+      setUnsavedText(editMode.current?.isDirty() ? editMode.current.getText() : '');
       passageDrafts.current.clear();
       setClosedDocument({ ...result, cleanupError: result.cleanupError ?? storageError });
       setContent({ html: '', markdown: '', version: '' });
@@ -560,8 +679,8 @@ function App() {
     };
   }, [requestedDocument, documentClosed, closedDocument]);
 
+  // Late-rendering content (HTML blocks, diagrams, images) changes the DOM text after layout; repaint when it does.
   const [documentText, setDocumentText] = useState('');
-  const [highlightRevision, setHighlightRevision] = useState(0);
   useLayoutEffect(() => {
     const root = article.current;
     if (!root) return;
@@ -570,7 +689,8 @@ function App() {
     const observer = new MutationObserver(refresh);
     observer.observe(root, { subtree: true, childList: true, characterData: true });
     return () => observer.disconnect();
-  }, [content.version]);
+  }, [content.version, isEditing]);
+  const [highlightRevision, setHighlightRevision] = useState(0);
   useLayoutEffect(
     () =>
       onCodeHighlightSwap((element) => {
@@ -599,7 +719,7 @@ function App() {
       painter.dispose();
       highlighter.current = null;
     };
-  }, [content.version]);
+  }, [content.version, isEditing]);
   useLayoutEffect(() => {
     const root = article.current,
       painter = highlighter.current;
@@ -620,10 +740,11 @@ function App() {
       // Exact overlaps leave empty text nodes inside the library's marks. A later
       // partial overlap detaches those nodes while wrapping; normalize only marks.
       for (const mark of painter.getDoms()) mark.normalize();
-      const range = quoteRange(root, target.quote, content.version);
-      if (!range) continue;
+      const match = locateQuote(content.markdown, target.quote, content.version);
+      const ranges = match ? sourceToRanges(root, content.markdown, match.start, match.end) : [];
+      if (!ranges.length) continue;
       paintingId = target.id;
-      painter.fromRange(range);
+      for (const range of ranges) painter.fromRange(range);
       painted.current.set(target.id, JSON.stringify(target.quote));
     }
     releaseId();
@@ -641,12 +762,13 @@ function App() {
         mark.title = 'Open passage thread';
       }
     }
-  }, [content.version, anchors, selection, documentError, highlightRevision, documentText, activeMessageId]);
+  }, [content.version, anchors, selection, documentError, highlightRevision, documentText, activeMessageId, isEditing]);
 
   useEffect(() => {
     const outside = (event: MouseEvent) => {
       if (
         ignoreClick.current || keepsAttachment(event.target) ||
+        (event.target instanceof Element && event.target.closest('.markdown-edit-mode')) ||
         (event.target instanceof Node &&
           (toolbar.current?.contains(event.target) || composer.current?.contains(event.target)))
       )
@@ -747,10 +869,10 @@ function App() {
     if (choices) return highlighter.current?.getDoms(choices.ids[0])[0]?.getBoundingClientRect() ?? choices.rect;
     if (htmlPending) return htmlPending.rect;
     const root = article.current;
-    const range = root && selection && quoteRange(root, selection, content.version);
+    const range = root && selection && quoteSourceRange(root, content.markdown, selection, content.version);
     if (range) lastRect.current = range.getBoundingClientRect();
     return lastRect.current;
-  }, [selection, htmlPending, choices, content.version]);
+  }, [selection, htmlPending, choices, content.version, content.markdown]);
   usePosition(composer, composing ? anchor : null, 384);
   usePosition(toolbar, ((selection || htmlPending) && !composing) || choices ? anchor : null, choices ? 300 : 76, !choices);
 
@@ -764,19 +886,11 @@ function App() {
     if ([range.startContainer, range.endContainer].some((node) => node.parentElement?.closest(excludedSelection)))
       return;
     revealRange(range);
-    const before = document.createRange();
-    before.selectNodeContents(root);
-    before.setEnd(range.startContainer, range.startOffset);
-    const start = selectionText(before.cloneContents()).length;
-    before.setEnd(range.endContainer, range.endOffset);
-    const end = selectionText(before.cloneContents()).length;
-    const text = selectionText(root),
-      exact = text.slice(start, end);
-    if (!exact.trim()) {
+    const span = rangeToSource(root, content.markdown, range);
+    if (!span) {
       clearSelection();
       return;
     }
-    const sentence = selectionSentence(range);
     lastRect.current = range.getBoundingClientRect();
     // As in web-highlighter's pointer-end handler, the painted mark owns the
     // preview; a native selection left here makes the next drag move text.
@@ -785,16 +899,7 @@ function App() {
     requestAnimationFrame(() => {
       ignoreClick.current = false;
     });
-    const quote: Quote = {
-      exact,
-      prefix: text.slice(Math.max(0, start - 32), start),
-      suffix: text.slice(end, end + 32),
-      start,
-      end,
-      version: content.version,
-      isPositionVerified: true,
-      ...(sentence ? { sentence } : {}),
-    };
+    const quote = sourceQuote(content.markdown, span.start, span.end, content.version);
     fileSelectionVisit.current++;
     setSelection(quote);
     if (activeThreadId && isSidebarShown) {
@@ -832,7 +937,17 @@ function App() {
     }
     return ids.length > 0;
   }
-  const passageIssue = (quote: Quote) => documentError ? 'Document unavailable' : quoteIssue(documentText, quote, content.version);
+  // The editor's own selection is of unsaved text until Save & send saves it; it is checked then.
+  // View mode checks the saved source; edit mode the editor's current text (matched by text once it differs from the saved source).
+  const passageIssue = (quote: Quote) => {
+    if (documentError) return 'Document unavailable';
+    if (!content.version) return null;
+    if (isEditing && editStatus.dirty) {
+      if (editorQuote.current && sameQuote(quote, editorQuote.current)) return null;
+      return quoteIssue(editMode.current?.getText() ?? content.markdown, quote);
+    }
+    return quoteIssue(content.markdown, quote, content.version);
+  };
   async function attachToConversation(attachment: { fileQuote: FileQuote } | { quote: Quote }) {
     const visit = ++fileSelectionVisit.current;
     if ('fileQuote' in attachment) clearPendingSelection();
@@ -1005,28 +1120,14 @@ function App() {
     checkRequest.current = { id: checkRequest.current.id + 1, keys: htmlQuotes.map(([key]) => key) };
     postBridge({ type: 'check', id: checkRequest.current.id, items: htmlQuotes.map(([, quote]) => ({ selector: quote.selector, exact: quote.exact, isElement: !!quote.isElement, fingerprint: quote.fingerprint })) });
   }, [isBridgeReady, htmlQuotesJson]);
-  // Docked or collapsed Markdown has no mounted article, so a hidden probe renders just the files whose saved rendered-text quotes need it.
-  const probes = useMemo(() => {
-    const exacts = new Map<string, string[]>();
-    for (const thread of threads) for (const message of thread.messages) for (const quote of [message.fileQuote, ...(message.fileSelections ?? []).map(selection => selection.fileQuote)])
-      if (quote && quote.kind !== 'html' && !quote.startLine) exacts.set(quote.path, [...(exacts.get(quote.path) ?? []), quote.exact]);
-    return files.flatMap(file => {
-      const entry = watched[file.id], data = entry?.data, wanted = exacts.get(`${(file.root ?? current?.workspace ?? '').replace(/\/$/, '')}/${file.path}`);
-      if (file.refusal || file.kind !== 'doc' || data?.renderAs !== 'markdown' || !wanted || renderedText[file.id]?.version === entry.version) return [];
-      return wanted.some(exact => matchQuote(data.text, { exact, prefix: '', suffix: '' } as Quote).status === 'missing') ? [{ id: file.id, version: entry.version, text: data.text }] : [];
-    });
-  }, [threads, files, watched, renderedText, current?.workspace]);
   // null means fine or unknown; a quote is never called changed without evidence.
   const fileQuoteIssue = (quote: FileQuote): string | null => {
     if (quote.kind === 'html') return isBridgeReady && quote.path === htmlAbsolute && htmlChecks[htmlQuoteKey(quote)] === false ? 'Selection changed' : null;
     const file = files.find(file => !file.refusal && `${(file.root ?? current?.workspace ?? '').replace(/\/$/, '')}/${file.path}` === quote.path), entry = file && watched[file.id];
     if (entry?.status === 404) return 'File unavailable';
     if (!file || entry?.data === undefined) return null;
-    const has = (text: string) => matchQuote(text, { exact: quote.exact, prefix: '', suffix: '' } as Quote).status !== 'missing';
-    if (has(entry.data.text)) return null;
-    // A line quote is source text; a rendered-Markdown quote may still be on screen even where the source differs.
-    const shown = renderedText[file.id];
-    return quote.startLine || (shown?.version === entry.version && !has(shown.text)) ? 'Selection changed' : null;
+    // Code and Markdown file quotes are source lines; they hold while their text is still in the file.
+    return locateFileQuote(entry.data.text, quote) ? null : 'Selection changed';
   };
   const togglePicker = (on: boolean) => { setPicking(on); postBridge({ type: 'picker', on }); };
   useEffect(() => {
@@ -1073,7 +1174,8 @@ function App() {
     activeSelectionId: activeMessageId,
     passageIssue,
     fileQuoteIssue,
-    showOriginal: (selectionId: string) => {
+    showOriginal: (selectionId: string, afterLeave = false): boolean | Promise<boolean> => {
+      if (editAnchor !== null && !afterLeave) return leaveEditingFirst().then(left => { if (left) selectionActions.showOriginal(selectionId, true); return left; });
       const entry = selectedMessages.find(({ selection }) => selection.id === selectionId);
       if (entry) setActiveThreadId(entry.thread.id);
       clearSelection();
@@ -1082,16 +1184,19 @@ function App() {
       setPreviewPath(null);
       setActiveMessageId(selectionId);
       if (innerWidth <= 850) setSidebarShown(false);
+      return true;
     },
-    showPassage: (selection: import('../src/store.ts').MessageSelection) => {
+    showPassage: (selection: import('../src/store.ts').MessageSelection): boolean => {
       const entry = selectedMessages.find(item => item.selection.id === selection.id);
       if (entry) setActiveThreadId(entry.thread.id);
       setActiveMessageId(selection.id);
       setOriginalMessageId(null);
       setPreviewPath(null);
-      requestAnimationFrame(() => {
-        const root = article.current, range = root && quoteRange(root, selection.quote, content.version);
-        if (!range) return;
+      // Editing stays editing: scroll the source pane to the quote.
+      if (editAnchor !== null) { editMode.current?.revealQuote(selection.id); if (innerWidth <= 850) setSidebarShown(false); return true; }
+      const reveal = () => {
+        const root = article.current, range = root && quoteSourceRange(root, content.markdown, selection.quote, content.version);
+          if (!range) return;
         revealRange(range);
         const node = range.startContainer.parentElement;
         node?.scrollIntoView({ block: 'center', behavior: 'smooth' });
@@ -1101,7 +1206,9 @@ function App() {
           for (const mark of highlighter.current?.getDoms(selection.id) ?? [])
             mark.animate([{ boxShadow: '0 0 0 5px oklch(0.75 0.18 280 / 0.6)' }, { boxShadow: '0 0 0 0 transparent' }], { duration: 700 });
         }
-      });
+      };
+      requestAnimationFrame(reveal);
+      return true;
     },
   };
   // ?reveal= from another view: open its thread now, reveal once the user turns on Run scripts and the page is ready.
@@ -1121,9 +1228,11 @@ function App() {
   }, [revealId, !!state, !!revealTarget, areScriptsEnabled, isBridgeReady]);
   const proposalReview = useProposalReview({
     documentId, proposals: Object.values(state?.proposals ?? {}).filter(p => p.documentId === documentId),
-    selections: selectedMessages.map(item => item.selection), article, version: content.version,
+    selections: selectedMessages.map(item => item.selection), article, markdown: content.markdown, version: content.version,
     isHistorical: !!originalMessageId || !!previewPath,
-    onShowSelection: selectionActions.showPassage, onShowOriginal: selectionActions.showOriginal,
+    decisionBlocked: editAnchor !== null && editStatus.dirty ? 'Save or discard your edits first' : undefined,
+    // Clicking a reference never switches modes: while editing, the passage is revealed in the source pane.
+    onShowSelection: selection => selectionActions.showPassage(selection), onShowOriginal: selectionActions.showOriginal,
     onReturnToCurrent: () => { setOriginalMessageId(null); setPreviewPath(null); },
   });
   const cancel = () => {
@@ -1144,6 +1253,7 @@ function App() {
       return;
     }
     if (!confirmCloseDocument(current.title)) return;
+    if (editMode.current && !await editMode.current.requestExit()) return;
     setClosing(true);
     try {
       documentClosed(await api<ClosedDocument>(`/api/documents/${documentId}`, undefined, 'DELETE'));
@@ -1158,6 +1268,10 @@ function App() {
           <h1>Document closed</h1>
           <p>Your Markdown file is unchanged.</p>
           {closedDocument.cleanupError && <p role="alert">{closedDocument.cleanupError}</p>}
+          {unsavedText && <>
+            <p>This document was closed while you had unsaved edits. Copy them below.</p>
+            <textarea aria-label="Unsaved edits" readOnly rows={16} value={unsavedText} style={{ width: '100%' }} />
+          </>}
           <a href={libraryPath()}>Browse all documents</a>
         </div>
       </main>
@@ -1168,7 +1282,7 @@ function App() {
       <ProposalReviewContext.Provider value={proposalReview.context}>
       {proposalReview.popover}
       <div className={`viewer${htmlView ? ' html-view' : ''}`} ref={viewer} data-chat-open={isSidebarShown}>
-      <header className={`topbar${htmlView ? ' html-topbar' : ''}`}>
+      <header className={`topbar${htmlView ? ' html-topbar' : ''}`} data-editing={isEditing && !htmlView || undefined}>
         {htmlView ? <HtmlControls file={htmlView} isDocument={!urlHtmlView} areScriptsEnabled={areScriptsEnabled} onScripts={changeScripts} isReady={areScriptsEnabled && isBridgeReady}
           isPicking={isPicking} onPick={() => togglePicker(!isPicking)} zoom={htmlZoom} onZoom={changeHtmlZoom} /> : <>
         <div className="brand">
@@ -1182,8 +1296,10 @@ function App() {
             className="document-picker"
             aria-label="Documents"
             value={documentId}
-            onChange={(event) => {
-              location.href = viewerPath(`/?document=${event.target.value}`);
+            onChange={async (event) => {
+              const target = event.target.value;
+              if (editMode.current && !await editMode.current.requestExit()) return;
+              location.href = viewerPath(`/?document=${target}`);
             }}
           >
             {Object.values(state?.documents ?? {}).map((doc) => (
@@ -1195,10 +1311,10 @@ function App() {
         )}
         </>}
         <AgentStatus state={state} connected={connected} />
-        <TextSettings version={state?.appVersion}>
-          {/* Also here because a phone header has no room for the page's zoom controls. */}
-          {htmlView && <div className="text-settings-heading brightness-heading"><span>HTML page zoom</span><ZoomControls zoom={htmlZoom} onZoom={changeHtmlZoom} /></div>}
-        </TextSettings>
+        {/* The page's zoom is also in Settings because a phone header has no room for its controls. */}
+        <AppMenu version={state?.appVersion} format={isEditing && !htmlView ? { busy: editStatus.formatting, disabledReason: hasCarriageReturn ? 'This file uses Windows (CRLF) line endings, which Prettier would change.' : undefined, run: async () => { await editMode.current?.format(); } } : null}>
+          {htmlView && <ZoomControls zoom={htmlZoom} onZoom={changeHtmlZoom} />}
+        </AppMenu>
         <button
           className="sidebar-toggle conversation-toggle"
           aria-label={isSidebarShown ? 'Hide conversations' : 'Show conversations'}
@@ -1212,6 +1328,14 @@ function App() {
           <Icon name="panel" />
           <span>{isSidebarShown ? 'Document' : 'Chat'}</span>
         </button>
+        {current && !htmlView && (editAnchor === null
+          ? documentError ? null : <button className="sidebar-toggle edit-action" disabled={hasCarriageReturn || !content.version} onClick={startEditing}
+              title={hasCarriageReturn ? 'This file uses Windows (CRLF) line endings, which the editor would change. Edit it in your own editor.' : 'Edit this document'}>Edit</button>
+          : <>
+              {editStatus.dirty && <span className="markdown-edit-dirty">● Unsaved</span>}
+              <button className="sidebar-toggle edit-action" disabled={!editStatus.dirty || editStatus.saving} onClick={() => { void editMode.current?.save(); }}>Save</button>
+              <button className="sidebar-toggle edit-action" onClick={() => { void editMode.current?.requestExit(); }}>Done</button>
+            </>)}
         {current && !htmlView && (
           <button className="sidebar-toggle" aria-label="Close document" title="Close document" disabled={isClosing} onClick={() => { void closeCurrentDocument(); }}>
             <Icon name="close" />
@@ -1246,7 +1370,7 @@ function App() {
           </>
         )}
         <div className="document-workspace" id="document-workspace" ref={workspace}>
-        <main ref={canvas} className={`canvas${htmlView ? ' html-canvas' : ''}`} style={htmlView ? { '--html-zoom': htmlZoom / 100 } as React.CSSProperties : undefined}>
+        <main ref={canvas} className={`canvas${htmlView ? ' html-canvas' : ''}${isEditing && !htmlView ? ' editing' : ''}`} style={htmlView ? { '--html-zoom': htmlZoom / 100 } as React.CSSProperties : undefined}>
           {htmlView ? <>
             {htmlNotice && <p className="html-notice" role="status">{htmlNotice}</p>}
             {pageDown ? <p role="alert">This HTML file is unavailable (HTTP {pageStatus}). It reloads when the file is back.</p>
@@ -1268,6 +1392,10 @@ function App() {
                 {documentError || 'Open a document from your agent.'}
               </p>
             )}
+            {editAnchor !== null && current ? (
+              <MarkdownEditMode documentId={documentId} linkBase={current.path.replace(/\/[^/]*$/, '')} markdown={content.markdown} version={content.version} diskMarkdown={content.markdown} diskVersion={content.version}
+                anchor={editAnchor} handleRef={editMode} quotes={editQuotes} onSelect={selectInEditor} onOpenQuote={openMessage} onExit={leaveEditing} onError={setError} onStatus={setEditStatus} />
+            ) : (
             <article
               className="document-card w-full bg-card rounded-xl p-5 md:p-8 lg:p-10 xl:p-12 shadow-xl border border-border/50"
               id="document"
@@ -1297,12 +1425,12 @@ function App() {
               }}
             >
               {current && !documentError && <DocumentHeader key={documentId} repoInfo={current.repoInfo} markdown={content.markdown} onError={setError} />}
-              <MarkdownDocument markdown={content.markdown} documentId={documentId} linkBase={current?.path.replace(/\/[^/]*$/, '')} canCollapseHeadings />
+              <MarkdownDocument markdown={content.markdown} documentId={documentId} linkBase={current?.path.replace(/\/[^/]*$/, '')} canCollapseHeadings sourceLines />
             </article>
+            )}
           </div>}
         </main>
-        {probes.map(probe => <RenderedTextProbe key={`${probe.id}:${probe.version}`} text={probe.text} onText={text => setRenderedText(previous => previous[probe.id]?.version === probe.version && previous[probe.id].text === text ? previous : { ...previous, [probe.id]: { version: probe.version, text } })} />)}
-        <PinnedWindows key={documentId} viewScope={viewScope} isRestored={restoredView === documentId} watched={watched} onRenderedText={(id, version, text) => setRenderedText(previous => previous[id]?.version === version && previous[id].text === text ? previous : { ...previous, [id]: { version, text } })} workspace={workspace} threads={threads} files={files} onSetLineRangeVisible={(id, visible) => setFiles(previous => previous.map(file => file.id === id ? { ...file, isLineRangeVisible: visible } : file))} onSetFileScripts={(id, enabled) => setFiles(previous => previous.map(file => file.id === id ? { ...file, areScriptsEnabled: enabled } : file))} root={current?.workspace} documentId={documentId} comparison={comparison} changesScope={changesScope} onCloseChanges={() => setChangesScope(null)} onOpenChange={openChange} onQuoteFile={fileQuote => attachToConversation({ fileQuote })} onRevealFile={revealFile} openRequests={openPins} onOpened={ids => setOpenPins(previous => previous.filter(id => !ids.includes(id)))} onCloseFile={id => {
+        <PinnedWindows key={documentId} viewScope={viewScope} isRestored={restoredView === documentId} watched={watched} workspace={workspace} threads={threads} files={files} onSetLineRangeVisible={(id, visible) => setFiles(previous => previous.map(file => file.id === id ? { ...file, isLineRangeVisible: visible } : file))} onSetFileScripts={(id, enabled) => setFiles(previous => previous.map(file => file.id === id ? { ...file, areScriptsEnabled: enabled } : file))} root={current?.workspace} documentId={documentId} comparison={comparison} changesScope={changesScope} onCloseChanges={() => setChangesScope(null)} onOpenChange={openChange} onQuoteFile={fileQuote => attachToConversation({ fileQuote })} onRevealFile={revealFile} openRequests={openPins} onOpened={ids => setOpenPins(previous => previous.filter(id => !ids.includes(id)))} onCloseFile={id => {
           setFiles(previous => previous.filter(file => file.id !== id));
           setPreviewPath(previous => `file:${previous}` === id ? null : previous);
         }} {...selectionActions} onGoToMessage={goToMessage} />
@@ -1348,6 +1476,8 @@ function App() {
           onGoToMessage={goToMessage}
           messageJump={messageJump}
           threadFile={threadFile}
+          composerRevision={composerRevision}
+          {...saveFirst}
         />
       </div>
       </div>
@@ -1410,6 +1540,7 @@ function App() {
               threadFile={htmlPending ? threadFile : undefined}
               quoteIssue={selection ? passageIssue(selection) : null}
               disabled={!current}
+              {...saveFirst}
               floating
               onCancel={cancel}
               onSent={sent}

@@ -17,5 +17,8 @@
     "src/**/*.ts",
     "test/**/*.ts",
     "playwright.config.ts"
+  ],
+  "exclude": [
+    "test/source-map-conformance.test.ts"
   ]
 }

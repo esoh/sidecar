@@ -24,14 +24,14 @@ export async function prepareFileWrite(source: SourceFile, markdown: string): Pr
 
 // No await between the final identity/content check and rename. This bounds the
 // external-writer race; the filesystem does not provide cross-process CAS.
-export function publishFileWrite(write: PreparedFileWrite): void {
+export function publishFileWrite(write: PreparedFileWrite, conflictMessage = 'The document changed before this proposal could be applied. Review it again.', pathMessage = 'The backing path changed; no proposal was applied'): void {
   const { source } = write;
-  if (realpathSync(source.path) !== source.path) throw new DomainError('The backing path changed; no proposal was applied', 409);
+  if (realpathSync(source.path) !== source.path) throw new DomainError(pathMessage, 409);
   const file = openSync(source.path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const identity = fstatSync(file);
     if (!identity.isFile() || identity.dev !== source.identity.dev || identity.ino !== source.identity.ino || identity.mode !== source.identity.mode ||
-      createHash('sha256').update(readFileSync(file)).digest('hex') !== write.beforeVersion) throw new DomainError('The document changed before this proposal could be applied. Review it again.', 409);
+      createHash('sha256').update(readFileSync(file)).digest('hex') !== write.beforeVersion) throw new DomainError(conflictMessage, 409);
   } finally { closeSync(file); }
   renameSync(write.temporary, source.path);
 }

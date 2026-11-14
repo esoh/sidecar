@@ -52,6 +52,14 @@ const paths = {
   file: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6',
   refresh: 'M20 12a8 8 0 1 1-2.3-5.7L20 8M20 3v5h-5',
   diff: 'M12 4v8M8 8h8M8 18h8',
+  format: 'M4 6h16M4 12h10M4 18h13',
+  library: 'M4 5h6v14H4zM14 5h6v14h-6z',
+  reading: 'M4 5h7a3 3 0 0 1 3 3v11a2 2 0 0 0-2-2H4zM20 5h-6',
+  editor: 'M4 20h4L19 9l-4-4L4 16z',
+  files: 'M3 7h6l2 2h10v10H3z',
+  access: 'M9 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM11 18h2',
+  about: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM12 11v5M12 8h.01',
+  chevronRight: 'm9 6 6 6-6 6',
   panel: 'M14 3v18M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z',
 };
 export function Icon({ name }: { name: keyof typeof paths }) {
@@ -78,6 +86,8 @@ export function QuestionForm({
   onSendingChange,
   onRemoveSelection,
   agentControl,
+  beforeSend,
+  sendLabel,
 }: {
   documentId: string;
   threadId?: string;
@@ -96,6 +106,9 @@ export function QuestionForm({
   onSendingChange?: (sending: boolean) => void;
   onRemoveSelection?: () => void;
   agentControl?: ViewerState['agentControl'];
+  /** Runs before a send; resolving false aborts it and keeps the draft. */
+  beforeSend?: (quote?: Quote) => Promise<boolean | { quote: Quote }>;
+  sendLabel?: string;
 }) {
   const [initialDraft] = useState(() => drafts.get(draftKey));
   const [text, setText] = useState(initialDraft?.text ?? ''),
@@ -131,15 +144,25 @@ export function QuestionForm({
         event.preventDefault();
         if (disabled || sending.current || !text.trim() || !documentId) return;
         const body = { documentId, text, ...(threadId ? { threadId } : threadFile ? { file: threadFile } : {}), ...attachment };
-        const signature = JSON.stringify(body);
-        if (retry.current?.signature !== signature) retry.current = { signature, id: randomId() };
-        const submittedDraft = { text, retry: retry.current, ...attachment };
+        let submittedDraft = { text, retry: retry.current, ...attachment };
         updateDraft(submittedDraft, true);
         sending.current = true;
         setBusy(true);
         onSendingChange?.(true);
         try {
-          const request = await api<RequestRecord>('/api/questions', { ...body, clientMessageId: retry.current.id });
+          let sent: Record<string, unknown> = body;
+          const prepared = beforeSend ? await beforeSend(quote) : true;
+          if (!prepared) return;
+          // A restamped quote is part of the request; the same body keeps its id, so a retry cannot duplicate the message.
+          if (typeof prepared === 'object') sent = { ...body, quote: prepared.quote };
+          const signature = JSON.stringify(sent);
+          if (retry.current?.signature !== signature) retry.current = { signature, id: randomId() };
+          // A newer draft written while beforeSend was pending (another quote, more text) is kept.
+          if (drafts.get(draftKey) === submittedDraft) {
+            submittedDraft = { text, retry: retry.current, ...attachment };
+            updateDraft(submittedDraft, true);
+          }
+          const request = await api<RequestRecord>('/api/questions', { ...sent, clientMessageId: retry.current.id });
           // A remounted composer or a newly attached quote may hold a newer draft.
           if (drafts.get(draftKey) === submittedDraft) {
             setText(''); retry.current = null;
@@ -222,10 +245,10 @@ export function QuestionForm({
             finally { setStopping(false); }
           }}><Icon name="stop" /></button> : <button
             className="send-button"
-            aria-label={floating ? 'Send comment' : 'Send message'}
+            aria-label={sendLabel ?? (floating ? 'Send comment' : 'Send message')}
             disabled={disabled || busy || !text.trim()}
           >
-            {floating ? 'Send' : <Icon name="send" />}
+            {sendLabel ?? (floating ? 'Send' : <Icon name="send" />)}
           </button>}
         </div>
       </div>
@@ -415,6 +438,9 @@ export function ConversationSidebar({
   onOpenFileQuote,
   onUnreadChange,
   threadFile,
+  beforeSend,
+  sendLabel,
+  composerRevision = 0,
 }: {
   documentId: string;
   threads: Thread[];
@@ -443,6 +469,10 @@ export function ConversationSidebar({
   onOpenFileQuote: (quote: FileQuote, revealId?: string) => void;
   onUnreadChange: (count: number) => void;
   threadFile?: string;
+  beforeSend?: (quote?: Quote) => Promise<boolean | { quote: Quote }>;
+  sendLabel?: string;
+  /** Bumped when a draft's text was written from outside the composer, so it is read again. */
+  composerRevision?: number;
 }) {
   const [filter, setFilter] = useState('unresolved'),
     [search, setSearch] = useState(''),
@@ -797,7 +827,7 @@ export function ConversationSidebar({
             </ol>
           </section>}
           <QuestionForm
-            key={active.id}
+            key={`${active.id}:${composerRevision}`}
             documentId={documentId}
             threadId={active.id}
             drafts={drafts}
@@ -806,6 +836,8 @@ export function ConversationSidebar({
             quote={drafts.get(active.id)?.quote}
             messageQuote={drafts.get(active.id)?.messageQuote}
             fileQuote={drafts.get(active.id)?.fileQuote}
+            beforeSend={beforeSend}
+            sendLabel={sendLabel}
             onRemoveSelection={onRemoveSelection}
             disabled={isLeaving}
             onSent={(request) => {

@@ -10,7 +10,7 @@ import { forgetDocument } from './useQuestionDrafts.ts';
 import { Icon, age } from './conversations.tsx';
 import { AgentSession } from './AgentSession.tsx';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
-import { TextSettings } from './TextSettings.tsx';
+import { AppMenu } from './AppMenu.tsx';
 import { isHtmlPath } from './HtmlFile.tsx';
 
 type Preview = { markdown: string; title: string };
@@ -92,7 +92,7 @@ export function DocumentLibrary() {
       <header className="topbar">
         <a className="brand" href={libraryPath()}><Icon name="logo" />Sidecar</a>
         {session && <AgentSession owner={session.owner} />}
-        <div className="library-actions"><button disabled={loading || !!closing} onClick={() => { void refresh(); }}>Refresh</button><TextSettings /></div>
+        <div className="library-actions"><button disabled={loading || !!closing} onClick={() => { void refresh(); }}>Refresh</button><AppMenu library /></div>
       </header>
       <main className="canvas library-canvas">
         <div className="reading-width">

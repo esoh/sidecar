@@ -9,7 +9,7 @@ test('one same-thread batch preserves per-message context and completes once wit
   const first = await post({ documentId: doc.id, text: 'Explain this', clientMessageId: 'first' });
   const other = await post({ documentId: doc.id, text: 'Separate thread', clientMessageId: 'other' });
   const otherDocument = await post({ documentId: otherDoc.id, text: 'Other document', clientMessageId: 'other-doc' });
-  const quote = { exact: 'world', prefix: 'Hello ', suffix: '.', start: 6, end: 11, version: 'saved', sentence: 'Hello world.' };
+  const quote = { exact: 'world', prefix: 'Hello ', suffix: '.', start: 6, end: 11, version: 'saved' };
   const second = await post({ documentId: doc.id, threadId: first.threadId, text: 'Especially this word', quote, clientMessageId: 'second' });
   const before = await (await f.view('/api/state')).json();
   const messageQuote = { threadId: first.threadId, messageId: before.threads[first.threadId].messages[0].id, exact: 'Explain this' };
@@ -17,7 +17,7 @@ test('one same-thread batch preserves per-message context and completes once wit
   const prepared = await (await f.agent(`/agent/requests/${first.id}/prepare`, {})).json();
   assert.deepEqual(prepared.messages, [
     { requestId: first.id, text: 'Explain this' },
-    { requestId: second.id, text: 'Especially this word', quote: { exact: 'world', sentence: 'Hello world.' } },
+    { requestId: second.id, text: 'Especially this word', quote: { exact: 'world' } },
     { requestId: third.id, text: 'And this question', messageQuote },
   ]);
   assert.equal(prepared.text, undefined, 'batch questions appear once');

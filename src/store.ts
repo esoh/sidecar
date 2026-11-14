@@ -25,14 +25,14 @@ export type RequestRecord = {
   covers?: string[]; answeredBy?: string; nativeTurnId?: string;
   handoff?: 'prepared' | 'sending' | 'accepted' | 'uncertain';
 };
-export type State = { version: 5; owner: Owner; documents: Record<string, DocumentRecord>; threads: Record<string, Thread>; requests: Record<string, RequestRecord>; proposals: Record<string, Proposal>; proposalWrites: Record<string, ProposalWrite> };
+export type State = { version: 6; owner: Owner; documents: Record<string, DocumentRecord>; threads: Record<string, Thread>; requests: Record<string, RequestRecord>; proposals: Record<string, Proposal>; proposalWrites: Record<string, ProposalWrite> };
 export type Store = { read(): State; update<T>(change: (draft: State) => T): Promise<T> };
 export type SubmitInput = { documentId: string; threadId?: string; file?: string; text: string; quote?: Quote; messageQuote?: MessageQuote; fileQuote?: FileQuote; clientMessageId: string };
 export type ReplyInput = { requestId: string; documentId: string; threadId: string; text: string; isError?: boolean; metadata?: ReplyMetadata; selectionVersion?: string; proposalTargets?: Array<PreparedProposal | null> };
 export type ClaimResult = { claimStatus: 'claimed' | 'already-claimed' | 'completed' | 'uncertain'; request: RequestRecord };
 
 export class DomainError extends Error {
-  constructor(message: string, public status: number = 400) { super(message); }
+  constructor(message: string, public status: number = 400, public extra: Record<string, unknown> = {}) { super(message); }
 }
 export function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -87,10 +87,40 @@ function records<T extends {id: string}>(v: unknown, check: (v: unknown) => v is
   return isObject(v) && Object.entries(v).every(([key, item]) => check(item) && key === item.id && /^[0-9a-f-]{36}$/i.test(key));
 }
 export function isState(v: unknown): v is State {
-  return isObject(v) && v.version === 5 && isOwner(v.owner) && records(v.documents, isDocument) && records(v.threads, isThread) && records(v.requests, isRequest) && records(v.proposals, isProposal) && records(v.proposalWrites, isProposalWrite);
+  return isObject(v) && v.version === 6 && isOwner(v.owner) && records(v.documents, isDocument) && records(v.threads, isThread) && records(v.requests, isRequest) && records(v.proposals, isProposal) && records(v.proposalWrites, isProposalWrite);
+}
+// v5 anchored Markdown references to rendered text; v6 anchors them to source. Rendered-text anchors cannot be
+// converted, so they are dropped. A selection that still carries a proposal is kept hidden so the proposal stays reviewable.
+export function migrateState(saved: unknown): State {
+  const state = structuredClone(saved) as any;
+  const isMarkdown = (documentId: string) => !!state.documents?.[documentId] && !isHtmlPath(String(state.documents[documentId].path));
+  const proposed = new Set(Object.values<any>(state.proposals ?? {}).map(proposal => proposal.selectionId));
+  const dropFileQuote = (holder: any, documentId: string) => {
+    const quote = holder.fileQuote;
+    if (quote?.kind === 'doc' && (quote.startLine === undefined || quote.path === state.documents?.[documentId]?.path)) delete holder.fileQuote;
+  };
+  for (const thread of Object.values<any>(state.threads ?? {})) {
+    for (const message of thread.messages ?? []) {
+      if (Array.isArray(message.selections)) {
+        message.selections = message.selections.filter((selection: any) => !isMarkdown(thread.documentId) || proposed.has(selection.id)).map((selection: any) => {
+          delete selection.quote?.sentence;
+          return isMarkdown(thread.documentId) ? { ...selection, isVisible: false } : selection;
+        });
+        if (!message.selections.length) delete message.selections;
+      }
+      dropFileQuote(message, thread.documentId);
+    }
+  }
+  for (const request of Object.values<any>(state.requests ?? {})) {
+    if (request.quote && isMarkdown(request.documentId)) delete request.quote; else delete request.quote?.sentence;
+    dropFileQuote(request, request.documentId);
+  }
+  state.version = 6;
+  return state;
 }
 export function readSavedState(value: unknown): State {
-  if (isObject(value) && value.version !== 5) throw new Error('Unsupported Sidecar state version; expected version 5. The existing file was preserved.');
+  if (isObject(value) && value.version === 5) value = migrateState(value);
+  if (isObject(value) && value.version !== 6) throw new Error('Unsupported Sidecar state version; expected version 6. The existing file was preserved.');
   if (!isState(value)) throw new Error('Malformed Sidecar state; the existing file was preserved');
   const state = structuredClone(value);
   const selectionIds = new Set<string>();
@@ -155,7 +185,7 @@ export function setBaseBranch(state: State, documentId: string, baseBranch: stri
 }
 export function createState(owner: Owner): State {
   ownerKey(owner);
-  return { version: 5, owner: structuredClone(owner), documents: {}, threads: {}, requests: {}, proposals: {}, proposalWrites: {} };
+  return { version: 6, owner: structuredClone(owner), documents: {}, threads: {}, requests: {}, proposals: {}, proposalWrites: {} };
 }
 export function registerDocument(state: State, input: {path: string; title?: string; generated: boolean; repoInfo?: RepoInfo; workspace?: string; baseBranch?: string}): DocumentRecord {
   if (!isAbsolute(input.path)) throw new DomainError('Document path must be absolute');
@@ -222,6 +252,7 @@ export function submit(state: State, input: SubmitInput): RequestRecord {
   const document = get(state.documents, input.documentId);
   if (!input.text.trim() || !input.clientMessageId || input.clientMessageId.length > 128) throw new DomainError('A question and message ID are required');
   if (input.quote !== undefined && !isQuote(input.quote)) throw new DomainError('Invalid selection');
+  if (input.quote?.version === '') throw new DomainError('Passage changed');
   if ([input.quote, input.messageQuote, input.fileQuote].filter(value => value !== undefined).length > 1) throw new DomainError('Attach only one selection per message');
   if (input.fileQuote !== undefined) {
     if (!isFileQuote(input.fileQuote)) throw new DomainError('Invalid file quote');
@@ -375,7 +406,7 @@ export function setSelectionVisibility(state: State, threadId: string, isVisible
 export function reanchorSelection(state: State, threadId: string, selectionId: string, expected: Quote, quote: Quote): void {
   const selection = get(state.threads, threadId).messages.flatMap(message => message.selections ?? []).find(selection => selection.id === selectionId);
   if (!selection) throw new DomainError('Selection not found', 404);
-  if (quote.exact !== selection.quote.exact || quote.version !== selection.quote.version || quote.prefix.length > 512 || quote.suffix.length > 512 || quote.isPositionVerified !== true || quote.sentence !== selection.quote.sentence) throw new DomainError('Only the original selection location can be clarified');
+  if (quote.exact !== selection.quote.exact || quote.version !== selection.quote.version || quote.prefix.length > 512 || quote.suffix.length > 512 || quote.isPositionVerified !== true) throw new DomainError('Only the original selection location can be clarified');
   if (isDeepStrictEqual(selection.quote, quote)) return;
   if (!isDeepStrictEqual(selection.quote, expected)) throw new DomainError('This selection was clarified in another view. Reopen it to use the saved location.', 409);
   selection.quote = quote;

@@ -168,23 +168,23 @@ for (const agent of ['codex', 'claude'] as const) test(`${agent} delivers compac
   assert.equal(afterBatch.threads[req.threadId].messages.at(-1).text, 'Because the retry limit is three, then it stops.');
   await post('/agent/replies', { requestId: afterDelivery.id, documentId: doc.id, threadId: req.threadId, text: 'Then it stops retrying.' });
   const exact = 'The widget retries three times.';
-  const quote = { exact, prefix: 'Context\n', suffix: '\n', start: 8, end: 8 + exact.length, version };
+  const quote = { exact, prefix: '# Context\n', suffix: '\n', start: 10, end: 10 + exact.length, version };
   const revised = markdown.replace('three times', 'four times');
   await writeFile(file, revised);
   const passage = await (await post('/api/questions', { documentId: doc.id, text: 'Clarify this?', quote, clientMessageId: 'passage' })).json();
   const selected = await eventCount(4);
   assert.deepEqual(selected, {
     type: 'sidecar.request', ownerKey: key, requestId: passage.id, documentId: doc.id, thread: { id: passage.threadId, lastRequestId: null }, text: 'Clarify this?',
-    quote: { exact }, stream: selected.stream, instruction: 'Follow the Sidecar skill.',
+    quote: { exact, startLine: 2, endLine: 2 }, stream: selected.stream, instruction: 'Follow the Sidecar skill.',
   });
   assert.ok(selected.stream.prefix && selected.stream.suffix);
   assert.equal(JSON.stringify(selected).split(exact).length - 1, 1, 'include a complete selected sentence only once');
   await post('/agent/replies', { requestId: passage.id, documentId: doc.id, threadId: passage.threadId, text: 'That was the previous retry limit.' });
-  const partialQuote = { ...quote, exact: 'three', start: 27, end: 32, sentence: exact };
+  const partialQuote = { ...quote, exact: 'three', start: 29, end: 34 };
   const partial = await (await post('/api/questions', { documentId: doc.id, threadId: passage.threadId, text: 'What does this mean?', quote: partialQuote, clientMessageId: 'partial' })).json();
   const excerpt = await eventCount(5);
   assert.equal(excerpt.requestId, partial.id);
-  assert.deepEqual(excerpt.quote, { exact: 'three', sentence: exact });
+  assert.deepEqual(excerpt.quote, { exact: 'three', startLine: 2, endLine: 2 });
   const full = await (await post(`/agent/requests/${partial.id}/claim`, {})).json();
   assert.equal(full.claimStatus, 'already-claimed', 'optional context retrieval must not take a second claim');
   assert.equal(full.document.path, doc.path);

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { locateQuote, matchQuote, resolveQuote, surroundingSentence } from '../web/selection.ts';
+import { freshQuote, locateQuote, matchQuote, resolveQuote, sourceQuote } from '../web/selection.ts';
 
 test('duplicate agent quotes are ambiguous, not changed, and need explicit disambiguation', () => {
   const text = 'Review\nAuthor Summary\nNew introduction.\nSee Author Summary.';
@@ -50,14 +50,39 @@ test('renderer smart quotes preserve source anchors and DOM offsets without hidi
   assert.equal(locateQuote("admission’s admission's", quote), null);
 });
 
-test('sentence context is mechanical, bounded, and omitted for whole or multi-sentence selections', () => {
-  const text = 'Previous sentence. The widget retries three times. Next sentence.';
-  const start = text.indexOf('three');
-  assert.equal(surroundingSentence(text, start, start + 5), 'The widget retries three times.');
-  const sentenceStart = text.indexOf('The widget');
-  const sentenceEnd = text.indexOf(' Next');
-  assert.equal(surroundingSentence(text, sentenceStart, sentenceEnd), undefined);
-  assert.equal(surroundingSentence(text, sentenceStart, text.length), undefined);
-  assert.equal(surroundingSentence('word ' + 'x'.repeat(600) + '.', 0, 4), undefined);
-  assert.equal(surroundingSentence('Use 😀 twice. Done.', 4, 6), 'Use 😀 twice.');
+test('sourceQuote carries 32 characters of source context that matchQuote finds at the same position', () => {
+  const source = '# Title\n\nHello **world**. ' + 'x'.repeat(40) + '\n';
+  const start = source.indexOf('Hello **wor'), end = start + 'Hello **wor'.length;
+  const quote = sourceQuote(source, start, end, 'v1');
+  assert.equal(quote.exact, 'Hello **wor');
+  assert.equal(quote.prefix, '# Title\n\n');
+  assert.equal(quote.suffix.length, 32);
+  assert.deepEqual(matchQuote(source, quote, 'v1'), { status: 'found', matches: [{ start, end }] });
+});
+
+test('a duplicate passage resolves to the second occurrence through its source context', () => {
+  const source = 'Intro.\n\nSame **line**.\n\nMiddle.\n\nSame **line**.\n';
+  const second = source.lastIndexOf('Same **line**.');
+  const quote = sourceQuote(source, second, second + 'Same **line**.'.length, 'v1');
+  assert.deepEqual(locateQuote(source, quote, 'v1'), { start: second, end: second + 14 });
+  assert.deepEqual(locateQuote(source, { ...quote, isPositionVerified: false }, 'v1'), { start: second, end: second + 14 });
+});
+
+test('freshQuote passes a valid quote through, restamps a stale one and blocks a lost or ambiguous one', () => {
+  const source = '# Title\n\nBody with a marker inside.\n';
+  const valid = sourceQuote(source, source.indexOf('marker'), source.indexOf('marker') + 6, 'v2');
+  assert.equal(freshQuote(valid, source, 'v2'), valid);
+  // Made against unsaved text (typed text before it), stamped with the version before the save.
+  const stale = sourceQuote('Intro.\n\n' + source, 'Intro.\n\n'.length + source.indexOf('marker'), 'Intro.\n\n'.length + source.indexOf('marker') + 6, 'v1');
+  const fresh = freshQuote(stale, 'Intro.\n\n' + source, 'v2') as ReturnType<typeof sourceQuote>;
+  assert.equal(fresh.version, 'v2');
+  assert.equal(('Intro.\n\n' + source).slice(fresh.start, fresh.end), fresh.exact);
+  assert.equal(typeof freshQuote(stale, source, 'v2'), 'string'); // the typed prefix is not in this source: context changed
+  const unsaved = freshQuote({ ...valid, version: '' }, source, 'v3') as ReturnType<typeof sourceQuote>;
+  assert.equal(unsaved.version, 'v3');
+  assert.equal(source.slice(unsaved.start, unsaved.end), 'marker');
+  assert.equal(typeof freshQuote({ ...valid, version: '', start: 0, end: 6, exact: 'marker', prefix: 'zzz' }, 'No match.', 'v3'), 'string');
+  assert.equal(freshQuote(valid, 'Nothing here.', 'v3'), 'Passage changed');
+  const twice = 'a marker and another marker';
+  assert.equal(freshQuote({ ...valid, prefix: '', suffix: '' }, twice, 'v3'), 'Multiple matching passages');
 });

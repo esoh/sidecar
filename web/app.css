@@ -11,6 +11,18 @@
   --border: oklch(0.35 0.02 260);
   --line: oklch(0.35 0.02 260 / 0.55);
   --success: oklch(0.72 0.17 150);
+  --danger: oklch(0.72 0.17 25);
+  /* Darker than the page so the source pane reads as a code editor, not rendered text. */
+  --editor-bg: oklch(0.11 0.015 260);
+  /* Source-pane syntax colours; the viewer has one (dark) theme. */
+  --code-keyword: var(--primary);
+  --code-string: var(--success);
+  --code-number: oklch(0.8 0.14 85);
+  --code-comment: var(--subtle);
+  --code-function: oklch(0.78 0.12 220);
+  --code-type: oklch(0.78 0.14 330);
+  --code-punctuation: oklch(0.8 0.02 260);
+  --code-invalid: oklch(0.75 0.18 25);
   font-family:
     Inter,
     ui-sans-serif,
@@ -529,8 +541,7 @@ body {
 .send-button:hover {
   background: oklch(0.81 0.14 280);
 }
-.sidebar-toggle,
-.settings-toggle {
+.sidebar-toggle {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1096,37 +1107,9 @@ pre code.pn-code[data-keep-layout] {
   padding: 14px;
   font-size: 12px;
 }
-.text-settings-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-weight: 600;
-}
-.text-settings-heading button {
-  padding: 2px 5px;
-  font-size: 11px;
-  font-weight: 400;
-  color: var(--subtle);
-}
-.text-size-control {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 9px;
-  margin-top: 16px;
-}
-.text-size-control output {
-  color: var(--subtle);
-  font-variant-numeric: tabular-nums;
-}
-.text-size-control input {
-  grid-column: 1 / -1;
-  width: 100%;
-  margin: 0;
-  accent-color: var(--primary);
-  cursor: pointer;
-}
 /* Scale the renderer together, including code and math, without resizing app controls. */
-.document-card > .plannotator-content {
+.document-card > .plannotator-content,
+.edit-preview-article > .plannotator-content {
   zoom: var(--sidecar-document-scale, 1);
 }
 .message .plannotator-content {
@@ -1201,11 +1184,8 @@ pre code.pn-code[data-keep-layout] {
 }
 
 .settings-version {
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
   color: var(--subtle);
-  font-size: 11px;
+  font: 12px var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
 }
 
 .library-actions { display: flex; align-items: center; gap: 10px; margin-left: auto; }
@@ -1220,7 +1200,6 @@ pre code.pn-code[data-keep-layout] {
 .library-document > span:first-child { min-width: 0; }
 .library-document small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--subtle); margin-top: 4px; }
 .library-document-meta { flex-shrink: 0; display: flex; flex-direction: column; gap: 4px; text-align: right; }
-.library-menu-link { display: block; padding: 2px 0 12px; margin-bottom: 12px; border-bottom: 1px solid var(--line); text-decoration: none; }
 .agent-session-trigger { padding: 0 !important; color: inherit; font: inherit; }
 .agent-session-popover { padding: 12px; font-size: 12px; max-width: calc(100vw - 16px); }
 .agent-session-popover > span { color: var(--subtle); }
@@ -1252,6 +1231,62 @@ pre code.pn-code[data-keep-layout] {
 .document-tools > div { min-width: 0; }
 .document-tools > div > div { min-width: 0; }
 .document-copy { margin-left: auto; flex-shrink: 0; }
+/* Editing fills the canvas edge to edge: no card, padding or width cap around the panes. */
+.document-workspace > .canvas.editing { display: flex; flex-direction: column; overflow: hidden; scroll-behavior: auto; padding: 0; background: var(--background); }
+.canvas.editing > .reading-width { flex: 1; min-height: 0; width: 100%; max-width: none; margin: 0; display: flex; flex-direction: column; }
+/* The editor fills what the canvas leaves, so it follows the phone viewport (and its keyboard) and never scrolls the page. */
+.markdown-edit-mode { isolation: isolate; display: flex; flex-direction: column; flex: 1; min-height: 0; background: var(--background); overflow: hidden; }
+.edit-panes { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+.markdown-edit-mode[data-narrow] .edit-panes { grid-template-columns: minmax(0, 1fr); }
+.edit-pane { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+/* The pane that is not shown stays laid out under the other, so the two keep scrolling together. */
+.markdown-edit-mode[data-narrow] .edit-pane { grid-area: 1 / 1; }
+.edit-pane[data-hidden] { visibility: hidden; pointer-events: none; }
+.edit-pane + .edit-pane { border-left: 1px solid var(--border); }
+.edit-pane-toggle { display: flex; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.edit-pane-toggle button { border: 1px solid var(--border); background: transparent; color: inherit; border-radius: 6px; padding: 4px 12px; font: inherit; cursor: pointer; }
+.edit-pane-toggle button[aria-pressed="true"] { background: var(--muted); color: var(--primary); }
+.source-editor { flex: 1; min-height: 0; }
+.source-editor { background: var(--editor-bg); }
+/* A small triangle on each pane's left edge; its tip is the line the panes align on. Moved by syncScroll. */
+.sync-marker { position: absolute; z-index: 2; left: 0; top: 0; width: 0; height: 0; border-left: 4px solid var(--primary); border-top: 2.5px solid transparent; border-bottom: 2.5px solid transparent; opacity: 0.2; transition: opacity 0.3s; pointer-events: none; }
+.sync-marker[data-active] { opacity: 0.55; }
+@media (prefers-reduced-motion: reduce) { .sync-marker { transition: none; } }
+.source-editor .cm-editor { height: 100%; background: var(--editor-bg); color: var(--foreground); }
+.source-editor :is(.cm-scroller, .cm-content, .cm-gutters) { background: var(--editor-bg); }
+/* An outline paints above the opaque scroller and gutters; an inset shadow would be hidden beneath them. */
+.source-editor { position: relative; }
+/* The ring is an overlay: CodeMirror's positioned scroller paints over an outline or shadow on .cm-editor. */
+.source-editor:focus-within::after { content: ""; position: absolute; inset: 0; z-index: 3; pointer-events: none; border: 1px solid color-mix(in oklch, var(--primary) 45%, transparent); }
+.source-editor .cm-scroller { overflow: auto; padding-left: 10px; font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: calc(13px * var(--sidecar-editor-scale, 1)); line-height: 1.6; }
+.source-editor .cm-content { padding: 16px 18px; caret-color: var(--foreground); }
+.source-editor .cm-cursor { border-left-color: var(--foreground); }
+.source-editor .cm-selectionBackground, .source-editor .cm-focused .cm-selectionBackground { background: color-mix(in srgb, var(--primary) 30%, transparent) !important; }
+.edit-preview { flex: 1; min-height: 0; overflow: auto; padding: 16px 20px; background: var(--background); }
+.edit-preview-article { outline: none; }
+::highlight(sidecar-quote) { background: color-mix(in srgb, oklch(0.7 0.18 60 / 0.3) var(--sidecar-highlight-intensity, 100%), transparent); }
+.edit-quote-active { outline: 2px solid var(--primary); }
+.topbar .edit-action { width: auto; padding: 0 10px; font-size: 13px; }
+.topbar .markdown-edit-dirty { white-space: nowrap; color: var(--primary); font-size: 12px; }
+/* Phone: Unsaved, Save and Done share the bar with the status dot, Chat, Menu and Close. */
+@media (max-width: 850px) {
+  /* The dot stays (and its status role); only the text label goes, as in the HTML topbar. */
+  .topbar[data-editing] .agent-status > span:last-child { display: none; }
+  .topbar[data-editing] .edit-action { padding: 0 6px; min-width: 0; }
+  .viewer .topbar[data-editing] .sidebar-toggle:not(.edit-action):not(.conversation-toggle) { min-width: 36px; }
+  .topbar[data-editing] .markdown-edit-dirty { font-size: 11px; }
+}
+.markdown-edit-banner { margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--muted); }
+.markdown-edit-banner button, .markdown-edit-leave button { border: 1px solid var(--border); background: transparent; color: inherit; border-radius: 6px; padding: 5px 9px; font: inherit; cursor: pointer; }
+.markdown-edit-banner button:hover, .markdown-edit-leave button:hover { background: var(--muted); }
+.markdown-edit-leave { width: min(360px, calc(100vw - 32px)); margin: auto; padding: 18px 18px 16px; background: var(--popover); color: var(--foreground); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 24px 80px #0008; }
+.markdown-edit-leave::backdrop { background: #0008; }
+.markdown-edit-leave h2 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
+.markdown-edit-leave p { margin: 0 0 16px; font-size: 13px; color: var(--subtle); }
+.markdown-edit-leave-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.markdown-edit-leave button.danger { color: var(--danger); }
+.markdown-edit-leave button.primary { background: var(--primary); color: oklch(0.15 0.02 260); border-color: transparent; font-weight: 600; }
+.markdown-edit-leave button.primary:hover { background: oklch(0.8 0.16 280); }
 @media (min-width: 768px) {
   .document-tools { top: 16px; left: 20px; right: 20px; }
 }
@@ -1260,7 +1295,6 @@ pre code.pn-code[data-keep-layout] {
   #document:has(.document-tools) { padding-top: 52px; }
 }
 
-.brightness-heading { margin-top: 16px; }
 /* Fade glyphs only: preserve syntax colors, media, surfaces and control contrast. */
 .plannotator-content,
 .plannotator-content * {
@@ -1352,12 +1386,10 @@ pre code.pn-code[data-keep-layout] {
 .dock-tab-shell [role="tab"] { gap: 5px; align-items: center; }
 dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: auto; padding: 0; border: 1px solid var(--line); border-radius: 12px; color: var(--foreground); background: var(--card); box-shadow: 0 24px 80px #0008; }
 .text-settings::backdrop { background: #0008; }
-.settings-content { padding: 20px; }
-.settings-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
-.settings-title h2 { margin: 0; font-size: 16px; font-weight: 600; }
 .message-settings { border: 0; border-top: 1px solid var(--line); padding: 14px 0 0; margin: 24px 0 0; display: flex; flex-wrap: wrap; gap: 12px; }
 .message-settings legend { font-weight: 600; padding: 0 8px 0 0; }
 .message-settings label { display: flex; align-items: center; gap: 5px; font-size: 11px; cursor: pointer; }
+.message-settings small { flex-basis: 100%; font-size: 11px; color: var(--muted, inherit); }
 .message-settings input { accent-color: var(--primary); margin: 0; }
 
 .reference-window, .pinned-dock, .dock-drag-preview { background: var(--card); border: 1px solid var(--line); color: var(--foreground); font-size: 12px; }
@@ -1631,9 +1663,14 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
 .proposal-review > header > button { width: 26px; height: 26px; padding: 0; border: 0; font-size: 20px; flex-shrink: 0; }
 .proposal-review footer { display: flex; flex-shrink: 0; flex-wrap: wrap; align-items: center; gap: 8px; justify-content: space-between; padding: 10px 14px; border-top: 1px solid var(--border); }
 .document-section > summary { display: block; position: relative; list-style: none; cursor: pointer; }
-/* The summary wrapper must not make every H1 match upstream first:mt-0. */
-.document-section > summary > h1 { margin-top: 1.5rem; }
-.plannotator-content > .document-section:first-child > summary > h1 { margin-top: 0; }
+/* The source-line wrapper makes every H1 its parent's first child, matching upstream first:mt-0.
+   Restore the pre-wrapper margins: only an H1 that opens the document keeps none; the summary
+   wrapper is likewise not allowed to zero a section heading's margin. */
+.document-section > summary > h1,
+.plannotator-content [data-source-line] > h1 { margin-top: 1.5rem; }
+.plannotator-content > .document-section:first-child > summary > h1,
+.plannotator-content > .document-section:first-child > summary > [data-source-line] > h1,
+.plannotator-content > [data-source-line]:first-child > h1 { margin-top: 0; }
 .document-section > summary::-webkit-details-marker { display: none; }
 .document-section > summary::before { content: ''; position: absolute; left: -32px; top: 50%; width: 32px; height: 32px; transform: translateY(-50%); }
 .document-section > summary::after { content: ''; position: absolute; left: -17px; top: 50%; width: 6px; height: 6px; margin-top: -4px; border-right: 1.5px solid var(--muted-foreground); border-bottom: 1.5px solid var(--muted-foreground); transform: rotate(-45deg); pointer-events: none; opacity: 0; }
@@ -1732,7 +1769,7 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
   .viewer .app-error { flex-shrink: 0; margin: 0; max-height: 64px; overflow: auto; }
   .sidebar-header { padding: 0 10px; }
   .sidebar :is(.back-button, .resolve-button, .new-button, .edit-title),
-  .viewer .topbar :is(.sidebar-toggle, .settings-toggle),
+  .viewer .topbar .sidebar-toggle,
   .composer :is(.send-button, .cancel-button) { min-width: 44px; min-height: 44px; }
   .sidebar .message-actions { height: auto; }
   .sidebar .message-actions button { min-width: 36px; min-height: 36px; }
@@ -1754,3 +1791,66 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
 .file-preview-path.has-line-reference { position: sticky; top: -14px; z-index: 2; background: var(--background); padding: 6px 0; flex-wrap: wrap; }
 .file-line-reference { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
 .file-line-reference .selection-visibility { width: 38px; height: 22px; padding: 2px 4px; font-size: 10px; color: var(--subtle); border-radius: 4px; }
+
+.edit-quote { background: color-mix(in srgb, var(--primary, #d4a72c) 28%, transparent); border-radius: 2px; cursor: pointer; }
+
+/* App-bar menu. */
+.menu-wrap { position: relative; display: inline-flex; flex-shrink: 0; }
+.app-menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; min-width: 230px; padding: 5px; border-radius: 10px; border: 1px solid var(--border); background: var(--popover); box-shadow: 0 18px 60px #0007; }
+.app-menu [role='menuitem'] { box-sizing: border-box; text-decoration: none; display: flex; width: 100%; align-items: center; gap: 10px; padding: 8px 10px; border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.app-menu [role='menuitem']:hover, .app-menu [role='menuitem']:focus-visible { background: var(--muted); outline: none; }
+.app-menu [role='menuitem'][aria-disabled='true'] { color: var(--subtle); cursor: not-allowed; }
+.app-menu kbd { margin-left: auto; font: 11px var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); color: var(--subtle); }
+.app-menu small { display: block; font-size: 11px; color: var(--subtle); }
+.app-menu hr { border: 0; border-top: 1px solid var(--line); margin: 5px 4px; }
+@media (prefers-reduced-motion: no-preference) {
+  .app-menu { animation: menu-pop 0.12s ease-out; }
+  @keyframes menu-pop { from { opacity: 0; transform: translateY(-4px); } }
+}
+
+/* Settings dialog: a category list beside the selected category's page. */
+dialog.settings-dialog { width: min(760px, calc(100vw - 32px)); height: min(560px, calc(100dvh - 32px)); max-height: none; padding: 0; font-size: 13px; overflow: hidden; }
+.settings-shell { display: grid; grid-template-columns: 190px minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); height: 100%; }
+.settings-head { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+.settings-head h2 { flex: 1; margin: 0; font-size: 16px; font-weight: 600; }
+.settings-head button { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; padding: 0; color: var(--subtle); }
+.settings-head button:hover { color: var(--foreground); }
+.settings-head .settings-back { display: none; }
+.settings-cats { border-right: 1px solid var(--line); padding: 8px; overflow: auto; background: oklch(0.2 0.02 260); }
+.settings-cats button { display: flex; width: 100%; align-items: center; gap: 10px; padding: 8px 10px; margin-bottom: 2px; border-radius: 6px; font-size: 13px; text-align: left; color: var(--subtle); }
+.settings-cats button:hover { color: var(--foreground); }
+.settings-cats button[aria-current='page'] { background: var(--muted); color: var(--foreground); box-shadow: inset 2px 0 0 var(--primary); }
+.settings-chevron { display: none; margin-left: auto; }
+.settings-panel { overflow: auto; padding: 18px 22px 22px; }
+.settings-panel > h3 { margin: 0 0 14px; font-size: 15px; font-weight: 600; }
+.settings-group { border: 0; border-top: 1px solid var(--line); padding: 14px 0 0; margin: 0 0 14px; min-width: 0; }
+.settings-group:first-of-type { border-top: 0; padding-top: 0; }
+.settings-group legend { float: left; width: 100%; padding: 0; margin-bottom: 10px; font-size: 12px; font-weight: 600; color: var(--subtle); text-transform: uppercase; letter-spacing: 0.04em; }
+.settings-group legend + * { clear: both; }
+.setting-row { display: grid; grid-template-columns: 150px minmax(0, 1fr) 48px; align-items: center; gap: 12px; padding: 6px 0; font-size: 13px; }
+.setting-row output { text-align: right; font: 12px var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); color: var(--subtle); }
+.setting-row input[type='range'] { width: 100%; margin: 0; accent-color: var(--primary); cursor: pointer; }
+.setting-row:has(.window-zoom) { grid-template-columns: 150px auto; }
+.settings-actions { display: flex; justify-content: flex-end; margin-top: 4px; }
+.settings-actions .small-button { padding: 5px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; }
+.settings-hint { margin: 2px 0 6px; font-size: 11px; color: var(--subtle); }
+.settings-choice { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 4px 0; }
+.settings-choice label, .settings-check { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; cursor: pointer; }
+.settings-choice input, .settings-check input { accent-color: var(--primary); margin: 0; }
+.settings-panel .message-settings { margin-top: 0; }
+.settings-panel .message-settings label { font-size: 13px; }
+
+@media (max-width: 600px) {
+  dialog.settings-dialog { width: 100vw; height: 100dvh; max-width: none; border-radius: 0; border: 0; }
+  .settings-shell { grid-template-columns: minmax(0, 1fr); }
+  .settings-shell[data-view='list'] .settings-panel, .settings-shell[data-view='detail'] .settings-cats { display: none; }
+  .settings-shell[data-view='detail'] .settings-head .settings-back { display: inline-flex; }
+  .settings-cats { border-right: 0; background: transparent; padding: 8px 10px; }
+  .settings-cats button { padding: 14px 12px; font-size: 15px; color: var(--foreground); border-bottom: 1px solid var(--line); border-radius: 0; }
+  .settings-cats button[aria-current='page'] { background: transparent; box-shadow: none; }
+  .settings-chevron { display: inline-flex; color: var(--subtle); }
+  .setting-row { grid-template-columns: minmax(0, 1fr) 48px; }
+  .setting-row input[type='range'] { grid-column: 1 / -1; grid-row: 2; }
+  .settings-panel { padding: 16px; }
+  .settings-panel > h3 { display: none; }
+}

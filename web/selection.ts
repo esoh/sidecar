@@ -45,6 +45,20 @@ export function resolveQuote(text: string, quote: Quote, match: TextMatch): Quot
   return resolved;
 }
 
+/**
+ * The quote as it must be sent: its text a literal substring of `source` (the source of `version`) at `start`/`end`.
+ * A quote of another version is found again by its text and context and restamped, or the issue that blocks the send is returned.
+ */
+export function freshQuote(quote: Quote, source: string, version: string): Quote | string {
+  if (quote.version === version && source.slice(quote.start, quote.end) === quote.exact) return quote;
+  const result = matchQuote(source, quote);
+  if (result.status === 'found') {
+    const { start, end } = result.matches[0];
+    return { ...resolveQuote(source, { ...quote, exact: source.slice(start, end) }, result.matches[0]), version };
+  }
+  return quoteIssue(source, quote) ?? 'Passage changed';
+}
+
 export const excludedSelection =
   '.annotation-exclude, button, input, textarea, svg, style, script, .katex, [aria-hidden="true"]';
 export function selectionNodes(root: Node): Text[] {
@@ -62,50 +76,12 @@ export const selectionText = (root: Node) =>
     .map((node) => node.textContent ?? '')
     .join('');
 
-// Sentence context is optional: never truncate the user's selection or attach a long paragraph.
-export function surroundingSentence(text: string, start: number, end: number): string | undefined {
-  const exact = text.slice(start, end).trim();
-  for (const { segment, index } of new Intl.Segmenter('en', { granularity: 'sentence' }).segment(text)) {
-    if (index > start) break;
-    if (start >= index && end <= index + segment.length) {
-      const sentence = segment.trim();
-      return sentence.length <= 512 && sentence !== exact ? sentence : undefined;
-    }
-  }
-  return undefined;
-}
-
-export function selectionSentence(range: Range): string | undefined {
-  const common = range.commonAncestorContainer;
-  const element = common instanceof Element ? common : common.parentElement;
-  const block = element?.closest('p, li, blockquote, pre, td, th, h1, h2, h3, h4, h5, h6');
-  if (!block) return undefined;
-  const before = document.createRange();
-  before.selectNodeContents(block);
-  before.setEnd(range.startContainer, range.startOffset);
-  const start = selectionText(before.cloneContents()).length;
-  before.setEnd(range.endContainer, range.endOffset);
-  return surroundingSentence(selectionText(block), start, selectionText(before.cloneContents()).length);
-}
-
-// Convert our UTF-16 text anchors to text-node endpoints for web-highlighter.
-export function quoteRange(article: HTMLElement, quote: Quote, version?: string): Range | null {
-  const match = locateQuote(selectionText(article), quote, version);
-  if (!match) return null;
-  const range = document.createRange();
-  let at = 0,
-    started = false;
-  for (const node of selectionNodes(article)) {
-    const length = node.textContent?.length ?? 0;
-    if (!started && at + length > match.start) {
-      range.setStart(node, match.start - at);
-      started = true;
-    }
-    if (started && at + length >= match.end) {
-      range.setEnd(node, match.end - at);
-      return range;
-    }
-    at += length;
-  }
-  return null;
+/** A quote of `source[start, end)` with 32 characters of source context on each side. */
+export function sourceQuote(source: string, start: number, end: number, version: string): Quote {
+  return {
+    exact: source.slice(start, end),
+    prefix: source.slice(Math.max(0, start - 32), start),
+    suffix: source.slice(end, end + 32),
+    start, end, version, isPositionVerified: true,
+  };
 }

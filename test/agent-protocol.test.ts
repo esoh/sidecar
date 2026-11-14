@@ -9,10 +9,10 @@ const owner = { agent: 'claude' as const, sessionId: '11111111-1111-4111-8111-11
 test('compact event maps only identity fields and omits marker definitions', async t => {
   const root = await mkdtemp(join(tmpdir(), 'sc-protocol-')); t.after(() => rm(root, { recursive: true, force: true }));
   const ids = await openAgentIds(root);
-  const event = await compactNotification(owner, { type: 'sidecar.request', ownerKey: `claude-${owner.sessionId}`, requestId: 'request', documentId: 'doc', thread: { id: 'thread', lastRequestId: 'previous' }, covers: ['previous'], text: owner.sessionId, quote: { exact: 'request', sentence: 'request here' }, messageQuote: { threadId: 'thread', messageId: 'message', exact: 'message' }, stream: { prefix: 'LONG', suffix: 'LONG' }, instruction: 'Follow the Sidecar skill.' }, ids);
+  const event = await compactNotification(owner, { type: 'sidecar.request', ownerKey: `claude-${owner.sessionId}`, requestId: 'request', documentId: 'doc', thread: { id: 'thread', lastRequestId: 'previous' }, covers: ['previous'], text: owner.sessionId, quote: { exact: 'request', startLine: 3, endLine: 4 }, messageQuote: { threadId: 'thread', messageId: 'message', exact: 'message' }, stream: { prefix: 'LONG', suffix: 'LONG' }, instruction: 'Follow the Sidecar skill.' }, ids);
   assert.equal(event.type, 'sc.request'); assert.equal(event.ownerKey, 'o1'); assert.equal(event.requestId, 'r1'); assert.equal(event.documentId, 'd1');
   assert.deepEqual(event.thread, { id: 't1', lastRequestId: 'r2' }); assert.deepEqual(event.covers, ['r2']);
-  assert.equal(event.text, owner.sessionId); assert.deepEqual(event.quote, { exact: 'request', sentence: 'request here' });
+  assert.equal(event.text, owner.sessionId); assert.deepEqual(event.quote, { exact: 'request', startLine: 3, endLine: 4 });
   assert.deepEqual(event.messageQuote, { threadId: 't1', messageId: 'm1', exact: 'message' }); assert.equal(event.stream, undefined);
   const failure = await compactNotification(owner, { type: 'sidecar.recovery', requestId: 'request', recoveryId: 'attempt', stream: { error: 'Unavailable' } }, ids);
   assert.equal(failure.recoveryId, 'e1'); assert.equal(failure.streamError, 'Unavailable');

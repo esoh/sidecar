@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import { guideLanguageForPath } from '@plannotator/core/guide-format';
 import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
 import type { FileDiffData } from '../src/files.ts';
@@ -7,7 +7,8 @@ import { api, errorText } from './api.ts';
 import { HtmlFileFrame, RunHtmlScripts, htmlFullPageUrl } from './HtmlFile.tsx';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
 import type { FileQuote } from '../src/quote.ts';
-import { excludedSelection, selectionText } from './selection.ts';
+import { excludedSelection } from './selection.ts';
+import { rangeToSource } from './source-dom.ts';
 import { CodeFileView } from './CodeFileView.tsx';
 import { CodeDiff } from './CodeDiff.tsx';
 import { MarkdownDiff } from './MarkdownDiff.tsx';
@@ -20,10 +21,23 @@ function fenced(language: string, text: string) {
   return `${fence}${language}\n${text}\n${fence}\n`;
 }
 
+// A rendered diff is a column of units, each a slice of the current file; the selection maps through the units it touches.
+function diffSpan(article: HTMLElement, source: string, range: Range) {
+  let start = -1, end = -1;
+  for (const unit of article.querySelectorAll<HTMLElement>('.md-diff-unit[data-source-start]')) {
+    if (!range.intersectsNode(unit)) continue;
+    const from = Number(unit.dataset.sourceStart), part = rangeToSource(unit, source.slice(from, Number(unit.dataset.sourceEnd)), range);
+    if (!part) continue;
+    if (start < 0) start = from + part.start;
+    end = from + part.end;
+  }
+  return start < 0 ? null : { start, end };
+}
+
 export type OpenFile = { id: string; path: string; root?: string; kind: 'doc' | 'code'; refusal?: string; fragment?: string; lineRange?: FileLineRange; isLineRangeVisible?: boolean; areScriptsEnabled?: boolean; revision: number };
 
-export function FilePreview({ documentId, root, path, kind, refusal, revision, fragment, lineRange, isLineRangeVisible = true, onSetLineRangeVisible, areScriptsEnabled = false, comparison, onQuoteFile, onRevealFile, onSetScripts, loaded, onRenderedText }: {
-  documentId: string; loaded?: WatchedFile; onRenderedText?: (version: string, text: string) => void; root?: string; comparison: Comparison; onQuoteFile: (quote: FileQuote) => void;
+export function FilePreview({ documentId, root, path, kind, refusal, revision, fragment, lineRange, isLineRangeVisible = true, onSetLineRangeVisible, areScriptsEnabled = false, comparison, onQuoteFile, onRevealFile, onSetScripts, loaded }: {
+  documentId: string; loaded?: WatchedFile; root?: string; comparison: Comparison; onQuoteFile: (quote: FileQuote) => void;
   onSetLineRangeVisible: (visible: boolean) => void;
   onRevealFile: (path: string) => void; onSetScripts: (enabled: boolean) => void;
 } & OpenFile) {
@@ -66,9 +80,11 @@ export function FilePreview({ documentId, root, path, kind, refusal, revision, f
     if (!root || !preview || !selected?.rangeCount || selected.isCollapsed) return;
     const range = selected.getRangeAt(0);
     if (!article.contains(range.startContainer) || !article.contains(range.endContainer) || [range.startContainer, range.endContainer].some(node => node.parentElement?.closest(excludedSelection))) return;
-    const exact = selectionText(range.cloneContents());
-    if (!exact.trim()) return;
-    onQuoteFile({ path: `${root.replace(/\/$/, '')}/${preview.path}`, kind, exact });
+    // Markdown quotes are exact source slices with their lines; Mermaid and Graphviz quote through their source view.
+    const span = preview.renderAs === 'markdown' ? (diffOn ? diffSpan(article, preview.text, range) : rangeToSource(article, preview.text, range)) : null;
+    if (!span) return;
+    const lineAt = (offset: number) => preview.text.slice(0, offset).split('\n').length;
+    onQuoteFile({ path: `${root.replace(/\/$/, '')}/${preview.path}`, kind, exact: preview.text.slice(span.start, span.end), startLine: lineAt(span.start), endLine: lineAt(span.end - 1) });
   }
   const asMarkdown = (text: string | null) => text === null ? '' : renderAs === 'mermaid' ? fenced('mermaid', text) : renderAs === 'graphviz' ? fenced('dot', text) : text;
   const quoteLines = (quote: Pick<FileQuote, 'exact' | 'startLine' | 'endLine'>) => absolute && onQuoteFile({ path: absolute, kind, ...quote });
@@ -78,10 +94,6 @@ export function FilePreview({ documentId, root, path, kind, refusal, revision, f
       <MarkdownDiff old={asMarkdown(diff.old)} current={asMarkdown(diff.current)} anchorPrefix={`${anchorPrefix}-`} linkBase={root && `${root}/${path}`.replace(/\/[^/]*$/, '')}
         source={<CodeDiff path={path} old={diff.old} current={diff.current} onQuote={quoteLines} />} />
     </article>);
-  const article = useRef<HTMLElement>(null), reportText = useRef(onRenderedText);
-  reportText.current = onRenderedText;
-  // Rendered Markdown text lets the app tell whether a saved rendered-text quote is still on screen.
-  useEffect(() => { if (article.current && loaded?.version) reportText.current?.(loaded.version, selectionText(article.current)); }, [loaded?.version, markdown, diffOn]);
   if (refusal) return (
     <section className="file-preview" aria-label="File preview">
       <p>{refusal}</p>
@@ -103,9 +115,9 @@ export function FilePreview({ documentId, root, path, kind, refusal, revision, f
   ) : markdown === null ? (
     <HtmlFileFrame documentId={documentId} path={path} root={root} fragment={fragment} revision={`${revision}:${loaded?.version ?? ''}`} areScriptsEnabled={areScriptsEnabled} />
   ) : (
-    <article ref={article} onMouseUp={event => capture(event.currentTarget)} onTouchEnd={event => capture(event.currentTarget)} onKeyUp={event => { if (event.key === 'Shift' || event.key.startsWith('Arrow')) capture(event.currentTarget); }}>
+    <article onMouseUp={event => capture(event.currentTarget)} onTouchEnd={event => capture(event.currentTarget)} onKeyUp={event => { if (event.key === 'Shift' || event.key.startsWith('Arrow')) capture(event.currentTarget); }}>
       {/* An empty document ID keeps relative images from resolving against the open document's folder. */}
-      <MarkdownDocument markdown={markdown} documentId="" anchorPrefix={`${anchorPrefix}-`} linkBase={root && `${root}/${path}`.replace(/\/[^/]*$/, '')} />
+      <MarkdownDocument markdown={markdown} documentId="" anchorPrefix={`${anchorPrefix}-`} linkBase={root && `${root}/${path}`.replace(/\/[^/]*$/, '')} sourceLines />
     </article>
   );
   return (
@@ -127,12 +139,4 @@ export function FilePreview({ documentId, root, path, kind, refusal, revision, f
       {!diffOn ? plain : diff ? diffView : diffError ? <><p role="alert">Diff unavailable: {diffError}</p>{plain}</> : <p role="status">Loading diff…</p>}
     </section>
   );
-}
-
-// Off-screen render of a Markdown file's text so rendered-text quote checks work while its window is docked or collapsed.
-export function RenderedTextProbe({ text, onText }: { text: string; onText: (text: string) => void }) {
-  const box = useRef<HTMLDivElement>(null);
-  useEffect(() => { if (box.current) onText(selectionText(box.current)); }, [text]);
-  // Not aria-hidden: selectionText skips such subtrees, and `hidden` already removes it from the accessibility tree.
-  return <div ref={box} hidden {...{ inert: true }}><MarkdownDocument markdown={text} documentId="" /></div>;
 }

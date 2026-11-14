@@ -8,7 +8,7 @@ import type { MessageSelection } from '../src/store.ts';
 import type { DecisionResult, Proposal, ProposalReason } from '../src/proposals.ts';
 import { api, errorText } from './api.ts';
 import { MarkdownDocument } from './MarkdownDocument.tsx';
-import { quoteRange } from './selection.ts';
+import { quoteSourceRange } from './source-dom.ts';
 import { usePosition } from './usePosition.ts';
 
 const explanations: Record<ProposalReason, string> = {
@@ -22,7 +22,7 @@ const explanations: Record<ProposalReason, string> = {
 const statusLabel = (proposal: Proposal) => ({ pending: 'Pending', accepted: 'Accepted', rejected: 'Rejected', outdated: 'Outdated' })[proposal.status];
 type Options = {
   documentId: string; proposals: Proposal[]; selections: MessageSelection[]; article: RefObject<HTMLElement | null>;
-  version: string; isHistorical: boolean; onShowSelection: (selection: MessageSelection) => void;
+  markdown: string; version: string; isHistorical: boolean; decisionBlocked?: string; onShowSelection: (selection: MessageSelection) => boolean | Promise<boolean>;
   onShowOriginal: (selectionId: string) => void; onReturnToCurrent: () => void;
 };
 type ReviewContext = {
@@ -50,8 +50,10 @@ export function useProposalReview(options: Options) {
     const { proposals, selections, onShowSelection, isHistorical } = latest.current;
     const proposal = proposals.find(p => p.selectionId === selectionId), selection = selections.find(s => s.id === selectionId);
     if (!proposal || !selection) return false;
-    if (!isHistorical && !invoker?.closest('#document')) onShowSelection(selection);
-    setActive({ id: proposal.id, invoker }); return true;
+    const shown = !isHistorical && !invoker?.closest('#document') ? onShowSelection(selection) : true;
+    // Leaving the editor can be cancelled; the window opens only once the passage is shown.
+    if (typeof shown === 'boolean') { if (shown) setActive({ id: proposal.id, invoker }); } else void shown.then(ok => { if (ok) setActive({ id: proposal.id, invoker }); });
+    return true;
   }, []);
   useEffect(() => {
     if (!active) return;
@@ -62,13 +64,15 @@ export function useProposalReview(options: Options) {
   }, [active, close]);
   const anchor = useCallback(() => {
     const root = latest.current.article.current;
-    const range = root && !latest.current.isHistorical && selection && quoteRange(root, selection.quote, latest.current.version);
+    const range = root && !latest.current.isHistorical && selection && quoteSourceRange(root, latest.current.markdown, selection.quote, latest.current.version);
     const rect = range && range.getBoundingClientRect();
     return rect && (rect.width || rect.height) ? rect : active?.invoker?.getBoundingClientRect() ?? root?.getBoundingClientRect();
   }, [active, selection]);
   const bounds = useCallback(() => document.querySelector('main.canvas')?.getBoundingClientRect(), []);
-  async function run(key: string, ids: string[], path: string, body: unknown) {
+  async function run(key: string, ids: string[], path: string, body: unknown, isAccept: boolean) {
     if (latest.current.isHistorical || ids.some(id => busy.has(id))) return;
+    const blocked = isAccept && latest.current.decisionBlocked;
+    if (blocked) { setErrors(previous => ({ ...previous, [key]: blocked })); return; }
     setBusy(previous => new Set([...previous, ...ids])); setErrors(previous => ({ ...previous, [key]: '' }));
     try { const result = await api<DecisionResult>(path, body); setResults(previous => ({ ...previous, [key]: result })); }
     catch (reason) { setErrors(previous => ({ ...previous, [key]: errorText(reason) })); }
@@ -76,10 +80,10 @@ export function useProposalReview(options: Options) {
   }
   const context: ReviewContext = {
     proposals: options.proposals, isHistorical: options.isHistorical, busy, errors, results, open,
-    decide: (p, decision) => run(p.id, [p.id], `/api/proposals/${p.id}/decision`, { decision }),
+    decide: (p, decision) => run(p.id, [p.id], `/api/proposals/${p.id}/decision`, { decision }, decision === 'accept'),
     acceptReply: proposals => {
       const p = proposals[0]; if (!p) return Promise.resolve();
-      return run(replyKey(p), proposals.filter(p => p.status === 'pending').map(p => p.id), `/api/threads/${p.threadId}/messages/${p.messageId}/proposals/accept`, {});
+      return run(replyKey(p), proposals.filter(p => p.status === 'pending').map(p => p.id), `/api/threads/${p.threadId}/messages/${p.messageId}/proposals/accept`, {}, true);
     },
   };
   return { context, open, popover: proposal && selection && active ? createPortal(
