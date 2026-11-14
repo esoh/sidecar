@@ -6769,7 +6769,7 @@ test('edit mode fills the canvas and the source pane reads darker than the previ
   const blurred = await page.screenshot({ clip: strip });
   expect(focused.equals(blurred)).toBe(false);
   await page.locator('.cm-content').focus();
-  const overlay = await editor.evaluate(el => { const ring = getComputedStyle(el, '::after'), scroller = getComputedStyle(el.querySelector('.cm-scroller')!), probe = document.createElement('i'); probe.style.color = 'var(--primary)'; document.body.append(probe); const primary = getComputedStyle(probe).color; probe.remove(); return { colour: ring.borderLeftColor, primary, width: ring.borderLeftWidth, z: Number(ring.zIndex), scrollerZ: Number(scroller.zIndex), pointer: ring.pointerEvents }; });
+  const overlay = await editor.evaluate(el => { const ring = getComputedStyle(el, '::after'), scroller = getComputedStyle(el.querySelector('.cm-scroller')!), probe = document.createElement('i'); probe.style.color = 'color-mix(in oklch, var(--primary) 45%, transparent)'; document.body.append(probe); const primary = getComputedStyle(probe).color; probe.remove(); return { colour: ring.borderLeftColor, primary, width: ring.borderLeftWidth, z: Number(ring.zIndex), scrollerZ: Number(scroller.zIndex), pointer: ring.pointerEvents }; });
   expect(overlay).toMatchObject({ width: '1px', pointer: 'none' });
   expect(overlay.colour).toBe(overlay.primary);
   expect(overlay.z).toBeGreaterThan(overlay.scrollerZ);
