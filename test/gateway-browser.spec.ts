@@ -68,7 +68,7 @@ test('prefixed document uses only its owner APIs and preserves its draft on relo
   expect(apiPaths.some(path => path.includes('/api/files'))).toBe(false);
   expect(await legacy.evaluate(() => Object.entries(localStorage).filter(([key]) => key.startsWith('sidecar-draft:')))).toEqual(before);
   await legacy.close();
-  await openSettings(page);
+  await openSettings(page, 'Access');
   await page.getByRole('checkbox', { name: 'Allow access on local network' }).click();
   await page.getByLabel('Public HTTPS URL', { exact: true }).fill('https://sidecar.example');
   await page.getByRole('button', { name: 'Save URL', exact: true }).click();
@@ -1702,7 +1702,7 @@ test('files displaced by one-at-a-time mode or its switch stop polling once clos
   const { open } = await openFiles(page, { 'a.ts': 'export const a = 1;\n', 'b.ts': 'export const b = 2;\n' });
   const requests: string[] = [];
   page.on('request', request => { if (/path=[ab]\.ts/.test(request.url())) requests.push(request.url()); });
-  const mode = async () => { await openSettings(page); await page.getByRole('radio', { name: 'One at a time', exact: true }).check(); await page.getByRole('button', { name: 'Close settings', exact: true }).click(); };
+  const mode = async () => { await openSettings(page, 'Files'); await page.getByRole('radio', { name: 'One at a time', exact: true }).check(); await page.getByRole('button', { name: 'Close settings', exact: true }).click(); };
   await mode();
   await open('a.ts');
   const b = await open('b.ts');
@@ -1712,7 +1712,7 @@ test('files displaced by one-at-a-time mode or its switch stop polling once clos
   await page.waitForTimeout(4000);
   expect(requests).toEqual([]);
   // Switch path: two windows in multi mode, then single keeps only the last.
-  await openSettings(page);
+  await openSettings(page, 'Files');
   await page.getByRole('radio', { name: 'Multiple', exact: true }).check();
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
   await open('a.ts'); const second = await open('b.ts');

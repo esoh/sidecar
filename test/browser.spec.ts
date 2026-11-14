@@ -1052,7 +1052,7 @@ test('pin list condenses, tabs reorder, and single-window mode keeps the latest 
   await expect(reordered).toBeFocused();
   await expect(dock.getByRole('tab')).toHaveText(['First question', 'Second question', 'First answer']);
   await dock.getByRole('tab', { name: 'First answer', exact: true }).click();
-  await openSettings(page);
+  await openSettings(page, 'Files');
   await page.getByRole('radio', { name: 'One at a time', exact: true }).check();
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
   await expect(dock.getByRole('tab')).toHaveText(['Second question']);
@@ -3616,7 +3616,7 @@ test('file windows share the dock with pinned replies and reopen without duplica
   expect(Object.keys((await state()).documents)).toEqual([doc.id]);
   expect(await readFile(join(root, 'a.md'), 'utf8')).toBe('# First file\n');
   // The existing one-window setting applies across files and pinned replies.
-  await openSettings(page);
+  await openSettings(page, 'Files');
   await page.getByRole('radio', { name: 'One at a time', exact: true }).check();
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
   await expect(dock.getByRole('tab')).toHaveText(['b.yml']);
