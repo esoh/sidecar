@@ -148,7 +148,8 @@ export function syncScroll(source: EditorView, preview: HTMLElement, fraction: (
   // Enter, Backspace, undo and paste are handled on keydown/paste (which suppress beforeinput), so listen for all of them.
   const typing = () => { leader = 'source'; };
   // The pane the user is working in leads, and its quiet window ends so their first wheel ticks are not taken for an echo.
-  // Folding a section in the preview resizes it: the preview must stay put and the source follow.
+  // Folding a section in the preview resizes it: the click or key that does it makes the preview lead, so it stays put and the source follows.
+  // (Not the <details> toggle event: it also fires when a patched preview inserts open sections, which would steal the lead from typing.)
   const intent = (side: Side) => () => { leader = side; quiet[side] = 0; };
   const intentEvents = ['pointerdown', 'wheel', 'touchstart', 'keydown'];
   const onIntent = { source: intent('source'), preview: intent('preview') };
@@ -159,7 +160,6 @@ export function syncScroll(source: EditorView, preview: HTMLElement, fraction: (
   for (const type of typingEvents) source.contentDOM.addEventListener(type, typing);
   preview.addEventListener('load', schedule, true);
   for (const type of intentEvents) for (const side of ['source', 'preview'] as const) el[side].addEventListener(type, onIntent[side], { passive: true, capture: true });
-  preview.addEventListener('toggle', onIntent.preview, true);
   for (const node of [scroller, source.contentDOM, preview, preview.firstElementChild].filter((node): node is Element => !!node)) resize.observe(node);
   mutations.observe(preview, { childList: true, subtree: true, characterData: true });
   segments = buildSegments(source, preview);
@@ -169,7 +169,6 @@ export function syncScroll(source: EditorView, preview: HTMLElement, fraction: (
     cancelAnimationFrame(frame); clearTimeout(idle);
     for (const marker of Object.values(markers ?? {})) marker?.removeAttribute('data-active');
     for (const type of intentEvents) for (const side of ['source', 'preview'] as const) el[side].removeEventListener(type, onIntent[side], true);
-    preview.removeEventListener('toggle', onIntent.preview, true);
     scroller.removeEventListener('scroll', onSource);
     preview.removeEventListener('scroll', onPreview);
     for (const type of typingEvents) source.contentDOM.removeEventListener(type, typing);
