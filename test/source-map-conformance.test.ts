@@ -76,7 +76,7 @@ const corpus = [
   'a ``x`` b',
   'a \\<x b \\q',
   '3...2 --- 3--5 a--b :rocket: :nope:',
-  'say "hi" and \'there\' (“q”) "', 
+  'say "hi" and \'there\' (“q”) "',
   '"leading" quote',
   'see [a](u "x) y") z',
   '[**not bold**](u) and ![img](a.png) and <https://x.y> and <me@x.y>',

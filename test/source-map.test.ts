@@ -111,4 +111,3 @@ test('sameVisible', () => {
   assert.ok(sameVisible('a\nb', 'a b'));
   assert.ok(!sameVisible('a  b', 'a b'));
 });
-
