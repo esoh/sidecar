@@ -166,7 +166,7 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
 
   useEffect(() => { onStatus({ dirty, saving: isSaving, formatting }); }, [dirty, isSaving, formatting]);
   useEffect(() => () => onStatus({ dirty: false, saving: false, formatting: false }), []);
-  useEffect(() => { if (asking) dialog.current?.showModal(); }, [asking]);
+  useEffect(() => { if (asking) { dialog.current?.showModal(); dialog.current?.querySelector<HTMLElement>('.primary')?.focus(); } }, [asking]);
   useEffect(() => {
     if (!dirty) return;
     const warn = (event: BeforeUnloadEvent) => { if (dirtyNow.current) event.preventDefault(); };
@@ -276,13 +276,14 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
         </div>
       </div>
       {asking && (
-        <dialog ref={dialog} className="markdown-edit-leave" aria-label="Unsaved changes"
+        <dialog ref={dialog} className="markdown-edit-leave" aria-labelledby="edit-leave-title" aria-describedby="edit-leave-desc"
           onCancel={event => { event.preventDefault(); choose.current?.('cancel'); }}>
-          <p>You have unsaved changes.</p>
-          <div>
-            <button onClick={() => choose.current?.('save')}>Save</button>
-            <button onClick={() => choose.current?.('discard')}>Discard</button>
+          <h2 id="edit-leave-title">You have unsaved changes</h2>
+          <p id="edit-leave-desc">Save them to the file, or discard them and return to the document.</p>
+          <div className="markdown-edit-leave-actions">
             <button onClick={() => choose.current?.('cancel')}>Cancel</button>
+            <button className="danger" onClick={() => choose.current?.('discard')}>Discard</button>
+            <button className="primary" onClick={() => choose.current?.('save')}>Save</button>
           </div>
         </dialog>
       )}

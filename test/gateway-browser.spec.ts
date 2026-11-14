@@ -1,9 +1,18 @@
 import { writeFile, readFile, mkdir, readdir, realpath, unlink } from 'node:fs/promises';
 import { join, sep } from 'node:path';
 import { homedir } from 'node:os';
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { setupGateway } from './gateway-support.ts';
 import { startGateway } from '../src/gateway.ts';
+
+// Settings now lives in the app-bar menu; a category opens its page (the dialog remembers the last one).
+async function openSettings(page: Page, category?: 'Reading' | 'Editor' | 'Files' | 'Access' | 'About') {
+  await page.getByRole('button', { name: 'Menu', exact: true }).click();
+  await page.getByRole('menuitem', { name: /^Settings/ }).click();
+  const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+  await expect(dialog).toBeVisible();
+  if (category) await dialog.getByRole('button', { name: category, exact: true }).click();
+}
 
 let f: Awaited<ReturnType<typeof setupGateway>>, cleanup: (() => Promise<void>)[];
 test.beforeEach(async () => { cleanup = []; f = await setupGateway({ after: fn => { cleanup.push(fn); } }); });
@@ -59,7 +68,7 @@ test('prefixed document uses only its owner APIs and preserves its draft on relo
   expect(apiPaths.some(path => path.includes('/api/files'))).toBe(false);
   expect(await legacy.evaluate(() => Object.entries(localStorage).filter(([key]) => key.startsWith('sidecar-draft:')))).toEqual(before);
   await legacy.close();
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   await page.getByRole('checkbox', { name: 'Allow access on local network' }).click();
   await page.getByLabel('Public HTTPS URL', { exact: true }).fill('https://sidecar.example');
   await page.getByRole('button', { name: 'Save URL', exact: true }).click();
@@ -1041,7 +1050,7 @@ test('HTML full page header fits a phone and Chat swaps with the page', async ({
   await page.goto(full);
   const frame = page.locator('.file-preview-frame');
   await expect(frame).toBeVisible();
-  for (const name of ['Back to document', 'Pick element', 'Settings']) await expect(page.getByLabel(name, { exact: true })).toBeVisible();
+  for (const name of ['Back to document', 'Pick element', 'Menu']) await expect(page.getByLabel(name, { exact: true })).toBeVisible();
   expect(await page.evaluate(() => [document.documentElement.scrollWidth <= innerWidth, (() => { const bar = document.querySelector('.topbar')!; return bar.scrollWidth <= bar.clientWidth; })()])).toEqual([true, true]);
   await page.getByRole('button', { name: 'Show conversations' }).click();
   await expect(page.locator('.sidebar')).toBeVisible();
@@ -1050,8 +1059,8 @@ test('HTML full page header fits a phone and Chat swaps with the page', async ({
   await expect(frame).toBeVisible();
   // The header has no room for page zoom on a phone; Settings offers it, scaling only the page.
   const pageWidth = () => page.frameLocator('.file-preview-frame').locator('body').evaluate(() => innerWidth), before = await pageWidth();
-  await page.getByRole('button', { name: 'Settings' }).click();
-  const settings = page.getByRole('dialog', { name: 'Reading settings' });
+  await openSettings(page, 'Reading');
+  const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
   await settings.getByRole('button', { name: 'Zoom out' }).click();
   await expect(settings.getByRole('button', { name: 'Adjust content zoom' })).toHaveText('75%');
   await expect.poll(pageWidth).toBe(Math.round(before / 0.75));
@@ -1380,7 +1389,7 @@ test('the HTML full page offers settings and zooms the page without scaling the 
   await page.goto(full);
   const frame = page.frameLocator('.file-preview-frame'), pageWidth = () => frame.locator('body').evaluate(() => innerWidth);
   await expect(frame.locator('p')).toBeVisible();
-  await page.getByRole('button', { name: 'Settings' }).click();
+  await openSettings(page);
   await page.getByRole('slider', { name: 'Conversation text size' }).fill('130');
   await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--sidecar-conversation-scale'))).toBe('1.3');
   await page.getByRole('button', { name: 'Close settings' }).click();
@@ -1693,7 +1702,7 @@ test('files displaced by one-at-a-time mode or its switch stop polling once clos
   const { open } = await openFiles(page, { 'a.ts': 'export const a = 1;\n', 'b.ts': 'export const b = 2;\n' });
   const requests: string[] = [];
   page.on('request', request => { if (/path=[ab]\.ts/.test(request.url())) requests.push(request.url()); });
-  const mode = async () => { await page.getByRole('button', { name: 'Settings', exact: true }).click(); await page.getByRole('radio', { name: 'One at a time', exact: true }).check(); await page.getByRole('button', { name: 'Close settings', exact: true }).click(); };
+  const mode = async () => { await openSettings(page); await page.getByRole('radio', { name: 'One at a time', exact: true }).check(); await page.getByRole('button', { name: 'Close settings', exact: true }).click(); };
   await mode();
   await open('a.ts');
   const b = await open('b.ts');
@@ -1703,7 +1712,7 @@ test('files displaced by one-at-a-time mode or its switch stop polling once clos
   await page.waitForTimeout(4000);
   expect(requests).toEqual([]);
   // Switch path: two windows in multi mode, then single keeps only the last.
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   await page.getByRole('radio', { name: 'Multiple', exact: true }).check();
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
   await open('a.ts'); const second = await open('b.ts');
@@ -1939,4 +1948,18 @@ test('Run scripts: an id-less anchor never lands on a shifted sibling', async ({
   await page.waitForTimeout(800);
   // Positionally the old anchor now names Para 29; its text no longer matches, so it must not be used to place the page.
   expect(Math.abs(await frame.getByText('Para 29', { exact: true }).evaluate(node => node.getBoundingClientRect().top))).toBeGreaterThan(20);
+});
+
+test('HTML page zoom is offered under Reading only on an HTML page, and the menu is in the HTML topbar', async ({ page }) => {
+  const { owner, base, full } = await htmlThreads();
+  await page.goto(full);
+  await expect(page.locator('.file-preview-frame')).toBeVisible();
+  await openSettings(page, 'Reading');
+  const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+  await expect(dialog.getByRole('group', { name: 'This HTML page' }).getByRole('button', { name: 'Adjust content zoom' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await page.goto(`${base}/?document=${owner.doc.id}`);
+  await openSettings(page, 'Reading');
+  await expect(dialog.getByRole('slider', { name: 'Document text size' })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Adjust content zoom' })).toHaveCount(0);
 });

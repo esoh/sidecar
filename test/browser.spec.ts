@@ -30,6 +30,18 @@ test.beforeEach(async ({ page, context }, info) => {
   }
 });
 test.afterEach(async () => { try { expect(pageErrors).toEqual([]); } finally { for (const fn of cleanup) await fn(); } });
+// Settings now lives in the app-bar menu; a category opens its page (the dialog remembers the last one).
+async function openSettings(page: Page, category?: 'Reading' | 'Editor' | 'Files' | 'Access' | 'About') {
+  await page.getByRole('button', { name: 'Menu', exact: true }).click();
+  await page.getByRole('menuitem', { name: /^Settings/ }).click();
+  const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+  await expect(dialog).toBeVisible();
+  if (category) await dialog.getByRole('button', { name: category, exact: true }).click();
+}
+async function formatViaMenu(page: Page) {
+  await page.getByRole('button', { name: 'Menu', exact: true }).click();
+  await page.getByRole('menuitem', { name: /^Format/ }).click();
+}
 async function state() { return (await f.view('/api/state')).json(); }
 async function lastRequest() { return Object.values<any>((await state()).requests).at(-1)!; }
 async function answer(text: string) {
@@ -44,7 +56,7 @@ test('settings configures and clears the public tunnel URL without exposing it t
   cleanup.push(async () => { if (previous === undefined) delete process.env.SIDECAR_CONFIG; else process.env.SIDECAR_CONFIG = previous; });
   const doc = await f.register();
   await page.goto(`${f.url}/?document=${doc.id}`);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Access');
   await page.getByRole('checkbox', { name: 'Allow access on local network' }).click();
   await expect(page.getByRole('checkbox', { name: 'Allow access on local network' })).toBeChecked();
   const field = page.getByLabel('Public HTTPS URL', { exact: true });
@@ -57,7 +69,7 @@ test('settings configures and clears the public tunnel URL without exposing it t
   await expect(field).toHaveValue('https://sidecar.example');
   await expect(page.getByRole('link', { name: /^https:\/\/sidecar\.example/ })).toHaveAttribute('href', `https://sidecar.example/?document=${doc.id}`);
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Access');
   await expect(field).toHaveValue('https://sidecar.example');
   await field.fill(''); await page.getByRole('button', { name: 'Save URL', exact: true }).click();
   await expect(page.getByRole('link', { name: /^https:\/\/sidecar\.example/ })).toHaveCount(0);
@@ -67,7 +79,7 @@ test('phone access enables from settings and sends conversations over plain LAN 
   test.setTimeout(30000);
   const doc = await f.register('phone.md', '# Phone review\n\nHello from the same document.\n');
   await page.goto(`${f.url}/?document=${doc.id}`);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Access');
   const setting = page.getByRole('checkbox', { name: 'Allow access on local network' });
   await expect(setting).not.toBeChecked(); await setting.click();
   await expect(setting).toBeChecked();
@@ -101,7 +113,7 @@ test('phone access enables from settings and sends conversations over plain LAN 
   await phone.getByRole('button', { name: 'Hide conversations', exact: true }).click();
   await phone.getByRole('button', { name: 'Copy file', exact: true }).click();
   await expect(phone.getByRole('button', { name: 'Copied!', exact: true })).toBeVisible();
-  await phone.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(phone, 'Access');
   await expect(phone.getByRole('checkbox', { name: 'Allow access on local network' })).toBeDisabled();
   await page.getByLabel('Network passphrase', { exact: true }).fill('my new home phrase');
   await page.getByRole('button', { name: 'Save passphrase', exact: true }).click();
@@ -454,7 +466,7 @@ test('proposal window keeps controls reachable while long content scrolls and th
 test('proposal text size affects both previews and source diff and persists independently of reading settings', async ({ page, context }) => {
   await proposalReply(page);
   await context.addCookies([{ name: 'sidecar-proposal-text-size', value: '140', url: f.url }]);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   await page.getByRole('slider', { name: 'Document text size', exact: true }).fill('120');
   await page.getByRole('slider', { name: 'Conversation text size', exact: true }).fill('90');
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
@@ -478,7 +490,7 @@ test('proposal text size affects both previews and source diff and persists inde
   await review.click(); await expect(size).toHaveValue('25');
   await page.reload(); await review.click(); await expect(size).toHaveValue('25');
   await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   await expect(page.getByRole('slider', { name: 'Document text size', exact: true })).toHaveValue('120');
   await expect(page.getByRole('slider', { name: 'Conversation text size', exact: true })).toHaveValue('90');
   await page.getByRole('slider', { name: 'Document text size', exact: true }).fill('150');
@@ -969,12 +981,12 @@ test('message copy formats exclude selection controls and preserve Markdown code
   const copy = reply.getByRole('button', { name: 'Copy message', exact: true });
   await copy.click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('Read **this** passage and [guide](https://example.com).\n\n`[example](#selection-2)`\n\n    [code example](#selection-3)\n\nSee reference.\n\n');
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Files');
   await page.getByRole('radio', { name: 'Plain text', exact: true }).check();
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
   await reply.hover(); await copy.click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('Read this passage and guide.\n\n[example](#selection-2)\n\n[code example](#selection-3)\n\nSee reference.');
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Files');
   await page.getByRole('radio', { name: 'Rich text', exact: true }).check();
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
   await reply.hover(); await copy.click();
@@ -985,7 +997,7 @@ test('message copy formats exclude selection controls and preserve Markdown code
   expect(html).not.toContain('href="#selection');
   expect(html).not.toContain('The passage.');
   await page.reload();
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Files');
   await expect(page.getByRole('radio', { name: 'Rich text', exact: true })).toBeChecked();
 });
 
@@ -1040,7 +1052,7 @@ test('pin list condenses, tabs reorder, and single-window mode keeps the latest 
   await expect(reordered).toBeFocused();
   await expect(dock.getByRole('tab')).toHaveText(['First question', 'Second question', 'First answer']);
   await dock.getByRole('tab', { name: 'First answer', exact: true }).click();
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   await page.getByRole('radio', { name: 'One at a time', exact: true }).check();
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
   await expect(dock.getByRole('tab')).toHaveText(['Second question']);
@@ -2668,8 +2680,9 @@ test('text sizes adjust each pane independently and persist across sessions', as
   const headingHeight = (await page.locator('#document h1').boundingBox())!.height;
   const replyHeight = (await page.locator('.message.agent strong').boundingBox())!.height;
   const toolbarHeight = (await page.locator('.topbar').boundingBox())!.height;
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'About');
   await expect(page.locator('.settings-version')).toHaveText((await state()).appVersion);
+  await page.getByRole('dialog', { name: 'Settings', exact: true }).getByRole('button', { name: 'Reading', exact: true }).click();
   const documentSize = page.getByRole('slider', { name: 'Document text size' });
   const conversationSize = page.getByRole('slider', { name: 'Conversation text size' });
   await expect(documentSize).toHaveValue('100');
@@ -2682,17 +2695,17 @@ test('text sizes adjust each pane independently and persist across sessions', as
   expect((await page.locator('.topbar').boundingBox())!.height).toBe(toolbarHeight);
   await conversationSize.press('Escape');
   await expect(documentSize).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Settings', exact: true })).toBeFocused();
+  await expect(page.getByRole('button', { name: 'Menu', exact: true })).toBeFocused();
   await page.locator('#document mark').first().click();
   await expect(page.locator('#threads')).toHaveAttribute('data-active-thread', (await lastRequest()).threadId);
   await page.reload();
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   await expect(documentSize).toHaveValue('150');
   await expect(conversationSize).toHaveValue('125');
   const second = await fixture({ after: fn => cleanup.push(fn) });
   const secondDoc = await second.register();
   await page.goto(`${second.url}/?document=${secondDoc.id}`);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   await expect(documentSize).toHaveValue('150');
   await expect(conversationSize).toHaveValue('125');
   await page.getByRole('button', { name: 'Reset text sizes' }).click();
@@ -2703,7 +2716,7 @@ test('text sizes adjust each pane independently and persist across sessions', as
     { name: 'sidecar-conversation-text-size', value: 'not-a-number', url: second.url },
   ]);
   await page.reload();
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   await expect(documentSize).toHaveValue('100');
   await expect(conversationSize).toHaveValue('100');
 });
@@ -2933,8 +2946,8 @@ test('Settings opens the all-agent library and session popovers copy original ID
   await page.getByRole('button', { name: 'Copy', exact: true }).click();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(f.owner.sessionId);
   await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  const [library] = await Promise.all([context.waitForEvent('page'), page.getByRole('link', { name: 'View all documents', exact: true }).click()]);
+  await page.getByRole('button', { name: 'Menu', exact: true }).click();
+  const [library] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'View all documents', exact: true }).click()]);
   await expect(library.getByRole('heading', { name: 'Documents', exact: true })).toBeVisible();
   await expect(library.getByRole('link', { name: /Current document/ })).toHaveAttribute('href', `${f.url}/?document=${doc.id}`);
   const opened = library.getByRole('link', { name: /Current document/ }).locator('time');
@@ -3177,7 +3190,7 @@ test('document badges, copy and brightness preserve text anchors and controls', 
   const glyphColor = () => page.locator('#document h2').evaluate(el => getComputedStyle(el).webkitTextFillColor);
   const original = await glyphColor();
   const background = await page.locator('#document').evaluate(el => getComputedStyle(el).backgroundColor);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   const brightness = page.getByRole('slider', { name: 'Text brightness', exact: true });
   await expect(brightness).toHaveValue('100');
   await expect(brightness).toHaveAttribute('max', '100');
@@ -3188,7 +3201,7 @@ test('document badges, copy and brightness preserve text anchors and controls', 
   expect(await page.locator('#document').evaluate(el => getComputedStyle(el).backgroundColor)).toBe(background);
   expect(await page.locator('.document-copy').evaluate(el => getComputedStyle(el).webkitTextFillColor)).not.toContain('/ 0.6');
   await page.reload();
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   await expect(brightness).toHaveValue('60');
   await page.getByRole('button', { name: 'Reset text brightness' }).click();
   await expect(brightness).toHaveValue('100');
@@ -3230,7 +3243,7 @@ test('highlight intensity dims selections without dimming text and persists acro
   await expect(page.locator('#document')).toContainText('Select this passage.');
   await select(page, 'Select this passage.');
   const original = await page.locator('mark[data-pending]').evaluate(e => getComputedStyle(e).backgroundColor);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   const slider = page.getByRole('slider', { name: 'Highlight intensity', exact: true });
   await slider.fill('30');
   await slider.press('Escape');
@@ -3240,7 +3253,7 @@ test('highlight intensity dims selections without dimming text and persists acro
   expect(await dimmed.evaluate(e => getComputedStyle(e).backgroundColor)).not.toBe(original);
   expect(await dimmed.evaluate(e => getComputedStyle(e).color)).toBe('rgb(255, 255, 255)');
   await page.reload();
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   await expect(slider).toHaveValue('30');
   await page.getByRole('button', { name: 'Reset highlight intensity' }).click();
   await expect(slider).toHaveValue('100');
@@ -3603,7 +3616,7 @@ test('file windows share the dock with pinned replies and reopen without duplica
   expect(Object.keys((await state()).documents)).toEqual([doc.id]);
   expect(await readFile(join(root, 'a.md'), 'utf8')).toBe('# First file\n');
   // The existing one-window setting applies across files and pinned replies.
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page);
   await page.getByRole('radio', { name: 'One at a time', exact: true }).check();
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
   await expect(dock.getByRole('tab')).toHaveText(['b.yml']);
@@ -4087,7 +4100,7 @@ test('Cloudflare settings show configured provider without publishing it, and ma
   await writeFile(path, JSON.stringify({ tunnel: { provider: 'cloudflare', publicUrl: 'https://sidecar.example.com', configPath: '/private/example/tunnel.yml' } }));
   const doc = await f.register();
   await page.goto(`${f.url}/?document=${doc.id}`);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Access');
   await expect(page.getByRole('heading', { name: 'Internet (Cloudflare)' })).toBeVisible();
   await expect(page.getByText('Configured address: https://sidecar.example.com', { exact: true })).toBeVisible();
   await expect(page.getByRole('checkbox', { name: 'Allow access on local network' })).not.toBeChecked();
@@ -4097,7 +4110,7 @@ test('Cloudflare settings show configured provider without publishing it, and ma
   await expect(page.getByLabel('ngrok command')).toHaveCount(0);
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
   await writeFile(path, '{broken');
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Access');
   await expect(page.getByRole('alert')).toContainText('Sidecar config');
   await page.getByRole('checkbox', { name: 'Allow access on local network' }).click();
   await expect(page.getByRole('checkbox', { name: 'Allow access on local network' })).not.toBeChecked();
@@ -4933,7 +4946,7 @@ test('Settings hides gitignored entries by default, reveals them on demand, and 
   await expect(panel.getByTitle('ignored.log', { exact: true })).toHaveCount(0);
   await expect(panel.getByTitle('node_modules', { exact: true })).toHaveCount(0);
   expect(listed).not.toContain(join(root, 'node_modules'));
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Files');
   const setting = page.getByRole('checkbox', { name: 'Show gitignored files and folders', exact: true });
   await expect(setting).not.toBeChecked(); await setting.check();
   await page.screenshot({ path: testInfo.outputPath('gitignored-settings.png') });
@@ -4949,7 +4962,7 @@ test('Settings hides gitignored entries by default, reveals them on demand, and 
   await page.reload();
   await expect(panel.getByTitle('ignored.log', { exact: true })).toBeVisible();
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep my draft');
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Files');
   await expect(setting).toBeChecked(); await setting.uncheck();
   await page.getByRole('button', { name: 'Close settings' }).click();
   await expect(panel.getByTitle('ignored.log', { exact: true })).toHaveCount(0);
@@ -5175,7 +5188,7 @@ test('Ends align: scrolling either pane to its bottom (and top) puts the other t
 test('Scroll sync aligns at 25% by default: the same block sits a quarter down both panes, and the slider moves it live and persists', async ({ page }) => {
   await openSplit(page, 'sync-fixed.md', syncDoc());
   await scrollLeader(page, 'source', 0.5, 0.25);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Editor');
   const slider = page.getByRole('slider', { name: 'Align at', exact: true });
   await expect(slider).toHaveValue('25'); await expect(slider).toHaveAttribute('step', '5');
   await slider.fill('50');
@@ -5184,7 +5197,7 @@ test('Scroll sync aligns at 25% by default: the same block sits a quarter down b
   await scrollLeader(page, 'preview', 0.3, 0.5); // no reload, no remount
   await page.reload();
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Editor');
   await expect(page.getByRole('slider', { name: 'Align at', exact: true })).toHaveValue('50');
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
   await expect(page.locator('.edit-preview').getByRole('heading', { name: 'Section 1', exact: true })).toBeVisible();
@@ -6079,7 +6092,7 @@ test('phone edit mode fits the viewport: no page scroll, all header controls vis
   const editorBottom = () => page.locator('.markdown-edit-mode').evaluate(el => el.getBoundingClientRect().bottom);
   expect(await editorBottom()).toBeLessThanOrEqual(844);
   expect(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight && document.body.scrollHeight <= innerHeight)).toBe(true);
-  const header = [page.getByText('● Unsaved'), ...['Format', 'Save', 'Done'].map(name => page.getByRole('button', { name, exact: true }))];
+  const header = [page.locator('.topbar .agent-status'), page.getByText('● Unsaved'), ...['Save', 'Done', 'Menu'].map(name => page.getByRole('button', { name, exact: true }))];
   const boxes = [];
   for (const control of header) { await expect(control).toBeVisible(); boxes.push((await control.boundingBox())!); }
   for (const box of boxes) { expect(box.x).toBeGreaterThanOrEqual(0); expect(box.x + box.width).toBeLessThanOrEqual(390); }
@@ -6193,7 +6206,7 @@ test('the editor text size setting scales the source pane, persists across reloa
   const previewSize = () => page.locator('.edit-preview').evaluate(el => getComputedStyle(el).fontSize);
   expect(await size()).toBe('13px');
   const preview = await previewSize();
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Editor');
   const slider = page.getByRole('slider', { name: 'Editor text size', exact: true });
   await expect(slider).toHaveAttribute('min', '80'); await expect(slider).toHaveAttribute('max', '150'); await expect(slider).toHaveAttribute('step', '5');
   await slider.fill('150');
@@ -6204,7 +6217,7 @@ test('the editor text size setting scales the source pane, persists across reloa
   await page.reload();
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
   await expect.poll(size).toBe('19.5px');
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openSettings(page, 'Editor');
   await expect(page.getByRole('slider', { name: 'Editor text size', exact: true })).toHaveValue('150');
   await page.getByRole('button', { name: 'Reset text sizes', exact: true }).click();
   await expect(page.getByRole('slider', { name: 'Editor text size', exact: true })).toHaveValue('100');
@@ -6246,7 +6259,7 @@ test('Format applies Prettier to the source as one undoable edit, never saves, a
   const main = await (await page.request.get(`${f.url}/app.js`)).text();
   expect(main).not.toContain(marker);
   const text = () => page.locator('.cm-line').evaluateAll(lines => lines.map(line => line.textContent).join('\n'));
-  await page.getByRole('button', { name: 'Format', exact: true }).click();
+  await formatViaMenu(page);
   await expect.poll(text).toBe(expected);
   expect(carriers).toHaveLength(1);
   expect(carriers[0]).toMatch(/^\/chunks\/.+\.js$/);
@@ -6267,8 +6280,186 @@ test('Format failures are shown and leave the text alone', async ({ page }) => {
   await page.waitForLoadState('networkidle');
   // The chunks the page needs are loaded; only Prettier's is still to come.
   await page.route('**/chunks/*.js', route => route.fulfill({ status: 500, body: 'no' }));
-  await page.getByRole('button', { name: 'Format', exact: true }).click();
+  await formatViaMenu(page);
   await expect(page.getByRole('alert').filter({ hasText: 'Could not format' })).toBeVisible();
   await expect(page.locator('.cm-content')).toContainText('*a*');
-  await expect(page.getByRole('button', { name: 'Format', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Menu', exact: true }).click();
+  await expect(page.getByRole('menuitem', { name: /^Format/ })).not.toHaveAttribute('aria-disabled', 'true');
+});
+
+const menuButton = (page: Page) => page.getByRole('button', { name: 'Menu', exact: true });
+
+test('the app-bar menu opens and closes with mouse and keyboard, and offers Format only while editing', async ({ page }) => {
+  const doc = await f.register('menu.md', '# Menu\n\nBody.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  const menu = page.getByRole('menu', { name: 'Menu' });
+  await expect(menuButton(page)).toHaveAttribute('aria-haspopup', 'menu');
+  await expect(menuButton(page)).toHaveAttribute('aria-expanded', 'false');
+  await menuButton(page).click();
+  await expect(menuButton(page)).toHaveAttribute('aria-expanded', 'true');
+  await expect(menu.getByRole('menuitem')).toHaveText([/^View all documents/, /^Settings/]);
+  await expect(menu.getByRole('menuitem').first()).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(menu.getByRole('menuitem', { name: /^Settings/ })).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(menu.getByRole('menuitem', { name: /^View all/ })).toBeFocused();
+  await page.keyboard.press('End');
+  await expect(menu.getByRole('menuitem', { name: /^Settings/ })).toBeFocused();
+  await page.keyboard.press('Home');
+  await expect(menu.getByRole('menuitem', { name: /^View all/ })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+  await expect(menuButton(page)).toBeFocused();
+  await menuButton(page).press('ArrowDown');
+  await expect(menu).toBeVisible();
+  await page.keyboard.press('Tab');
+  await expect(menu).toHaveCount(0);
+  await menuButton(page).click();
+  await page.locator('.canvas').click({ position: { x: 5, y: 5 } });
+  await expect(menu).toHaveCount(0);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await menuButton(page).click();
+  await expect(menu.getByRole('menuitem')).toHaveText([/^Format\s*Tidy Markdown with Prettier/, /^View all documents/, /^Settings/]);
+  await expect(menu.getByRole('menuitem').first()).toBeFocused();
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await menuButton(page).click();
+  await expect(menu.getByRole('menuitem', { name: /^Format/ })).toHaveCount(0);
+});
+
+test('the menu opens the library and Settings, and Ctrl/Cmd+comma opens Settings', async ({ page, context }) => {
+  const doc = await f.register('menu-go.md', '# Menu\n\nBody.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await menuButton(page).click();
+  const [library] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'View all documents', exact: true }).click()]);
+  expect(new URL(library.url()).search).toBe('?library=1');
+  await library.close();
+  const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+  await menuButton(page).click();
+  await page.getByRole('menuitem', { name: /^Settings/ }).click();
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(menuButton(page)).toBeFocused();
+  await page.keyboard.press('Control+,');
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Close settings' }).click();
+  await expect(dialog).toBeHidden();
+  await expect(menuButton(page)).toBeFocused();
+  await page.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: ',', metaKey: true, bubbles: true })));
+  await expect(dialog).toBeVisible();
+  await page.mouse.click(2, 2);
+  await expect(dialog).toBeHidden();
+});
+
+test('Settings categories switch content, remember the last category, and use a list-detail flow on a phone', async ({ page }) => {
+  const doc = await f.register('cats.md', '# Cats\n\nBody.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await openSettings(page);
+  const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+  const category = (name: string) => dialog.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name, exact: true });
+  await expect(category('Reading')).toHaveAttribute('aria-current', 'page');
+  await expect(dialog.getByRole('slider', { name: 'Document text size' })).toBeVisible();
+  await expect(dialog.getByRole('slider', { name: 'Editor text size' })).toHaveCount(0);
+  await expect(dialog.getByRole('button', { name: 'Zoom in' })).toHaveCount(0);
+  const box = (await dialog.boundingBox())!;
+  expect(box.width).toBeCloseTo(760, 0);
+  await category('Editor').click();
+  await expect(category('Editor')).toHaveAttribute('aria-current', 'page');
+  await expect(category('Reading')).not.toHaveAttribute('aria-current', 'page');
+  await expect(dialog.getByRole('slider', { name: 'Editor text size' })).toBeVisible();
+  await expect(dialog.getByRole('slider', { name: 'Align at' })).toBeVisible();
+  await expect(dialog.getByRole('slider', { name: 'Document text size' })).toHaveCount(0);
+  await category('Files').click();
+  await expect(dialog.getByRole('radio', { name: 'One at a time' })).toBeVisible();
+  await expect(dialog.getByRole('checkbox', { name: 'Show gitignored files and folders' })).toBeVisible();
+  await expect(dialog.getByRole('radio', { name: 'Rich text' })).toBeVisible();
+  await category('Access').click();
+  await expect(dialog.getByRole('checkbox', { name: 'Allow access on local network' })).toBeVisible();
+  await category('About').click();
+  await expect(dialog.locator('.settings-version')).toHaveText((await state()).appVersion);
+  await category('About').focus();
+  await page.keyboard.press('ArrowUp');
+  await expect(category('Access')).toBeFocused();
+  await expect(category('Access')).toHaveAttribute('aria-current', 'page');
+  await category('Files').click();
+  await page.reload();
+  await openSettings(page);
+  await expect(category('Files')).toHaveAttribute('aria-current', 'page');
+  await expect(dialog.getByRole('radio', { name: 'One at a time' })).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openSettings(page);
+  const full = (await dialog.boundingBox())!;
+  expect([full.width, full.height]).toEqual([390, 844]);
+  await expect(dialog.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
+  await expect(dialog.getByRole('radio', { name: 'One at a time' })).toBeHidden();
+  await category('Reading').click();
+  await expect(dialog.getByRole('heading', { name: 'Reading', exact: true })).toBeVisible();
+  await expect(dialog.getByRole('slider', { name: 'Document text size' })).toBeVisible();
+  await expect(category('Reading')).toBeHidden();
+  await dialog.getByRole('button', { name: 'Back to categories' }).click();
+  await expect(dialog.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
+  await expect(dialog.getByRole('slider', { name: 'Document text size' })).toBeHidden();
+  await expect(category('Reading')).toBeVisible();
+});
+
+test('the unsaved-changes dialog is centred on desktop and phone', async ({ page }) => {
+  const doc = await f.register('centred.md', '# Title\n\nBody.\n');
+  for (const size of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(size);
+    await page.goto(`${f.url}/?document=${doc.id}`);
+    await page.getByRole('button', { name: 'Edit', exact: true }).click();
+    await typeAtEndOfFirstLine(page, ' x');
+    await page.getByRole('button', { name: 'Done', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'You have unsaved changes' });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAccessibleDescription('Save them to the file, or discard them and return to the document.');
+    await expect(dialog.getByRole('button', { name: 'Save', exact: true })).toBeFocused();
+    const box = (await dialog.boundingBox())!;
+    expect(Math.abs(box.x + box.width / 2 - size.width / 2)).toBeLessThan(4);
+    expect(Math.abs(box.y + box.height / 2 - size.height / 2)).toBeLessThan(4);
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await page.getByRole('button', { name: 'Done', exact: true }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Discard', exact: true }).click();
+  }
+});
+
+test('edit mode fills the canvas and the source pane reads darker than the preview', async ({ page }) => {
+  const doc = await f.register('fill.md', '# Title\n\nBody.\n');
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.cm-content')).toBeVisible();
+  const edges = await page.evaluate(() => {
+    const canvas = document.querySelector('.canvas.editing')!.getBoundingClientRect(), mode = document.querySelector('.markdown-edit-mode')!, panes = mode.getBoundingClientRect(), style = getComputedStyle(mode);
+    return { left: panes.left - canvas.left, right: canvas.right - panes.right, top: panes.top - canvas.top, bottom: canvas.bottom - panes.bottom, border: style.borderTopWidth, radius: style.borderTopLeftRadius };
+  });
+  expect(edges).toEqual({ left: 0, right: 0, top: 0, bottom: 0, border: '0px', radius: '0px' });
+  const colour = (selector: string) => page.locator(selector).first().evaluate(el => getComputedStyle(el).backgroundColor);
+  const source = await colour('.source-editor .cm-editor'), preview = await colour('.edit-preview');
+  expect(source).not.toBe(preview);
+  expect(preview).toBe(await page.evaluate(() => { const probe = document.createElement('i'); probe.style.color = 'var(--background)'; document.body.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return c; }));
+  await page.locator('.cm-content').focus();
+  await expect(page.locator('.source-editor .cm-editor.cm-focused')).toHaveCSS('box-shadow', /inset/);
+});
+
+test('the phone header keeps the agent status, Menu, Save and Done visible without overlap', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  cleanup.unshift(() => context.close());
+  const page = await context.newPage();
+  const doc = await f.register('phone-header.md', '# Phone\n\nBody.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' x');
+  const status = page.locator('.topbar .agent-status');
+  await expect(status).toBeVisible();
+  await expect(status.locator('> span:last-child')).toBeHidden();
+  const boxes = [];
+  for (const control of [status, menuButton(page), page.getByRole('button', { name: 'Save', exact: true }), page.getByRole('button', { name: 'Done', exact: true })]) { await expect(control).toBeVisible(); boxes.push((await control.boundingBox())!); }
+  for (let a = 0; a < boxes.length; a++) { expect(boxes[a].x + boxes[a].width).toBeLessThanOrEqual(390); for (let b = a + 1; b < boxes.length; b++) {
+    const x = boxes[a], y = boxes[b];
+    expect(x.x + x.width <= y.x + 0.5 || y.x + y.width <= x.x + 0.5 || x.y + x.height <= y.y || y.y + y.height <= x.y).toBe(true);
+  } }
 });

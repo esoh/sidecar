@@ -52,6 +52,14 @@ const paths = {
   file: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6',
   refresh: 'M20 12a8 8 0 1 1-2.3-5.7L20 8M20 3v5h-5',
   diff: 'M12 4v8M8 8h8M8 18h8',
+  format: 'M4 6h16M4 12h10M4 18h13',
+  library: 'M4 5h6v14H4zM14 5h6v14h-6z',
+  reading: 'M4 5h7a3 3 0 0 1 3 3v11a2 2 0 0 0-2-2H4zM20 5h-6',
+  editor: 'M4 20h4L19 9l-4-4L4 16z',
+  files: 'M3 7h6l2 2h10v10H3z',
+  access: 'M9 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM11 18h2',
+  about: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM12 11v5M12 8h.01',
+  chevronRight: 'm9 6 6 6-6 6',
   panel: 'M14 3v18M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z',
 };
 export function Icon({ name }: { name: keyof typeof paths }) {

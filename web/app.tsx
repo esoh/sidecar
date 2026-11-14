@@ -26,7 +26,8 @@ import { MarkdownDocument, WorkspaceLinks, type OpenWorkspaceLink } from './Mark
 import { resolveWorkspaceLink, splitLineSuffix, fileLineRange, pageLinkTarget, type FileLineRange } from './links.ts';
 import { setDocPreviewFetcher } from '@plannotator/ui/components/InlineMarkdown';
 import { DocumentLibrary } from './DocumentLibrary.tsx';
-import { SettingsProvider, TextSettings } from './TextSettings.tsx';
+import { SettingsProvider } from './TextSettings.tsx';
+import { AppMenu } from './AppMenu.tsx';
 import { PinnedWindows, ZoomControls, changesWindowId } from './PinnedWindows.tsx';
 import { conversationShortcut, isConversationShortcut, isFrameShortcut } from './shortcuts.ts';
 import { DocumentHeader } from './DocumentHeader.tsx';
@@ -1310,10 +1311,10 @@ function App() {
         )}
         </>}
         <AgentStatus state={state} connected={connected} />
-        <TextSettings version={state?.appVersion}>
-          {/* Also here because a phone header has no room for the page's zoom controls. */}
-          {htmlView && <div className="text-settings-heading brightness-heading"><span>HTML page zoom</span><ZoomControls zoom={htmlZoom} onZoom={changeHtmlZoom} /></div>}
-        </TextSettings>
+        {/* The page's zoom is also in Settings because a phone header has no room for its controls. */}
+        <AppMenu version={state?.appVersion} format={isEditing && !htmlView ? { busy: editStatus.formatting, disabledReason: hasCarriageReturn ? 'This file uses Windows (CRLF) line endings, which Prettier would change.' : undefined, run: async () => { await editMode.current?.format(); } } : null}>
+          {htmlView && <ZoomControls zoom={htmlZoom} onZoom={changeHtmlZoom} />}
+        </AppMenu>
         <button
           className="sidebar-toggle conversation-toggle"
           aria-label={isSidebarShown ? 'Hide conversations' : 'Show conversations'}
@@ -1332,7 +1333,6 @@ function App() {
               title={hasCarriageReturn ? 'This file uses Windows (CRLF) line endings, which the editor would change. Edit it in your own editor.' : 'Edit this document'}>Edit</button>
           : <>
               {editStatus.dirty && <span className="markdown-edit-dirty">● Unsaved</span>}
-              <button className="sidebar-toggle edit-action" disabled={hasCarriageReturn || editStatus.formatting} title="Format the Markdown with Prettier (undo with Cmd/Ctrl+Z)" onClick={() => { void editMode.current?.format(); }}>{editStatus.formatting ? 'Format…' : 'Format'}</button>
               <button className="sidebar-toggle edit-action" disabled={!editStatus.dirty || editStatus.saving} onClick={() => { void editMode.current?.save(); }}>Save</button>
               <button className="sidebar-toggle edit-action" onClick={() => { void editMode.current?.requestExit(); }}>Done</button>
             </>)}
