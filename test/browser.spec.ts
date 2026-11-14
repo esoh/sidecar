@@ -6345,6 +6345,10 @@ test('the menu opens the library and Settings, and Ctrl/Cmd+comma opens Settings
   await expect(dialog).toBeVisible();
   await dialog.getByRole('button', { name: 'Close settings' }).click();
   await expect(dialog).toBeHidden();
+  await page.keyboard.press('Control+,');
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
   await expect(menuButton(page)).toBeFocused();
   await page.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: ',', metaKey: true, bubbles: true })));
   await expect(dialog).toBeVisible();

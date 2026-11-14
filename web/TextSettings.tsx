@@ -66,6 +66,8 @@ export function TextSettings({ version, open, onClose, children }: { version?: s
     if (open && !element.open) { setView('list'); element.showModal(); currentButton()?.focus(); void updateNetwork(); }
     else if (!open && element.open) element.close();
   }, [open]);
+  // Closing is reported at once: the dialog's own close event arrives a task later, after a quick shortcut could have reopened it.
+  const dismiss = () => { dialog.current?.close(); onClose(); };
   const choose = (next: Category) => { storage.setItem('sidecar-settings-category', next); setCategory(next); };
   const [network, setNetwork] = useState<{ enabled: boolean; urls: string[]; isLocal: boolean; publicUrl: string | null; tunnelTarget?: string | null; passphrase?: string | null } | null>(null);
   const [passphrase, setPassphrase] = useState('');
@@ -188,12 +190,12 @@ export function TextSettings({ version, open, onClose, children }: { version?: s
   };
   const label = categories.find(entry => entry.id === category)!.label;
   return (
-    <dialog ref={dialog} className="text-settings settings-dialog" aria-label="Settings" onClose={onClose} onClick={event => { if (event.target === event.currentTarget) dialog.current?.close(); }}>
+    <dialog ref={dialog} className="text-settings settings-dialog" aria-label="Settings" onClose={onClose} onClick={event => { if (event.target === event.currentTarget) dismiss(); }}>
       <div className="settings-shell" data-view={view}>
         <div className="settings-head">
           <button ref={back} type="button" className="settings-back" aria-label="Back to categories" onClick={() => { setView('list'); setTimeout(() => currentButton()?.focus()); }}><Icon name="back" /></button>
           <h2>{isPhone && view === 'detail' ? label : 'Settings'}</h2>
-          <button type="button" aria-label="Close settings" onClick={() => dialog.current?.close()}><Icon name="close" /></button>
+          <button type="button" aria-label="Close settings" onClick={dismiss}><Icon name="close" /></button>
         </div>
         <nav ref={nav} className="settings-cats" aria-label="Settings categories" onKeyDown={event => {
           if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
