@@ -131,8 +131,9 @@ export function syncScroll(source: EditorView, preview: HTMLElement, fraction: (
     el[to].scrollTop = target;
     quiet[to] = performance.now() + QUIET_MS;
   };
-  // CodeMirror re-measures its lines (after a font-size change, say) in its own measure cycle; build the segments after it.
-  const rebuild = () => { frame = 0; source.requestMeasure({ read: () => null, write: () => { segments = buildSegments(source, preview); follow(leader); place(); } }); };
+  const build = () => { segments = buildSegments(source, preview); follow(leader); place(); };
+  // CodeMirror re-measures its lines (after a font-size change, say) in its own cycle: build again once it has.
+  const rebuild = () => { frame = 0; build(); source.requestMeasure({ read: () => null, write: build }); };
   const schedule = () => { if (!frame) frame = requestAnimationFrame(rebuild); };
   const onScroll = (side: Side) => () => {
     light();
