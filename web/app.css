@@ -1248,8 +1248,8 @@ pre code.pn-code[data-keep-layout] {
 .source-editor { flex: 1; min-height: 0; }
 .source-editor { background: var(--editor-bg); }
 /* A small triangle on each pane's left edge; its tip is the line the panes align on. Moved by syncScroll. */
-.sync-marker { position: absolute; z-index: 2; left: 0; top: 0; width: 0; height: 0; border-left: 7px solid var(--primary); border-top: 4px solid transparent; border-bottom: 4px solid transparent; opacity: 0.35; transition: opacity 0.3s; pointer-events: none; }
-.sync-marker[data-active] { opacity: 1; }
+.sync-marker { position: absolute; z-index: 2; left: 0; top: 0; width: 0; height: 0; border-left: 4px solid var(--primary); border-top: 2.5px solid transparent; border-bottom: 2.5px solid transparent; opacity: 0.2; transition: opacity 0.3s; pointer-events: none; }
+.sync-marker[data-active] { opacity: 0.55; }
 @media (prefers-reduced-motion: reduce) { .sync-marker { transition: none; } }
 .source-editor .cm-editor { height: 100%; background: var(--editor-bg); color: var(--foreground); }
 .source-editor :is(.cm-scroller, .cm-content, .cm-gutters) { background: var(--editor-bg); }

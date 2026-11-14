@@ -5247,7 +5247,7 @@ test('Alignment markers sit on each pane\'s left edge at the alignment line, lig
   await expect.poll(async () => (await tips()).every(t => Math.abs(t.tip - 0.25) < 2 / 800)).toBe(true);
   expect((await tips()).some(t => t.overlapsText)).toBe(false);
   await expect(markers.first()).not.toHaveAttribute('data-active', '', { timeout: 2500 });
-  await expect(markers.first()).toHaveCSS('opacity', '0.35');
+  await expect(markers.first()).toHaveCSS('opacity', '0.2');
 });
 
 // How far (px) the other pane's alignment line is from the leader's: the leader's anchor sits in a heading or paragraph, and its twin in the
