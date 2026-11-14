@@ -109,6 +109,7 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
       if (view.current !== editor || text() !== before) { onError('The text changed while formatting. Try again.'); return; }
       const change = minimalChange(before, formatted);
       if (change) editor.dispatch({ changes: change, userEvent: 'input.format', scrollIntoView: true });
+      if (document.activeElement?.closest('.app-menu')) editor.focus(); // the user is still in the menu: continue in the text
     } catch (reason) { onError(`Could not format: ${errorText(reason)}`); }
     finally { isFormatting.current = false; setFormatting(false); }
   }, [onError]);

@@ -81,3 +81,18 @@ test('targetScrollTop clamps to the target scroll range', () => {
   assert.equal(targetScrollTop(segments, 'source', 300, from, { scrollHeight: 120, clientHeight: 100 }, 0.25), 20);
   assert.equal(targetScrollTop(segments, 'source', 0, from, { scrollHeight: 300, clientHeight: 100 }, 0.5), 0);
 });
+
+test('anchorFraction and targetScrollTop hold at the extremes of f and in documents barely over one screen', () => {
+  for (const f of [0, 1]) for (const [scrollHeight, clientHeight] of [[1000, 200], [201, 200], [350, 200]]) {
+    const max = scrollHeight - clientHeight;
+    assert.equal(anchorFraction(0, scrollHeight, clientHeight, f), 0);
+    assert.ok(Math.abs(anchorFraction(max, scrollHeight, clientHeight, f) - 1) < 1e-12);
+    let last = -1;
+    for (let s = 0; s <= max; s += max / 100) { const y = anchorY(s, scrollHeight, clientHeight, f); assert.ok(y >= last - 1e-9); last = y; }
+  }
+  // Zone = max / 2 (under two screens), and a target shorter than its viewport.
+  const wide: Segment[] = [{ source: [0, 350], preview: [0, 100] }];
+  assert.equal(targetScrollTop(wide, 'source', 150, { scrollHeight: 350, clientHeight: 200 }, { scrollHeight: 100, clientHeight: 200 }, 0.25), 0);
+  assert.equal(anchorFraction(75, 350, 200, 0.25), 0.25);
+  assert.equal(anchorFraction(37.5, 350, 200, 0.25), 0.125);
+});

@@ -92,7 +92,7 @@ export function DocumentLibrary() {
       <header className="topbar">
         <a className="brand" href={libraryPath()}><Icon name="logo" />Sidecar</a>
         {session && <AgentSession owner={session.owner} />}
-        <div className="library-actions"><button disabled={loading || !!closing} onClick={() => { void refresh(); }}>Refresh</button><AppMenu /></div>
+        <div className="library-actions"><button disabled={loading || !!closing} onClick={() => { void refresh(); }}>Refresh</button><AppMenu library /></div>
       </header>
       <main className="canvas library-canvas">
         <div className="reading-width">

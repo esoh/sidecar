@@ -6289,6 +6289,87 @@ test('Format failures are shown and leave the text alone', async ({ page }) => {
 
 const menuButton = (page: Page) => page.getByRole('button', { name: 'Menu', exact: true });
 
+test('finishing Format does not pull focus out of the editor, and the menu shows its busy and CRLF states', async ({ page }) => {
+  const doc = await f.register('format-focus.md', '# Title\n\n*a*\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.cm-content')).toBeVisible();
+  await page.waitForLoadState('networkidle');
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/chunks/*.js', async route => { await gate; await route.continue(); });
+  const menu = page.getByRole('menu', { name: 'Menu' }), format = menu.getByRole('menuitem', { name: /^Format/ });
+  await menuButton(page).click();
+  await format.click();
+  await expect(format).toHaveAttribute('aria-disabled', 'true');
+  await expect(format).toContainText('Loading Prettier…');
+  await page.keyboard.press('Escape');
+  await page.locator('.cm-content').click();
+  release();
+  await expect(page.locator('.cm-content')).toContainText('_a_');
+  await expect(page.locator('.cm-content')).toBeFocused();
+  // After a format run from the open menu, focus continues in the text rather than on the Menu button.
+  await page.keyboard.press('ControlOrMeta+z');
+  await menuButton(page).click();
+  await format.click();
+  await expect(page.locator('.cm-content')).toContainText('_a_');
+  await expect(page.locator('.cm-content')).toBeFocused();
+  // A document that gains CRLF line endings on disk disables Format with the reason.
+  await writeFile(doc.path, '# Title\r\n\r\n*a*\r\n');
+  await menuButton(page).click();
+  await expect(format).toHaveAttribute('aria-disabled', 'true');
+  await expect(format).toContainText('Windows (CRLF) line endings');
+});
+
+test('Ctrl/Cmd+comma does not open Settings over another modal, and the menu closes when the window loses focus', async ({ page }) => {
+  const doc = await f.register('menu-modal.md', '# Menu\n\nBody.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await typeAtEndOfFirstLine(page, ' x');
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  const unsaved = page.getByRole('dialog', { name: 'Unsaved changes' });
+  await expect(unsaved).toBeVisible();
+  await page.keyboard.press('Control+,');
+  await expect(page.getByRole('dialog', { name: 'Settings', exact: true })).toHaveCount(0);
+  await unsaved.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await menuButton(page).click();
+  await expect(page.getByRole('menu', { name: 'Menu' })).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+  await expect(page.getByRole('menu', { name: 'Menu' })).toHaveCount(0);
+});
+
+test('on the library page the menu omits View all documents, and elsewhere it is a real link', async ({ page }) => {
+  const doc = await f.register('menu-link.md', '# Link\n\nBody.\n');
+  await page.goto(`${f.url}/?library=1`);
+  await menuButton(page).click();
+  await expect(page.getByRole('menuitem', { name: /^View all documents/ })).toHaveCount(0);
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await menuButton(page).click();
+  const link = page.getByRole('menuitem', { name: /^View all documents/ });
+  await expect(link).toHaveAttribute('href', /library=1|\/$/);
+  await expect(link).toHaveAttribute('target', '_blank');
+  await expect(page.getByRole('menuitem', { name: /^Settings/ })).toHaveAttribute('aria-keyshortcuts', 'Meta+Comma Control+Comma');
+});
+
+test('Settings ignores an invalid saved category, and on a phone reopening after closing a category page focuses the list', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  cleanup.unshift(() => context.close());
+  await context.addCookies([{ name: 'sidecar-settings-category', value: 'bogus', url: f.url }]);
+  const page = await context.newPage();
+  const doc = await f.register('phone-settings.md', '# Phone\n\nBody.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await openSettings(page);
+  const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+  const cats = dialog.getByRole('navigation', { name: 'Settings categories' });
+  await expect(cats.getByRole('button', { name: 'Reading', exact: true })).toHaveAttribute('aria-current', 'page');
+  await cats.getByRole('button', { name: 'Editor', exact: true }).click();
+  await expect(dialog.getByRole('heading', { name: 'Editor', exact: true })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Close settings' }).click();
+  await expect(dialog).toBeHidden();
+  await openSettings(page);
+  await expect(cats.getByRole('button', { name: 'Editor', exact: true })).toBeFocused();
+});
+
 test('the app-bar menu opens and closes with mouse and keyboard, and offers Format only while editing', async ({ page }) => {
   const doc = await f.register('menu.md', '# Menu\n\nBody.\n');
   await page.goto(`${f.url}/?document=${doc.id}`);
@@ -6314,6 +6395,7 @@ test('the app-bar menu opens and closes with mouse and keyboard, and offers Form
   await expect(menu).toBeVisible();
   await page.keyboard.press('Tab');
   await expect(menu).toHaveCount(0);
+  await expect(menuButton(page)).not.toBeFocused(); // Tab continues to the next control, as in the menu pattern
   await menuButton(page).click();
   await page.locator('.canvas').click({ position: { x: 5, y: 5 } });
   await expect(menu).toHaveCount(0);
@@ -6354,6 +6436,20 @@ test('the menu opens the library and Settings, and Ctrl/Cmd+comma opens Settings
   await expect(dialog).toBeVisible();
   await page.mouse.click(2, 2);
   await expect(dialog).toBeHidden();
+});
+
+test('Ctrl/Cmd+comma right after closing Settings in the same task still reopens it', async ({ page }) => {
+  const doc = await f.register('menu-race.md', '# Menu\n\nBody.\n');
+  await page.goto(`${f.url}/?document=${doc.id}`);
+  await openSettings(page);
+  const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+  // Close and reopen batch into one render, and the dialog's own close event arrives afterwards.
+  await page.evaluate(() => {
+    document.querySelector<HTMLElement>('dialog.settings-dialog [aria-label="Close settings"]')!.click();
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: ',', ctrlKey: true, bubbles: true }));
+  });
+  await page.waitForTimeout(200);
+  await expect(dialog).toBeVisible();
 });
 
 test('Settings categories switch content, remember the last category, and use a list-detail flow on a phone', async ({ page }) => {
@@ -6446,7 +6542,14 @@ test('edit mode fills the canvas and the source pane reads darker than the previ
   expect(source).not.toBe(preview);
   expect(preview).toBe(await page.evaluate(() => { const probe = document.createElement('i'); probe.style.color = 'var(--background)'; document.body.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return c; }));
   await page.locator('.cm-content').focus();
-  await expect(page.locator('.source-editor .cm-editor.cm-focused')).toHaveCSS('box-shadow', /inset/);
+  // The ring must be an outline: an inset box-shadow is painted beneath the opaque scroller and gutters and never shows.
+  const ring = page.locator('.source-editor .cm-editor.cm-focused');
+  await expect(ring).toHaveCSS('outline-style', 'solid');
+  await expect(ring).toHaveCSS('outline-width', '1px');
+  await expect(ring).toHaveCSS('outline-offset', '-1px');
+  await expect(ring).toHaveCSS('box-shadow', 'none');
+  const outline = await ring.evaluate(el => getComputedStyle(el).outlineColor);
+  expect(outline).toBe(await page.evaluate(() => { const probe = document.createElement('i'); probe.style.color = 'var(--primary)'; document.body.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return c; }));
 });
 
 test('the phone header keeps the agent status, Menu, Save and Done visible without overlap', async ({ browser }) => {
@@ -6459,6 +6562,8 @@ test('the phone header keeps the agent status, Menu, Save and Done visible witho
   await typeAtEndOfFirstLine(page, ' x');
   const status = page.locator('.topbar .agent-status');
   await expect(status).toBeVisible();
+  await expect(status.locator('.agent-dot')).toBeVisible();
+  await expect(page.getByRole('status', { name: 'Agent status' })).toBeVisible();
   await expect(status.locator('> span:last-child')).toBeHidden();
   const boxes = [];
   for (const control of [status, menuButton(page), page.getByRole('button', { name: 'Save', exact: true }), page.getByRole('button', { name: 'Done', exact: true })]) { await expect(control).toBeVisible(); boxes.push((await control.boundingBox())!); }

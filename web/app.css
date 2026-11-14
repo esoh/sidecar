@@ -1249,7 +1249,8 @@ pre code.pn-code[data-keep-layout] {
 .source-editor { background: var(--editor-bg); }
 .source-editor .cm-editor { height: 100%; background: var(--editor-bg); color: var(--foreground); }
 .source-editor :is(.cm-scroller, .cm-content, .cm-gutters) { background: var(--editor-bg); }
-.source-editor .cm-editor.cm-focused { outline: none; box-shadow: inset 0 0 0 1px var(--primary); }
+/* An outline paints above the opaque scroller and gutters; an inset shadow would be hidden beneath them. */
+.source-editor .cm-editor.cm-focused { outline: 1px solid var(--primary); outline-offset: -1px; }
 .source-editor .cm-scroller { overflow: auto; font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: calc(13px * var(--sidecar-editor-scale, 1)); line-height: 1.6; }
 .source-editor .cm-content { padding: 16px 18px; caret-color: var(--foreground); }
 .source-editor .cm-cursor { border-left-color: var(--foreground); }
@@ -1789,7 +1790,7 @@ dialog.text-settings { width: 410px; max-height: calc(100dvh - 32px); margin: au
 /* App-bar menu. */
 .menu-wrap { position: relative; display: inline-flex; flex-shrink: 0; }
 .app-menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; min-width: 230px; padding: 5px; border-radius: 10px; border: 1px solid var(--border); background: var(--popover); box-shadow: 0 18px 60px #0007; }
-.app-menu [role='menuitem'] { display: flex; width: 100%; align-items: center; gap: 10px; padding: 8px 10px; border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.app-menu [role='menuitem'] { box-sizing: border-box; text-decoration: none; display: flex; width: 100%; align-items: center; gap: 10px; padding: 8px 10px; border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
 .app-menu [role='menuitem']:hover, .app-menu [role='menuitem']:focus-visible { background: var(--muted); outline: none; }
 .app-menu [role='menuitem'][aria-disabled='true'] { color: var(--subtle); cursor: not-allowed; }
 .app-menu kbd { margin-left: auto; font: 11px var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); color: var(--subtle); }

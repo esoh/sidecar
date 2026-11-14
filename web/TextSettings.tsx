@@ -63,9 +63,11 @@ export function TextSettings({ version, open, onClose, children }: { version?: s
   useEffect(() => {
     const element = dialog.current;
     if (!element) return;
-    if (open && !element.open) { setView('list'); element.showModal(); currentButton()?.focus(); void updateNetwork(); }
+    if (open && !element.open) { element.showModal(); currentButton()?.focus(); void updateNetwork(); }
     else if (!open && element.open) element.close();
-  }, [open]);
+    // Reset on close so the list is committed (and its category button focusable) before the next open.
+    if (!open) setView('list');
+  }); // every render: a close and reopen batched into one render leaves `open` unchanged but the dialog closed. Escape goes through onCancel so the dialog never closes without `open` following in the same update.
   // Closing is reported at once: the dialog's own close event arrives a task later, after a quick shortcut could have reopened it.
   const dismiss = () => { dialog.current?.close(); onClose(); };
   const choose = (next: Category) => { storage.setItem('sidecar-settings-category', next); setCategory(next); };
@@ -190,7 +192,7 @@ export function TextSettings({ version, open, onClose, children }: { version?: s
   };
   const label = categories.find(entry => entry.id === category)!.label;
   return (
-    <dialog ref={dialog} className="text-settings settings-dialog" aria-label="Settings" onClose={onClose} onClick={event => { if (event.target === event.currentTarget) dismiss(); }}>
+    <dialog ref={dialog} className="text-settings settings-dialog" aria-label="Settings" onCancel={event => { event.preventDefault(); dismiss(); }} onClose={() => { if (!dialog.current?.open) onClose(); }} onClick={event => { if (event.target === event.currentTarget) dismiss(); }}>
       <div className="settings-shell" data-view={view}>
         <div className="settings-head">
           <button ref={back} type="button" className="settings-back" aria-label="Back to categories" onClick={() => { setView('list'); setTimeout(() => currentButton()?.focus()); }}><Icon name="back" /></button>
