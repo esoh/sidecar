@@ -60,6 +60,14 @@ function visibleRect(wrapper: HTMLElement, rect: DOMRect): { top: number; bottom
   return { top: rect.top, bottom, height: bottom - rect.top };
 }
 
+/** Inside a collapsed <details>, outside its summary: laid out stale or not at all, so it takes no space. */
+function folded(node: Element): boolean {
+  for (let d = node.closest('details:not([open])'); d; d = d.parentElement?.closest('details:not([open])') ?? null) {
+    if (!d.querySelector(':scope > summary')?.contains(node)) return true;
+  }
+  return false;
+}
+
 function buildSegments(view: EditorView, preview: HTMLElement): Segment[] {
   const scroller = view.scrollDOM, doc = view.state.doc;
   const sourceBase = view.documentTop - scroller.getBoundingClientRect().top + scroller.scrollTop;
@@ -74,7 +82,7 @@ function buildSegments(view: EditorView, preview: HTMLElement): Segment[] {
   };
   wrappers.forEach((wrapper, i) => {
     const line = Number(wrapper.dataset.sourceLine);
-    if (!(line >= 1 && line <= doc.lines)) return;
+    if (!(line >= 1 && line <= doc.lines) || folded(wrapper)) return;
     const range = document.createRange();
     range.selectNodeContents(wrapper);
     const rect = visibleRect(wrapper, range.getBoundingClientRect());
@@ -123,7 +131,8 @@ export function syncScroll(source: EditorView, preview: HTMLElement, fraction: (
     el[to].scrollTop = target;
     quiet[to] = performance.now() + QUIET_MS;
   };
-  const rebuild = () => { frame = 0; segments = buildSegments(source, preview); follow(leader); place(); };
+  // CodeMirror re-measures its lines (after a font-size change, say) in its own measure cycle; build the segments after it.
+  const rebuild = () => { frame = 0; source.requestMeasure({ read: () => null, write: () => { segments = buildSegments(source, preview); follow(leader); place(); } }); };
   const schedule = () => { if (!frame) frame = requestAnimationFrame(rebuild); };
   const onScroll = (side: Side) => () => {
     light();

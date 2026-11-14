@@ -5250,6 +5250,79 @@ test('Alignment markers sit on each pane\'s left edge at the alignment line, lig
   await expect(markers.first()).toHaveCSS('opacity', '0.35');
 });
 
+// How far (px) the other pane's alignment line is from the leader's: the leader's anchor sits in a heading or paragraph, and its twin in the
+// other pane is found by text. Null when the anchor falls between blocks.
+const alignGap = (page: Page, leader: 'source' | 'preview', at = 0.25) => page.evaluate(([side, at]) => {
+  const pane = (name: string) => document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!;
+  const key = (e: Element) => (e.textContent ?? '').replace(/^## /, '').trim().slice(0, 9);
+  const blocks = (name: string) => [...pane(name).querySelectorAll<HTMLElement>(name === 'source' ? '.cm-line' : 'h2, p')]
+    .filter(e => /^(Section|Para|Short) \d+/.test(key(e)) && e.getBoundingClientRect().height > 0 && (name === 'source' || e.checkVisibility()));
+  const anchor = (name: string) => { const el = pane(name); return el.getBoundingClientRect().top + el.clientHeight * at; };
+  const other = side === 'source' ? 'preview' : 'source', y = anchor(side);
+  const hit = blocks(side).find(e => e.getBoundingClientRect().top <= y && y < e.getBoundingClientRect().bottom);
+  if (!hit) return null;
+  const a = hit.getBoundingClientRect(), twin = blocks(other).find(e => key(e) === key(hit));
+  if (!twin) return Infinity;
+  const b = twin.getBoundingClientRect();
+  return Math.abs(anchor(other) - (b.top + (y - a.top) / a.height * b.height));
+}, [leader, at] as const);
+// Waits for the other pane to line up with the leader, nudging the leader only while its anchor sits between blocks.
+async function expectAligned(page: Page, leader: 'source' | 'preview') {
+  await expect.poll(async () => {
+    const gap = await alignGap(page, leader);
+    if (gap === null) { await nudge(page, leader, 12); return Infinity; }
+    return gap;
+  }, { timeout: 8000 }).toBeLessThan(6);
+}
+const scrollTops = (page: Page) => page.evaluate(() => [document.querySelector<HTMLElement>('.cm-scroller')!.scrollTop, document.querySelector<HTMLElement>('.edit-preview')!.scrollTop]);
+// Scrolls the leader so the given section's heading sits `above` px above its alignment line.
+async function placeHeading(page: Page, leader: 'source' | 'preview', title: string, above: number) {
+  for (let i = 0; i < 4; i++) await page.evaluate(([side, title, above]) => {
+    const pane = document.querySelector<HTMLElement>(side === 'source' ? '.cm-scroller' : '.edit-preview')!;
+    const heading = [...pane.querySelectorAll(side === 'source' ? '.cm-line' : 'h2')].find(e => (e.textContent ?? '').replace(/^## /, '') === title);
+    if (heading) pane.scrollTop += heading.getBoundingClientRect().top - (pane.getBoundingClientRect().top + 0.25 * pane.clientHeight - above);
+    else pane.scrollTop = pane.scrollHeight * 0.3;
+  }, [leader, title, above] as const);
+}
+
+for (const leader of ['preview', 'source'] as const) {
+  test(`Folding a heading section in the preview keeps the panes aligned with the ${leader} leading`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openSplit(page, `sync-fold-${leader}.md`, syncDoc());
+    await placeHeading(page, leader, 'Section 8', 30);
+    await expectAligned(page, leader);
+    const summary = page.locator('.edit-preview summary', { hasText: 'Section 8' }).first();
+    for (let i = 0; i < 2; i++) { // collapse, then expand
+      const before = await scrollTops(page);
+      const leaderIndex = leader === 'source' ? 0 : 1;
+      await summary.click();
+      await page.waitForTimeout(400);
+      expect((await scrollTops(page))[leaderIndex]).toBeCloseTo(before[leaderIndex], -1); // the leader is not disturbed
+      await expectAligned(page, leader);
+    }
+  });
+}
+
+test('Resizing the window keeps the panes aligned', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSplit(page, 'sync-resize.md', syncDoc());
+  await scrollLeader(page, 'preview', 0.5);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.waitForTimeout(400);
+  await expectAligned(page, 'preview');
+});
+
+test('Changing the editor text size keeps the panes aligned', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSplit(page, 'sync-size.md', syncDoc());
+  await scrollLeader(page, 'preview', 0.5);
+  await openSettings(page, 'Editor');
+  await page.getByRole('slider', { name: 'Editor text size', exact: true }).fill('150');
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await page.waitForTimeout(400);
+  await expectAligned(page, 'preview');
+});
+
 test('No feedback loop: one programmatic scroll settles with no further scroll events', async ({ page }) => {
   await openSplit(page, 'sync-loop.md', syncDoc());
   await page.evaluate(() => { const el = document.querySelector<HTMLElement>('.cm-scroller')!; el.scrollTop = 0.5 * (el.scrollHeight - el.clientHeight); });
