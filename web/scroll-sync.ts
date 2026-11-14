@@ -56,7 +56,7 @@ export function targetScrollTop(segments: Segment[], from: Side, scrollTop: numb
 function visibleRect(wrapper: HTMLElement, rect: DOMRect): { top: number; bottom: number; height: number } {
   if (!wrapper.querySelector('details:not([open])')) return rect;
   let bottom = rect.top;
-  for (const node of wrapper.querySelectorAll('*')) if (node.checkVisibility()) bottom = Math.max(bottom, node.getBoundingClientRect().bottom);
+  for (const node of wrapper.querySelectorAll('*')) if (node.checkVisibility?.() ?? node.getClientRects().length > 0) bottom = Math.max(bottom, node.getBoundingClientRect().bottom);
   return { top: rect.top, bottom, height: bottom - rect.top };
 }
 
@@ -100,9 +100,10 @@ function buildSegments(view: EditorView, preview: HTMLElement): Segment[] {
 /**
  * Keeps the source and preview scrolled to the same passage: whichever pane the user scrolls (or the source while
  * typing) leads. The panes' blocks are measured in pixels, so wrapped paragraphs and images line up. The optional markers
- * are small triangles whose tip is moved to each pane's current alignment line, lit while either pane scrolls. Returns the cleanup.
+ * are small triangles whose tip is moved to each pane's current alignment line, lit while either pane scrolls. Returns `refresh`
+ * (re-measure and re-align now, for a changed alignment line) and `dispose`.
  */
-export function syncScroll(source: EditorView, preview: HTMLElement, fraction: () => number, markers?: Record<Side, HTMLElement | null>): () => void {
+export function syncScroll(source: EditorView, preview: HTMLElement, fraction: () => number, markers?: Record<Side, HTMLElement | null>): { refresh: () => void; dispose: () => void } {
   const scroller = source.scrollDOM;
   const el = { source: scroller, preview } as Record<Side, HTMLElement>;
   let segments: Segment[] = [], leader: Side = 'source', frame = 0;
@@ -114,7 +115,8 @@ export function syncScroll(source: EditorView, preview: HTMLElement, fraction: (
   const place = () => {
     for (const side of ['source', 'preview'] as const) {
       const marker = markers?.[side], { scrollHeight, clientHeight } = heights(side);
-      if (marker && clientHeight) marker.style.transform = `translateY(${anchorFraction(el[side].scrollTop, scrollHeight, clientHeight, fraction()) * clientHeight - marker.offsetHeight / 2}px)`;
+      // Kept fully inside the pane, so the ends do not clip it.
+      if (marker && clientHeight) marker.style.transform = `translateY(${Math.min(Math.max(anchorFraction(el[side].scrollTop, scrollHeight, clientHeight, fraction()) * clientHeight - marker.offsetHeight / 2, 0), Math.max(clientHeight - marker.offsetHeight, 0))}px)`;
     }
   };
   const light = () => {
@@ -131,7 +133,8 @@ export function syncScroll(source: EditorView, preview: HTMLElement, fraction: (
     el[to].scrollTop = target;
     quiet[to] = performance.now() + QUIET_MS;
   };
-  const build = () => { segments = buildSegments(source, preview); follow(leader); place(); };
+  let disposed = false;
+  const build = () => { if (disposed) return; segments = buildSegments(source, preview); follow(leader); place(); };
   // CodeMirror re-measures its lines (after a font-size change, say) in its own cycle: build again once it has.
   const rebuild = () => { frame = 0; build(); source.requestMeasure({ read: () => null, write: build }); };
   const schedule = () => { if (!frame) frame = requestAnimationFrame(rebuild); };
@@ -144,22 +147,34 @@ export function syncScroll(source: EditorView, preview: HTMLElement, fraction: (
   const onSource = onScroll('source'), onPreview = onScroll('preview');
   // Enter, Backspace, undo and paste are handled on keydown/paste (which suppress beforeinput), so listen for all of them.
   const typing = () => { leader = 'source'; };
+  // The pane the user is working in leads, and its quiet window ends so their first wheel ticks are not taken for an echo.
+  // Folding a section in the preview resizes it: the preview must stay put and the source follow.
+  const intent = (side: Side) => () => { leader = side; quiet[side] = 0; };
+  const intentEvents = ['pointerdown', 'wheel', 'touchstart', 'keydown'];
+  const onIntent = { source: intent('source'), preview: intent('preview') };
   const typingEvents = ['keydown', 'beforeinput', 'paste', 'cut', 'drop', 'compositionstart'];
   const resize = new ResizeObserver(schedule), mutations = new MutationObserver(schedule);
   scroller.addEventListener('scroll', onSource, { passive: true });
   preview.addEventListener('scroll', onPreview, { passive: true });
   for (const type of typingEvents) source.contentDOM.addEventListener(type, typing);
   preview.addEventListener('load', schedule, true);
+  for (const type of intentEvents) for (const side of ['source', 'preview'] as const) el[side].addEventListener(type, onIntent[side], { passive: true, capture: true });
+  preview.addEventListener('toggle', onIntent.preview, true);
   for (const node of [scroller, source.contentDOM, preview, preview.firstElementChild].filter((node): node is Element => !!node)) resize.observe(node);
   mutations.observe(preview, { childList: true, subtree: true, characterData: true });
   segments = buildSegments(source, preview);
   place();
-  return () => {
+  const dispose = () => {
+    disposed = true;
     cancelAnimationFrame(frame); clearTimeout(idle);
+    for (const marker of Object.values(markers ?? {})) marker?.removeAttribute('data-active');
+    for (const type of intentEvents) for (const side of ['source', 'preview'] as const) el[side].removeEventListener(type, onIntent[side], true);
+    preview.removeEventListener('toggle', onIntent.preview, true);
     scroller.removeEventListener('scroll', onSource);
     preview.removeEventListener('scroll', onPreview);
     for (const type of typingEvents) source.contentDOM.removeEventListener(type, typing);
     preview.removeEventListener('load', schedule, true);
     resize.disconnect(); mutations.disconnect();
   };
+  return { refresh: build, dispose };
 }

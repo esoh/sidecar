@@ -192,7 +192,7 @@ export function TextSettings({ version, open, onClose, children }: { version?: s
   };
   const label = categories.find(entry => entry.id === category)!.label;
   return (
-    <dialog ref={dialog} className="text-settings settings-dialog" aria-label="Settings" onCancel={event => { event.preventDefault(); dismiss(); }} onClose={() => { if (!dialog.current?.open) onClose(); }} onClick={event => { if (event.target === event.currentTarget) dismiss(); }}>
+    <dialog ref={dialog} className="text-settings settings-dialog" aria-label="Settings" onCancel={event => { event.preventDefault(); dismiss(); }} onClose={() => { if (open && !dialog.current?.open) onClose(); }} onClick={event => { if (event.target === event.currentTarget) dismiss(); }}>
       <div className="settings-shell" data-view={view}>
         <div className="settings-head">
           <button ref={back} type="button" className="settings-back" aria-label="Back to categories" onClick={() => { setView('list'); setTimeout(() => currentButton()?.focus()); }}><Icon name="back" /></button>

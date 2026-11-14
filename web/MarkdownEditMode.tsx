@@ -239,7 +239,15 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
   const quoteKey = JSON.stringify(quotes);
   useEffect(() => { paint(); }, [mountId, quoteKey]);
   // The panes scroll together; the one not shown (narrow) stays laid out and keeps following.
-  useEffect(() => view.current && previewScroller.current ? syncScroll(view.current, previewScroller.current, () => scrollSyncRef.current / 100, markers.current) : undefined, [mountId, scrollSyncPosition]);
+  const sync = useRef<ReturnType<typeof syncScroll> | null>(null);
+  useEffect(() => {
+    if (!view.current || !previewScroller.current) return;
+    sync.current = syncScroll(view.current, previewScroller.current, () => scrollSyncRef.current / 100, markers.current);
+    return () => { sync.current?.dispose(); sync.current = null; };
+  }, [mountId]);
+  // A new alignment line keeps the leader and re-aligns at once.
+  const alignedAt = useRef(scrollSyncPosition);
+  useEffect(() => { if (alignedAt.current !== scrollSyncPosition) { alignedAt.current = scrollSyncPosition; sync.current?.refresh(); } }, [scrollSyncPosition]);
   // Open at the reading position: the preview takes it and the source follows.
   useEffect(() => {
     if (anchor <= 0) return;

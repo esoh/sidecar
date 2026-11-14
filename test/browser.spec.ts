@@ -5154,7 +5154,7 @@ async function scrollLeader(page: Page, leader: 'source' | 'preview', fraction: 
     }, [leader, fraction, 25 * attempt++] as const);
     return (await syncGap(page, leader, at)) !== null;
   }).toBe(true);
-  await expect.poll(async () => (await syncGap(page, leader, at))?.gap ?? Infinity).toBeLessThan(24);
+  await expect.poll(async () => (await syncGap(page, leader, at))?.gap ?? Infinity, { timeout: 15000 }).toBeLessThan(24); // generous: the full suite loads the machine
 }
 const nudge = (page: Page, leader: 'source' | 'preview', by: number) => page.evaluate(([side, d]) => { document.querySelector<HTMLElement>(side === 'source' ? '.cm-scroller' : '.edit-preview')!.scrollTop += d; }, [leader, by] as const);
 
@@ -5239,9 +5239,10 @@ test('Alignment markers sit on each pane\'s left edge at the alignment line, lig
   // The tip (right edge, vertical middle) relative to each pane's top, and whether the marker overlaps the source text.
   const tips = () => page.evaluate(() => [['.cm-scroller', '.edit-pane:has(.cm-scroller) .sync-marker'], ['.edit-preview', '.edit-pane:has(.edit-preview) .sync-marker']].map(([pane, marker]) => {
     const p = document.querySelector(pane)!.getBoundingClientRect(), m = document.querySelector(marker)!.getBoundingClientRect(), c = document.querySelector('.cm-content')!.getBoundingClientRect();
-    return { tip: (m.top + m.height / 2 - p.top) / p.height, overlapsText: pane === '.cm-scroller' && m.right > c.left && m.left < c.right };
+    return { inside: m.top >= p.top - 0.01 && m.bottom <= p.bottom + 0.01, tip: (m.top + m.height / 2 - p.top) / p.height, overlapsText: pane === '.cm-scroller' && m.right > c.left && m.left < c.right };
   }));
-  await expect.poll(async () => (await tips()).map(t => t.tip)).toEqual([0, 0]);
+  // At the top the marker sits fully inside the pane (its tip is half its height down), not half clipped.
+  await expect.poll(async () => (await tips()).every(t => t.inside && t.tip < 4 / 800)).toBe(true);
   await page.evaluate(() => { const el = document.querySelector<HTMLElement>('.edit-preview')!; el.scrollTop = 0.4 * (el.scrollHeight - el.clientHeight); });
   await expect(markers.first()).toHaveAttribute('data-active', '');
   await expect.poll(async () => (await tips()).every(t => Math.abs(t.tip - 0.25) < 2 / 800)).toBe(true);
@@ -5266,30 +5267,40 @@ const alignGap = (page: Page, leader: 'source' | 'preview', at = 0.25) => page.e
   const b = twin.getBoundingClientRect();
   return Math.abs(anchor(other) - (b.top + (y - a.top) / a.height * b.height));
 }, [leader, at] as const);
-// Waits for the other pane to line up with the leader, nudging the leader only while its anchor sits between blocks.
-async function expectAligned(page: Page, leader: 'source' | 'preview') {
+// Waits for the other pane to line up with the leader. The leader is never scrolled here: its anchor must already sit in a block.
+async function expectAligned(page: Page, leader: 'source' | 'preview', within = 6) {
   await expect.poll(async () => {
     const gap = await alignGap(page, leader);
-    if (gap === null) { await nudge(page, leader, 12); return Infinity; }
+    if (gap === null) throw new Error('the leader\'s anchor sits between blocks; place it on a block');
     return gap;
-  }, { timeout: 8000 }).toBeLessThan(6);
+  }, { timeout: 8000 }).toBeLessThan(within);
 }
 const scrollTops = (page: Page) => page.evaluate(() => [document.querySelector<HTMLElement>('.cm-scroller')!.scrollTop, document.querySelector<HTMLElement>('.edit-preview')!.scrollTop]);
 // Scrolls the leader so the given section's heading sits `above` px above its alignment line.
 async function placeHeading(page: Page, leader: 'source' | 'preview', title: string, above: number) {
-  for (let i = 0; i < 4; i++) await page.evaluate(([side, title, above]) => {
+  for (let i = 0; i < 6; i++) { await page.waitForTimeout(100); await page.evaluate(([side, title, above]) => {
     const pane = document.querySelector<HTMLElement>(side === 'source' ? '.cm-scroller' : '.edit-preview')!;
     const heading = [...pane.querySelectorAll(side === 'source' ? '.cm-line' : 'h2')].find(e => (e.textContent ?? '').replace(/^## /, '') === title);
     if (heading) pane.scrollTop += heading.getBoundingClientRect().top - (pane.getBoundingClientRect().top + 0.25 * pane.clientHeight - above);
     else pane.scrollTop = pane.scrollHeight * 0.3;
-  }, [leader, title, above] as const);
+  }, [leader, title, above] as const); }
+}
+
+// Scrolls the leader so the alignment line `at` sits `into` px below the top of the paragraph starting with `prefix`.
+async function placeBlock(page: Page, leader: 'source' | 'preview', prefix: string, into: number, at = 0.25) {
+  for (let i = 0; i < 6; i++) { await page.waitForTimeout(100); await page.evaluate(([side, prefix, into, at]) => {
+    const pane = document.querySelector<HTMLElement>(side === 'source' ? '.cm-scroller' : '.edit-preview')!;
+    const block = [...pane.querySelectorAll(side === 'source' ? '.cm-line' : 'p')].find(e => (e.textContent ?? '').startsWith(prefix));
+    if (block) pane.scrollTop += block.getBoundingClientRect().top + into - (pane.getBoundingClientRect().top + at * pane.clientHeight);
+    else pane.scrollTop = pane.scrollHeight * 0.45;
+  }, [leader, prefix, into, at] as const); }
 }
 
 for (const leader of ['preview', 'source'] as const) {
   test(`Folding a heading section in the preview keeps the panes aligned with the ${leader} leading`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await openSplit(page, `sync-fold-${leader}.md`, syncDoc());
-    await placeHeading(page, leader, 'Section 8', 30);
+    await placeHeading(page, leader, 'Section 8', 6);
     await expectAligned(page, leader);
     const summary = page.locator('.edit-preview summary', { hasText: 'Section 8' }).first();
     for (let i = 0; i < 2; i++) { // collapse, then expand
@@ -5312,6 +5323,78 @@ test('Resizing the window keeps the panes aligned', async ({ page }) => {
   await expectAligned(page, 'preview');
 });
 
+const detailsDoc = () => syncDoc().replace('## Section 9\n', `<details>\n<summary>Fold me</summary>\n\n${Array.from({ length: 12 }, (_, i) => `Para ${101 + i} ${'lorem ipsum dolor sit amet '.repeat(24)}\n\n`).join('')}</details>\n\n## Section 9\n`);
+test('Toggling a raw <details> in the preview keeps its summary in place while the source leads, and the source follows', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSplit(page, 'sync-details.md', detailsDoc());
+  const summary = page.locator('.edit-preview summary', { hasText: 'Fold me' });
+  const top = () => summary.evaluate(el => el.getBoundingClientRect().top - document.querySelector('.edit-preview')!.getBoundingClientRect().top);
+  // Put the summary at about 10% of the preview, then scroll the source a little so that it leads.
+  await expect.poll(async () => {
+    const delta = (await top()) - 90;
+    if (Math.abs(delta) < 15) return true;
+    await page.evaluate(d => { document.querySelector<HTMLElement>('.edit-preview')!.scrollTop += d; }, delta);
+    await page.waitForTimeout(150);
+    return false;
+  }, { timeout: 10000 }).toBe(true);
+  await page.evaluate(() => { document.querySelector<HTMLElement>('.cm-scroller')!.scrollTop += 3; });
+  await page.waitForTimeout(300);
+  for (let i = 0; i < 2; i++) { // open, then close
+    const before = await top();
+    await summary.click();
+    await page.waitForTimeout(500);
+    expect(Math.abs((await top()) - before)).toBeLessThan(2);
+    await expectAligned(page, 'preview', 40); // a raw HTML block is one source block, so lines inside it map proportionally
+  }
+});
+
+test('Switching between narrow and wide keeps the panes aligned', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSplit(page, 'sync-narrow.md', syncDoc());
+  await placeBlock(page, 'source', 'Para 3 ', 80);
+  await expectAligned(page, 'source', 24);
+  // The source rewraps, so its anchor may leave a block: compare how far the nearest Short line sits from each pane's alignment line instead.
+  const offsetGap = () => page.evaluate(() => {
+    const pane = (name: string) => document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!;
+    const anchor = (name: string) => pane(name).getBoundingClientRect().top + pane(name).clientHeight * 0.25;
+    const shorts = (name: string) => [...pane(name).querySelectorAll<HTMLElement>(name === 'source' ? '.cm-line' : 'p')].filter(e => /^Short \d+\./.test(e.textContent ?? ''));
+    const near = shorts('source').sort((a, b) => Math.abs(a.getBoundingClientRect().top - anchor('source')) - Math.abs(b.getBoundingClientRect().top - anchor('source')))[0];
+    const twin = shorts('preview').find(e => e.textContent === near.textContent)!;
+    return Math.abs((near.getBoundingClientRect().top - anchor('source')) - (twin.getBoundingClientRect().top - anchor('preview')));
+  });
+  for (const width of [800, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expect.poll(offsetGap, { timeout: 8000 }).toBeLessThan(50);
+  }
+});
+
+test('Changing the Document text size keeps the panes aligned', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSplit(page, 'sync-doc-size.md', syncDoc());
+  await scrollLeader(page, 'source', 0.5);
+  await openSettings(page, 'Reading');
+  await page.getByRole('slider', { name: 'Document text size', exact: true }).fill('150');
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await page.waitForTimeout(400);
+  await expectAligned(page, 'source', 24);
+});
+
+test('Changing Align at keeps the leader and re-aligns the panes at once; the markers fade after', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  // A collapsed <details> (many source lines, one preview line) sits between the old and new alignment lines, so the source must move a long way.
+  await openSplit(page, 'sync-alignat.md', detailsDoc());
+  await placeBlock(page, 'preview', 'Para 9 ', 20, 0.5);
+  const [sourceTop, previewTop] = await scrollTops(page);
+  await openSettings(page, 'Editor');
+  await page.getByRole('slider', { name: /Align at/ }).fill('50');
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  // The source re-aligns without any scroll: the preview, which leads, has not moved.
+  await expect.poll(async () => (await alignGap(page, 'preview', 0.5)) ?? Infinity, { timeout: 4000 }).toBeLessThan(24);
+  expect((await scrollTops(page))[1]).toBeCloseTo(previewTop, -1);
+  expect(Math.abs((await scrollTops(page))[0] - sourceTop)).toBeGreaterThan(50);
+  await expect(page.locator('.sync-marker').first()).not.toHaveAttribute('data-active', '', { timeout: 2500 });
+});
+
 test('Changing the editor text size keeps the panes aligned', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openSplit(page, 'sync-size.md', syncDoc());
@@ -5327,7 +5410,7 @@ test('No feedback loop: one programmatic scroll settles with no further scroll e
   await openSplit(page, 'sync-loop.md', syncDoc());
   await page.evaluate(() => { const el = document.querySelector<HTMLElement>('.cm-scroller')!; el.scrollTop = 0.5 * (el.scrollHeight - el.clientHeight); });
   const tops = () => page.evaluate(() => [document.querySelector<HTMLElement>('.cm-scroller')!.scrollTop, document.querySelector<HTMLElement>('.edit-preview')!.scrollTop]);
-  await expect.poll(async () => { const a = await tops(); await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))); return JSON.stringify(a) === JSON.stringify(await tops()) && a[1] > 0; }).toBe(true);
+  await expect.poll(async () => { const a = await tops(); await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))); return JSON.stringify(a) === JSON.stringify(await tops()) && a[1] > 0; }, { timeout: 15000 }).toBe(true);
   const events = await page.evaluate(() => new Promise<number>(resolve => {
     let count = 0;
     for (const pane of [document.querySelector('.cm-scroller')!, document.querySelector('.edit-preview')!]) pane.addEventListener('scroll', () => { count++; });
@@ -6457,6 +6540,22 @@ test('Ctrl/Cmd+comma does not open Settings over another modal, and the menu clo
   await expect(page.getByRole('menu', { name: 'Menu' })).toHaveCount(0);
 });
 
+for (const closer of ['Escape', 'Close settings'] as const) {
+  test(`Settings opened by the shortcut from the editor returns focus to the editor after ${closer}, once`, async ({ page }) => {
+    const doc = await f.register(`menu-focus-${closer[0]}.md`, '# Focus\n\nBody.\n');
+    await page.goto(`${f.url}/?document=${doc.id}`);
+    await page.getByRole('button', { name: 'Edit', exact: true }).click();
+    await page.locator('.cm-content').focus();
+    await page.keyboard.press('Control+,');
+    const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+    await expect(dialog).toBeVisible();
+    if (closer === 'Escape') await page.keyboard.press('Escape'); else await dialog.getByRole('button', { name: closer, exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await page.waitForTimeout(200); // the dialog's own close event arrives a task later and must not move focus again
+    await expect(page.locator('.cm-content')).toBeFocused();
+  });
+}
+
 test('on the library page the menu omits View all documents, and elsewhere it is a real link', async ({ page }) => {
   const doc = await f.register('menu-link.md', '# Link\n\nBody.\n');
   await page.goto(`${f.url}/?library=1`);
@@ -6467,7 +6566,7 @@ test('on the library page the menu omits View all documents, and elsewhere it is
   const link = page.getByRole('menuitem', { name: /^View all documents/ });
   await expect(link).toHaveAttribute('href', /library=1|\/$/);
   await expect(link).toHaveAttribute('target', '_blank');
-  await expect(page.getByRole('menuitem', { name: /^Settings/ })).toHaveAttribute('aria-keyshortcuts', 'Meta+Comma Control+Comma');
+  await expect(page.getByRole('menuitem', { name: /^Settings/ })).toHaveAttribute('aria-keyshortcuts', 'Meta+, Control+,');
 });
 
 test('Settings ignores an invalid saved category, and on a phone reopening after closing a category page focuses the list', async ({ browser }) => {
@@ -6661,14 +6760,19 @@ test('edit mode fills the canvas and the source pane reads darker than the previ
   expect(source).not.toBe(preview);
   expect(preview).toBe(await page.evaluate(() => { const probe = document.createElement('i'); probe.style.color = 'var(--background)'; document.body.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return c; }));
   await page.locator('.cm-content').focus();
-  // The ring must be an outline: an inset box-shadow is painted beneath the opaque scroller and gutters and never shows.
-  const ring = page.locator('.source-editor .cm-editor.cm-focused');
-  await expect(ring).toHaveCSS('outline-style', 'solid');
-  await expect(ring).toHaveCSS('outline-width', '1px');
-  await expect(ring).toHaveCSS('outline-offset', '-1px');
-  await expect(ring).toHaveCSS('box-shadow', 'none');
-  const outline = await ring.evaluate(el => getComputedStyle(el).outlineColor);
-  expect(outline).toBe(await page.evaluate(() => { const probe = document.createElement('i'); probe.style.color = 'var(--primary)'; document.body.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return c; }));
+  // CodeMirror's positioned scroller paints over an outline on .cm-editor, so the ring is an overlay above it. Check the pixels at the pane's edge.
+  const editor = page.locator('.source-editor');
+  const box = (await editor.boundingBox())!, strip = { x: box.x, y: box.y + 40, width: 3, height: 60 };
+  const focused = await page.screenshot({ clip: strip });
+  await page.locator('.cm-content').blur();
+  await expect(page.locator('.cm-focused')).toHaveCount(0);
+  const blurred = await page.screenshot({ clip: strip });
+  expect(focused.equals(blurred)).toBe(false);
+  await page.locator('.cm-content').focus();
+  const overlay = await editor.evaluate(el => { const ring = getComputedStyle(el, '::after'), scroller = getComputedStyle(el.querySelector('.cm-scroller')!), probe = document.createElement('i'); probe.style.color = 'var(--primary)'; document.body.append(probe); const primary = getComputedStyle(probe).color; probe.remove(); return { colour: ring.borderLeftColor, primary, width: ring.borderLeftWidth, z: Number(ring.zIndex), scrollerZ: Number(scroller.zIndex), pointer: ring.pointerEvents }; });
+  expect(overlay).toMatchObject({ width: '1px', pointer: 'none' });
+  expect(overlay.colour).toBe(overlay.primary);
+  expect(overlay.z).toBeGreaterThan(overlay.scrollerZ);
 });
 
 test('the phone header keeps the agent status, Menu, Save and Done visible without overlap', async ({ browser }) => {

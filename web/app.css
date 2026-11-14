@@ -1254,7 +1254,9 @@ pre code.pn-code[data-keep-layout] {
 .source-editor .cm-editor { height: 100%; background: var(--editor-bg); color: var(--foreground); }
 .source-editor :is(.cm-scroller, .cm-content, .cm-gutters) { background: var(--editor-bg); }
 /* An outline paints above the opaque scroller and gutters; an inset shadow would be hidden beneath them. */
-.source-editor .cm-editor.cm-focused { outline: 1px solid var(--primary); outline-offset: -1px; }
+.source-editor { position: relative; }
+/* The ring is an overlay: CodeMirror's positioned scroller paints over an outline or shadow on .cm-editor. */
+.source-editor:focus-within::after { content: ""; position: absolute; inset: 0; z-index: 3; pointer-events: none; border: 1px solid var(--primary); }
 .source-editor .cm-scroller { overflow: auto; padding-left: 10px; font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: calc(13px * var(--sidecar-editor-scale, 1)); line-height: 1.6; }
 .source-editor .cm-content { padding: 16px 18px; caret-color: var(--foreground); }
 .source-editor .cm-cursor { border-left-color: var(--foreground); }
