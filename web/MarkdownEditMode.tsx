@@ -55,7 +55,7 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
   disk.current = { markdown: diskMarkdown, version: diskVersion };
   // The disk version a Save anyway overrides, and the app's disk version when the conflict was reported.
   const conflict = useRef({ version: '', seen: '' });
-  const view = useRef<EditorView | null>(null), previewRoot = useRef<HTMLElement | null>(null), previewScroller = useRef<HTMLDivElement | null>(null), previewRanges = useRef(new Map<string, Range[]>());
+  const view = useRef<EditorView | null>(null), previewRoot = useRef<HTMLElement | null>(null), previewScroller = useRef<HTMLDivElement | null>(null), markers = useRef<Record<'source' | 'preview', HTMLElement | null>>({ source: null, preview: null }), previewRanges = useRef(new Map<string, Range[]>());
   const synced = useRef(markdown), baseVersion = useRef(version), saving = useRef(false), dirtyNow = useRef(false);
   const [dirty, setDirty] = useState(false), [asking, setAsking] = useState(false), [isSaving, setSaving] = useState(false), [formatting, setFormatting] = useState(false), isFormatting = useRef(false);
   const choose = useRef<((choice: Choice) => void) | null>(null);
@@ -239,7 +239,7 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
   const quoteKey = JSON.stringify(quotes);
   useEffect(() => { paint(); }, [mountId, quoteKey]);
   // The panes scroll together; the one not shown (narrow) stays laid out and keeps following.
-  useEffect(() => view.current && previewScroller.current ? syncScroll(view.current, previewScroller.current, () => scrollSyncRef.current / 100) : undefined, [mountId]);
+  useEffect(() => view.current && previewScroller.current ? syncScroll(view.current, previewScroller.current, () => scrollSyncRef.current / 100, markers.current) : undefined, [mountId, scrollSyncPosition]);
   // Open at the reading position: the preview takes it and the source follows.
   useEffect(() => {
     if (anchor <= 0) return;
@@ -269,9 +269,11 @@ export function MarkdownEditMode({ documentId, linkBase, markdown, version, disk
       )}
       <div className="edit-panes">
         <div className="edit-pane" data-hidden={narrow && pane !== 'source' || undefined}>
+          <span className="sync-marker" aria-hidden="true" ref={node => { markers.current.source = node; }} />
           <SourceEditor key={mountId} initial={seed} extensions={extensions} onChange={typed} viewRef={view} />
         </div>
         <div className="edit-pane" data-hidden={narrow && pane !== 'preview' || undefined}>
+          <span className="sync-marker" aria-hidden="true" ref={node => { markers.current.preview = node; }} />
           <EditPreview text={preview} documentId={documentId} linkBase={linkBase} quotes={quotes} version={preview === synced.current ? baseVersion.current : undefined}
             rootRef={previewRoot} scrollRef={previewScroller} rangesRef={previewRanges} onRange={previewRange} onOpenQuote={id => latest.current.onOpenQuote(id)} />
         </div>

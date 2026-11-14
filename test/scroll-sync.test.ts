@@ -8,18 +8,20 @@ const segments: Segment[] = [
   { source: [300, 400], preview: [240, 300] },
 ];
 
-test('anchorFraction is the chosen fraction mid-document and eases to the edges in the first and last screen', () => {
+test('anchorFraction is the chosen fraction mid-document and eases to the edges only as far as the anchor must travel', () => {
   // scrollHeight 1000, clientHeight 200: max scroll 800.
   for (const f of [0.25, 0.5]) {
     assert.equal(anchorFraction(0, 1000, 200, f), 0);
-    assert.equal(anchorFraction(100, 1000, 200, f), f / 2);
-    assert.equal(anchorFraction(200, 1000, 200, f), f);
+    assert.equal(anchorFraction(f * 100, 1000, 200, f), f / 2);
+    assert.equal(anchorFraction(f * 200, 1000, 200, f), f);
+    assert.equal(anchorFraction(f * 200 + 1, 1000, 200, f), f);
     assert.equal(anchorFraction(400, 1000, 200, f), f);
-    assert.equal(anchorFraction(600, 1000, 200, f), f);
-    assert.equal(anchorFraction(700, 1000, 200, f), 1 - (1 - f) / 2);
+    assert.equal(anchorFraction(800 - (1 - f) * 200, 1000, 200, f), f);
+    assert.equal(anchorFraction(800 - (1 - f) * 100, 1000, 200, f), 1 - (1 - f) / 2);
     assert.equal(anchorFraction(800, 1000, 200, f), 1);
   }
   assert.equal(anchorFraction(0, 100, 200, 0.25), 0.25); // fits in the viewport
+  assert.equal(anchorFraction(746, 4000, 851, 0.25), 0.25); // the demo document: already past the zone
 });
 
 test('anchorFraction is continuous and monotonic, including in a document shorter than two screens', () => {
@@ -93,6 +95,17 @@ test('anchorFraction and targetScrollTop hold at the extremes of f and in docume
   // Zone = max / 2 (under two screens), and a target shorter than its viewport.
   const wide: Segment[] = [{ source: [0, 350], preview: [0, 100] }];
   assert.equal(targetScrollTop(wide, 'source', 150, { scrollHeight: 350, clientHeight: 200 }, { scrollHeight: 100, clientHeight: 200 }, 0.25), 0);
-  assert.equal(anchorFraction(75, 350, 200, 0.25), 0.25);
-  assert.equal(anchorFraction(37.5, 350, 200, 0.25), 0.125);
+  // max 150 < clientHeight: the zones shrink to 0.75 of it, top 37.5 and bottom 112.5, meeting at 37.5 from the top.
+  assert.equal(anchorFraction(37.5, 350, 200, 0.25), 0.25);
+  assert.equal(anchorFraction(18.75, 350, 200, 0.25), 0.125);
+});
+
+test('anchorY is strictly increasing and targetScrollTop round-trips across f and document sizes', () => {
+  for (const f of [0, 0.25, 0.5, 1]) for (const [scrollHeight, clientHeight] of [[1000, 200], [350, 200], [201, 200]]) {
+    const max = scrollHeight - clientHeight;
+    let last = -Infinity;
+    for (let i = 0; i <= 200; i++) { const y = anchorY(i * max / 200, scrollHeight, clientHeight, f); assert.ok(y > last, `f ${f} ${scrollHeight}`); last = y; }
+    const one: Segment[] = [{ source: [0, scrollHeight], preview: [0, scrollHeight] }], h = { scrollHeight, clientHeight };
+    for (const t of [0, max * 0.1, max / 2, max * 0.9, max]) assert.ok(Math.abs(targetScrollTop(one, 'source', t, h, h, f) - t) < 1e-6, `f ${f} t ${t}`);
+  }
 });

@@ -1237,7 +1237,7 @@ pre code.pn-code[data-keep-layout] {
 .markdown-edit-mode { isolation: isolate; display: flex; flex-direction: column; flex: 1; min-height: 0; background: var(--background); overflow: hidden; }
 .edit-panes { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
 .markdown-edit-mode[data-narrow] .edit-panes { grid-template-columns: minmax(0, 1fr); }
-.edit-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.edit-pane { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 /* The pane that is not shown stays laid out under the other, so the two keep scrolling together. */
 .markdown-edit-mode[data-narrow] .edit-pane { grid-area: 1 / 1; }
 .edit-pane[data-hidden] { visibility: hidden; pointer-events: none; }
@@ -1247,11 +1247,15 @@ pre code.pn-code[data-keep-layout] {
 .edit-pane-toggle button[aria-pressed="true"] { background: var(--muted); color: var(--primary); }
 .source-editor { flex: 1; min-height: 0; }
 .source-editor { background: var(--editor-bg); }
+/* A small triangle on each pane's left edge; its tip is the line the panes align on. Moved by syncScroll. */
+.sync-marker { position: absolute; z-index: 2; left: 0; top: 0; width: 0; height: 0; border-left: 7px solid var(--primary); border-top: 4px solid transparent; border-bottom: 4px solid transparent; opacity: 0.35; transition: opacity 0.3s; pointer-events: none; }
+.sync-marker[data-active] { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .sync-marker { transition: none; } }
 .source-editor .cm-editor { height: 100%; background: var(--editor-bg); color: var(--foreground); }
 .source-editor :is(.cm-scroller, .cm-content, .cm-gutters) { background: var(--editor-bg); }
 /* An outline paints above the opaque scroller and gutters; an inset shadow would be hidden beneath them. */
 .source-editor .cm-editor.cm-focused { outline: 1px solid var(--primary); outline-offset: -1px; }
-.source-editor .cm-scroller { overflow: auto; font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: calc(13px * var(--sidecar-editor-scale, 1)); line-height: 1.6; }
+.source-editor .cm-scroller { overflow: auto; padding-left: 10px; font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: calc(13px * var(--sidecar-editor-scale, 1)); line-height: 1.6; }
 .source-editor .cm-content { padding: 16px 18px; caret-color: var(--foreground); }
 .source-editor .cm-cursor { border-left-color: var(--foreground); }
 .source-editor .cm-selectionBackground, .source-editor .cm-focused .cm-selectionBackground { background: color-mix(in srgb, var(--primary) 30%, transparent) !important; }

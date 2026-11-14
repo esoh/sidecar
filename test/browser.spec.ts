@@ -5204,6 +5204,52 @@ test('Scroll sync aligns at 25% by default: the same block sits a quarter down b
   await scrollLeader(page, 'source', 0.6, 0.5);
 });
 
+const targetDoc = () => `${Array.from({ length: 2 }, (_, i) => `## Section ${i + 1}\n\nPara ${i + 1} ${'lorem ipsum dolor sit amet '.repeat(24)}\n\n`).join('')}<details>\n<summary>Hidden</summary>\n\n${Array.from({ length: 6 }, (_, i) => `hidden line ${i + 1}`).join('\n\n')}\n\n</details>\n\n## Target\n\nTarget body.\n\n${Array.from({ length: 14 }, (_, i) => `## After ${i + 1}\n\nPara ${i + 1} ${'lorem ipsum dolor sit amet '.repeat(24)}\n\n`).join('')}`;
+// Offset (px) of the Target heading below the point a quarter down each pane, then scrolls `side` by that much and repeats.
+const targetOffset = (page: Page, side: 'source' | 'preview') => page.evaluate(name => {
+  const pane = document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!;
+  const heading = name === 'source' ? [...pane.querySelectorAll('.cm-line')].find(line => line.textContent === '## Target')! : [...pane.querySelectorAll('h2')].find(h => h.textContent?.trim() === 'Target')!;
+  if (!heading) return NaN;
+  return heading.getBoundingClientRect().top - (pane.getBoundingClientRect().top + 0.25 * pane.clientHeight);
+}, side);
+
+for (const [leader, follower] of [['preview', 'source'], ['source', 'preview']] as const) {
+  test(`Scroll sync stays aligned across a collapsed block: heading at 25% in the ${leader} sits at 25% in the ${follower}`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openSplit(page, `sync-target-${leader}.md`, targetDoc());
+    await expect.poll(async () => {
+      await page.evaluate(name => { const el = document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!; el.scrollTop = 0.45 * (el.scrollHeight - el.clientHeight); }, leader);
+      return await targetOffset(page, leader);
+    }).not.toBeNaN();
+    for (let i = 0; i < 3; i++) {
+      const offset = await targetOffset(page, leader);
+      await page.evaluate(([name, d]) => { document.querySelector<HTMLElement>(name === 'source' ? '.cm-scroller' : '.edit-preview')!.scrollTop += d; }, [leader, offset] as const);
+    }
+    expect(Math.abs(await targetOffset(page, leader))).toBeLessThan(2);
+    await expect.poll(async () => Math.abs(await targetOffset(page, follower))).toBeLessThan(6);
+  });
+}
+
+test('Alignment markers sit on each pane\'s left edge at the alignment line, light up while scrolling and fade after', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSplit(page, 'sync-marker.md', targetDoc());
+  const markers = page.locator('.sync-marker');
+  await expect(markers).toHaveCount(2);
+  for (const marker of await markers.all()) { await expect(marker).toHaveAttribute('aria-hidden', 'true'); await expect(marker).toHaveCSS('pointer-events', 'none'); }
+  // The tip (right edge, vertical middle) relative to each pane's top, and whether the marker overlaps the source text.
+  const tips = () => page.evaluate(() => [['.cm-scroller', '.edit-pane:has(.cm-scroller) .sync-marker'], ['.edit-preview', '.edit-pane:has(.edit-preview) .sync-marker']].map(([pane, marker]) => {
+    const p = document.querySelector(pane)!.getBoundingClientRect(), m = document.querySelector(marker)!.getBoundingClientRect(), c = document.querySelector('.cm-content')!.getBoundingClientRect();
+    return { tip: (m.top + m.height / 2 - p.top) / p.height, overlapsText: pane === '.cm-scroller' && m.right > c.left && m.left < c.right };
+  }));
+  await expect.poll(async () => (await tips()).map(t => t.tip)).toEqual([0, 0]);
+  await page.evaluate(() => { const el = document.querySelector<HTMLElement>('.edit-preview')!; el.scrollTop = 0.4 * (el.scrollHeight - el.clientHeight); });
+  await expect(markers.first()).toHaveAttribute('data-active', '');
+  await expect.poll(async () => (await tips()).every(t => Math.abs(t.tip - 0.25) < 2 / 800)).toBe(true);
+  expect((await tips()).some(t => t.overlapsText)).toBe(false);
+  await expect(markers.first()).not.toHaveAttribute('data-active', '', { timeout: 2500 });
+  await expect(markers.first()).toHaveCSS('opacity', '0.35');
+});
+
 test('No feedback loop: one programmatic scroll settles with no further scroll events', async ({ page }) => {
   await openSplit(page, 'sync-loop.md', syncDoc());
   await page.evaluate(() => { const el = document.querySelector<HTMLElement>('.cm-scroller')!; el.scrollTop = 0.5 * (el.scrollHeight - el.clientHeight); });
