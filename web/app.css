@@ -1108,7 +1108,8 @@ pre code.pn-code[data-keep-layout] {
   font-size: 12px;
 }
 /* Scale the renderer together, including code and math, without resizing app controls. */
-.document-card > .plannotator-content {
+.document-card > .plannotator-content,
+.edit-preview-article > .plannotator-content {
   zoom: var(--sidecar-document-scale, 1);
 }
 .message .plannotator-content {

@@ -5368,14 +5368,18 @@ test('Switching between narrow and wide keeps the panes aligned', async ({ page 
   }
 });
 
-test('Changing the Document text size keeps the panes aligned', async ({ page }) => {
+test('The preview follows the Document text size and the panes stay aligned', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openSplit(page, 'sync-doc-size.md', syncDoc());
   await scrollLeader(page, 'source', 0.5);
+  const previewHeight = () => page.locator('.edit-preview').evaluate(el => el.scrollHeight);
+  const before = await previewHeight();
   await openSettings(page, 'Reading');
   await page.getByRole('slider', { name: 'Document text size', exact: true }).fill('150');
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
   await page.waitForTimeout(400);
+  await expect(page.locator('.edit-preview .plannotator-content')).toHaveCSS('zoom', '1.5');
+  expect(await previewHeight()).toBeGreaterThan(before * 1.3);
   await expectAligned(page, 'source', 24);
 });
 
